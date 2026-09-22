@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +31,8 @@ import device_config as _device_config  # noqa: E402
 
 _device_config.load_and_apply()
 
-DEFAULT_SERVER = "https://solo2.jzxhnh.com"
-DEFAULT_KEYCHAIN_SERVICE = "solo2-jzxhnh"
+DEFAULT_SERVER = os.environ.get("SOLO2_SERVER", "").strip().rstrip("/")
+DEFAULT_KEYCHAIN_SERVICE = os.environ.get("SOLOSB_SOLO2_KEYCHAIN_SERVICE", "").strip()
 TRACE_FIELDS = {"a_trace_file", "b_trace_file"}
 VIDEO_FIELDS = {"a_screencast", "b_screencast"}
 UPLOAD_LABELS = {
@@ -129,12 +130,20 @@ def credentials(service: str) -> tuple[str, str]:
     return cookie, csrf
 
 
-def api_headers(cookie: str, csrf: str, *, json_body: bool = False) -> dict[str, str]:
+def api_headers(cookie: str, csrf: str, *, json_body: bool = False,
+                url: str = "") -> dict[str, str]:
+    base = ""
+    if url:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme and parts.netloc:
+            base = f"{parts.scheme}://{parts.netloc}"
+    if not base:
+        base = (DEFAULT_SERVER or os.environ.get("SOLO2_SERVER", "").strip()).rstrip("/")
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Cookie": cookie,
-        "Origin": DEFAULT_SERVER,
-        "Referer": DEFAULT_SERVER + "/app/gsb/submit",
+        "Origin": base,
+        "Referer": base + "/app/gsb/submit",
         "User-Agent": "gsb-submit-api/1.0",
         "X-CSRF-Token": csrf,
     }
@@ -156,7 +165,7 @@ def request_json(
     response = requests.request(
         method,
         url,
-        headers=api_headers(cookie, csrf, json_body=payload is not None),
+        headers=api_headers(cookie, csrf, json_body=payload is not None, url=url),
         data=body,
         timeout=timeout,
     )
@@ -318,7 +327,7 @@ def upload_file(
     with path.open("rb") as stream:
         response = requests.post(
             url,
-            headers=api_headers(cookie, csrf),
+            headers=api_headers(cookie, csrf, url=url),
             data=data,
             files={"file": (path.name, stream, content_type)},
             timeout=timeout,

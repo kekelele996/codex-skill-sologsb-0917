@@ -7,7 +7,7 @@
 1. 困难题默认单 attempt 超时为 7200 秒，避免 3600 秒过早重启；
 2. 先建立本地初始快照，再拉取 N 份隔离源码（单 Key 默认 2），目录固定为
    `source/candidates/candidate-1..N`；候选目录永不改名。
-3. `run --side both --candidates 2 --base-url https://llm2.jzxhnh.com` 让 N 个候选在独立容器中并行无头执行；默认 Base URL 为 `llm2`。
+3. `run --side both --candidates 2` 让 N 个候选在独立容器中并行无头执行；Base URL 取设备配置的 `claude.baseUrl`。
    前两个干净完成者按完成顺序映射为逻辑 A/B，其余候选立即停止。
 4. 每个候选最多六次实际尝试（含首次）。模型异常后从本地初始快照重新 clone，
    并创建新容器、新 Claude home、新 SessionID 从提示词重开；自动重连不算一次新尝试。

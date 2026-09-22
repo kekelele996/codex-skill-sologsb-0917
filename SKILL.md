@@ -22,7 +22,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 困难题默认单 attempt 超时使用 7200 秒；先区分“仍在推进”与“已失败”，不要因自动重连次数频繁重启。
 - 单 Key 并发安全：`run` 默认全局最多同时 4 个 Claude 容器，按“两个任务、每个任务两个候选”共享名额。候选启动前检查同镜像容器；预计当前容器数加本批候选数超过 4 时等待。只有确认 Key 容量后才允许显式提高上限。
-- Anthropic 兼容中转站默认使用 `https://llm2.jzxhnh.com`，可在 `run` 中传 `--base-url`，或通过 `SOLOSB_ANTHROPIC_BASE_URL` 覆盖；运行器会校验容器实际 Base URL。
+- Anthropic 兼容中转站地址取自设备配置 `claude.baseUrl`，可在 `run` 中传 `--base-url`，或通过 `SOLOSB_ANTHROPIC_BASE_URL` 覆盖；运行器会校验容器实际 Base URL。
 - 网关 429 `max_parallel_requests` 属于准入失败：正式候选运行前先等待最小 `/v1/messages` 探测成功；发生最终 429 后不要立即重启新容器，先等待 Key 恢复。恢复后仍按红线使用新容器、新 Claude home 和新 SessionID，实际尝试次数照记。
 - pnpm fresh clone 固定按“安装失败留证 → `pnpm approve-builds --all` → 再次安装 → 构建”顺序处理。
 - Web 录屏先确认默认 Tab、当前用户和重复卡片选择器；同名操作按钮使用卡片范围或 `.last()`；同时清除 Chrome 登录/同步/密码/通知等浮层与终端多网卡干扰行。
@@ -209,7 +209,7 @@ python3 scripts/sologsb.py init --workdir DIR --task-name NAME \
   [--source PATH | --package ZIP | --from-platform --project-code CODE]
 python3 scripts/sologsb.py prompt --task-root ROOT --task-type TYPE \
   --difficulty 困难 --candidate FILE --review FILE
-python3 scripts/sologsb.py run --task-root ROOT --side both --candidates 2 --attempts 6 --base-url https://llm2.jzxhnh.com
+python3 scripts/sologsb.py run --task-root ROOT --side both --candidates 2 --attempts 6 --base-url https://<配置的 claude.baseUrl>
 python3 scripts/sologsb.py github-init --task-root ROOT  # 候选映射完成后才可执行
 python3 scripts/sologsb.py run --task-root ROOT --side A --force  # 重跑已映射候选
 python3 scripts/sologsb.py run --task-root ROOT --side B --force  # 重跑已映射候选

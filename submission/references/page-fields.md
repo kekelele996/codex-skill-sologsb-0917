@@ -1,6 +1,6 @@
 # GSB 提交页现场字段（2026-09-18 只读核对）
 
-页面：`https://solo2.jzxhnh.com/app/gsb/submit`
+页面：设备配置 `solo2.baseUrl` 下的 `/app/gsb/submit`
 
 ## 页面状态
 

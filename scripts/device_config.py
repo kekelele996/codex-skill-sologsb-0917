@@ -23,7 +23,7 @@ DEFAULT_CONFIG_PATH = Path.home() / ".codex" / "sologsb" / "config.json"
 # 每一项：配置路径 -> (环境变量名, 代码默认值)
 FIELDS: dict[str, tuple[str | None, str]] = {
     "claude.apiKey": ("SOLOSB_CLAUDE_KEY", ""),
-    "claude.baseUrl": ("SOLOSB_ANTHROPIC_BASE_URL", "https://llm2.jzxhnh.com"),
+    "claude.baseUrl": ("SOLOSB_ANTHROPIC_BASE_URL", ""),
     "claude.model": ("SOLOSB_MODEL", "auto_model/urm"),
     "claude.image": ("SOLOSB_DOCKER_IMAGE", "adminfather/benzhi-claude-code:20260916-toolchains-v2"),
     "claude.contextWindow": ("SOLOSB_CONTEXT_WINDOW", "1000000"),
@@ -33,12 +33,14 @@ FIELDS: dict[str, tuple[str | None, str]] = {
     "manager.username": ("SOLO_MANAGER_USERNAME", ""),
     "manager.password": (None, ""),
     "manager.token": ("SOLO_MANAGER_TOKEN", ""),
-    "solo2.baseUrl": ("SOLO2_SERVER", "https://solo2.jzxhnh.com"),
+    "solo2.baseUrl": ("SOLO2_SERVER", ""),
     "solo2.username": (None, ""),
     "solo2.password": (None, ""),
     "solo2.cookie": ("SOLO_QA_COOKIE", ""),
     "solo2.csrf": ("SOLO_QA_CSRF", ""),
     "solo2.approver": ("SOLOGBS_AUTO_APPROVER", "auto"),
+    # 钥匙串条目名也只从设备配置读，技能包里不留具体条目名
+    "solo2.keychainService": ("SOLOSB_SOLO2_KEYCHAIN_SERVICE", ""),
     "github.token": ("GITHUB_TOKEN", ""),
     "github.username": ("SOLOSB_GITHUB_USERNAME", ""),
     "github.proxyHttp": ("SOLOSB_GITHUB_PROXY", "127.0.0.1:17890"),

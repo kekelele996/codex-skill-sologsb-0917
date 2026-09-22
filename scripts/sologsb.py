@@ -533,7 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--base-url",
         default="",
-        help="Anthropic 兼容中转站 Base URL；默认 https://llm2.jzxhnh.com",
+        help="Anthropic 兼容中转站 Base URL；默认取设备配置的 claude.baseUrl",
     )
     run_parser.add_argument("--force", action="store_true", help="丢弃已映射 A/B 候选的现有尝试并重跑；跨多次 force 必须手动累计实际次数")
     visibility = run_parser.add_mutually_exclusive_group()
@@ -582,8 +582,9 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--execute", action="store_true", help="真正上传并提交；默认只做审核和 dry-run")
     submit.add_argument("--skip-preflight", action="store_true")
     submit.add_argument("--force", action="store_true", help="忽略本地已有提交结果，允许重新提交")
-    submit.add_argument("--server", default="https://solo2.jzxhnh.com")
-    submit.add_argument("--keychain-service", default="solo2-jzxhnh")
+    submit.add_argument("--server", default=os.environ.get("SOLO2_SERVER", "").strip())
+    submit.add_argument("--keychain-service",
+                        default=os.environ.get("SOLOSB_SOLO2_KEYCHAIN_SERVICE", "").strip())
     submit.add_argument("--poll-timeout", type=float, default=1800.0)
     submit.set_defaults(func=cmd_submit)
 

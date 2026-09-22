@@ -29,7 +29,15 @@ from common import (
 )
 from evidence import run_audit
 
-GSB_SERVER = os.environ.get("SOLO2_SERVER", "https://solo2.jzxhnh.com").rstrip("/")
+def gsb_server() -> str:
+    """SOLO2 平台地址。技能包里不留默认域名，必须由设备配置提供。"""
+    value = os.environ.get("SOLO2_SERVER", "").strip().rstrip("/")
+    if not value:
+        raise SologsbError(
+            "缺少 SOLO2 平台地址：请在设备配置里设置 solo2.baseUrl，"
+            "或运行 scripts/configure.py wizard"
+        )
+    return value
 AUDIT_HUMAN = SOLO_SCRIPTS / "audit-human-writing.py"
 EXPECTED_FINGERPRINT = "ae6d634837d23f58"
 FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+\.(?:go|js|cjs|mjs|ts|tsx|jsx|py|java|kt|rs|vue|json|ya?ml|toml|md|sql|sh|css|html|xml)")
@@ -336,20 +344,25 @@ def _keychain_secret(service: str) -> str:
 def _request_json(path: str, *, timeout: int = 60) -> dict[str, Any]:
     def _call(cookie: str, csrf: str) -> dict[str, Any]:
         request = urllib.request.Request(
-            GSB_SERVER + path,
+            gsb_server() + path,
             headers={
                 "Accept": "application/json",
                 "Cookie": cookie,
                 "x-csrf-token": csrf,
-                "Referer": GSB_SERVER + "/app/gsb/submit",
+                "Referer": gsb_server() + "/app/gsb/submit",
                 "User-Agent": "sologsb-0917/1.0",
             },
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    cookie = os.environ.get("SOLO_QA_COOKIE", "").strip() or _keychain_secret("solo2-jzxhnh-cookie")
-    csrf = os.environ.get("SOLO_QA_CSRF", "").strip() or _keychain_secret("solo2-jzxhnh-csrf")
+    service = os.environ.get("SOLOSB_SOLO2_KEYCHAIN_SERVICE", "").strip()
+    cookie = os.environ.get("SOLO_QA_COOKIE", "").strip() or (
+        _keychain_secret(service + "-cookie") if service else ""
+    )
+    csrf = os.environ.get("SOLO_QA_CSRF", "").strip() or (
+        _keychain_secret(service + "-csrf") if service else ""
+    )
     if not cookie or not csrf:
         # 配置里有账号密码时自动登录一次
         if _device_config.refresh_solo2_into_env():

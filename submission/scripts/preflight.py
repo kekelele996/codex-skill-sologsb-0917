@@ -48,7 +48,16 @@ TRACE_MAX = 27 * 1024 * 1024
 VIDEO_MAX = 500 * 1024 * 1024
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
 HARNESS_VERSION = "2.1.197"
-GSB_SERVER = "https://solo2.jzxhnh.com"
+def gsb_server() -> str:
+    """SOLO2 平台地址。技能包里不留默认域名，必须由设备配置提供。"""
+    value = os.environ.get("SOLO2_SERVER", "").strip().rstrip("/")
+    if not value:
+        raise RuntimeError(
+            "缺少 SOLO2 平台地址：请在设备配置里设置 solo2.baseUrl，"
+            "或运行 scripts/configure.py wizard"
+        )
+    return value
+
 GSB_HISTORY_CACHE_ENV = "SOLOGBS_0917_GSB_HISTORY_CACHE"
 GSB_HISTORY_MANUAL_CACHE_ENV = "SOLOGBS_0917_GSB_HISTORY_MANUAL_CACHE"
 GSB_HISTORY_CACHE_TTL = float(os.environ.get("SOLOGBS_0917_GSB_HISTORY_CACHE_TTL", "300") or "300")
@@ -408,20 +417,25 @@ def _keychain_secret(service: str) -> str:
 def _readonly_json(path: str, *, timeout: int = 60) -> dict:
     def _call(cookie: str, csrf: str) -> dict:
         request = urllib.request.Request(
-            GSB_SERVER + path,
+            gsb_server() + path,
             headers={
                 "Accept": "application/json",
                 "Cookie": cookie,
                 "x-csrf-token": csrf,
-                "Referer": GSB_SERVER + "/app/gsb/submissions",
+                "Referer": gsb_server() + "/app/gsb/submissions",
                 "User-Agent": "gsb-submit-preflight/1.0",
             },
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8") or "{}")
 
-    cookie = os.environ.get("SOLO_QA_COOKIE", "").strip() or _keychain_secret("solo2-jzxhnh-cookie")
-    csrf = os.environ.get("SOLO_QA_CSRF", "").strip() or _keychain_secret("solo2-jzxhnh-csrf")
+    service = os.environ.get("SOLOSB_SOLO2_KEYCHAIN_SERVICE", "").strip()
+    cookie = os.environ.get("SOLO_QA_COOKIE", "").strip() or (
+        _keychain_secret(service + "-cookie") if service else ""
+    )
+    csrf = os.environ.get("SOLO_QA_CSRF", "").strip() or (
+        _keychain_secret(service + "-csrf") if service else ""
+    )
     if not cookie or not csrf:
         if _device_config.refresh_solo2_into_env():
             cookie = os.environ.get("SOLO_QA_COOKIE", "").strip()
@@ -619,7 +633,7 @@ def _fetch_live_gsb_history() -> dict:
             "bSessionId": str(detail.get("b_session_id") or ""),
         })
     return {
-        "source": GSB_SERVER + "/app/gsb/submissions",
+        "source": gsb_server() + "/app/gsb/submissions",
         "fetchedAt": utc_now(),
         "serverTotal": int(meta.get("total") or len(list_items)),
         "items": items,
@@ -1709,7 +1723,7 @@ def main() -> int:
     }
     submission_payload = {
         "schemaVersion": 1,
-        "targetUrl": "https://solo2.jzxhnh.com/app/gsb/submit",
+        "targetUrl": gsb_server() + "/app/gsb/submit",
         "taskRoot": str(task_root),
         "harnessVersion": HARNESS_VERSION,
         "deliverySheet": {
@@ -1739,7 +1753,7 @@ def main() -> int:
         "checkedAt": utc_now(),
         "taskRoot": str(task_root),
         "page": {
-            "url": "https://solo2.jzxhnh.com/app/gsb/submit",
+            "url": gsb_server() + "/app/gsb/submit",
             "fieldCount": len(schema.get("fields") or []),
             "requiredCount": len(required),
             "schemaInspectedAt": schema.get("inspectedAt"),

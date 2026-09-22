@@ -21,7 +21,7 @@
 
 执行门禁：
 - 所有候选共用同一份 UTF-8 题目提示词，字节完全一致；不得选择“代码理解”。
-- 竞速阶段必须显式执行 `run --side both --candidates 2 --attempts 6 --base-url {{base_url}}`；`{{base_url}}` 取设备配置里的 `claude.baseUrl`，未提供时默认 `https://llm2.jzxhnh.com`。
+- 竞速阶段必须显式执行 `run --side both --candidates 2 --attempts 6 --base-url {{base_url}}`；`{{base_url}}` 取设备配置里的 `claude.baseUrl`，未提供时回退到运行环境的默认值。
 - 前两个结构校验通过的候选按完成顺序映射 A/B；候选目录和候选编号不得改名。
 - A/B 映射完成后才运行 `github-init`，创建 GitHub `main`、`A`、`B`。
 - A/B 必须分别完成语义完成审核；两侧都通过后才允许 `publish` 原子发布产物。

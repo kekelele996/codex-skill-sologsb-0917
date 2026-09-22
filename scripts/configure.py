@@ -384,8 +384,10 @@ def cmd_init(args, path: Path) -> int:
     if identity:
         claude_key = keychain_read(identity.get("keychainService", ""), identity.get("account", ""))
     manager_token = keychain_read("solo-manager-token", os.environ.get("USER", ""))
-    solo2_cookie = keychain_read("solo2-jzxhnh-cookie", os.environ.get("USER", ""))
-    solo2_csrf = keychain_read("solo2-jzxhnh-csrf", os.environ.get("USER", ""))
+    # 钥匙串条目名只从设备配置读，技能包里不留具体名称
+    solo2_service = dc.resolve_from(cfg, "solo2.keychainService")
+    solo2_cookie = keychain_read(solo2_service + "-cookie", os.environ.get("USER", "")) if solo2_service else ""
+    solo2_csrf = keychain_read(solo2_service + "-csrf", os.environ.get("USER", "")) if solo2_service else ""
     gh_token = ""
     if from_current:
         proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)

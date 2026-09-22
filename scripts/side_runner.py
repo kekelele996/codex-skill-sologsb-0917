@@ -49,7 +49,7 @@ DEFAULT_IMAGE = os.environ.get(
     "adminfather/benzhi-claude-code:20260916-toolchains-v2",
 )
 DEFAULT_MODEL = os.environ.get("SOLOSB_MODEL", "auto_model/urm")
-DEFAULT_ANTHROPIC_BASE_URL = "https://llm2.jzxhnh.com"
+DEFAULT_ANTHROPIC_BASE_URL = ""
 DECLARED_CONTEXT_WINDOW = int(os.environ.get("SOLOSB_CONTEXT_WINDOW", "1000000"))
 MAX_ATTEMPTS = 6
 DEFAULT_CANDIDATE_COUNT = 2
@@ -69,6 +69,11 @@ def anthropic_base_url() -> str:
         os.environ.get("SOLOSB_ANTHROPIC_BASE_URL", "").strip()
         or DEFAULT_ANTHROPIC_BASE_URL
     ).rstrip("/")
+    if not value:
+        raise SologsbError(
+            "缺少 LLM 中转站地址：请在设备配置里设置 claude.baseUrl，"
+            "或运行 scripts/configure.py wizard"
+        )
     if not value.startswith(("http://", "https://")):
         raise SologsbError(
             "SOLOSB_ANTHROPIC_BASE_URL 必须以 http:// 或 https:// 开头"

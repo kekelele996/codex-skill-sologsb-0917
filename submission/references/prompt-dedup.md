@@ -1,6 +1,6 @@
 # 历史 GSB 文案去重
 
-历史来源：`https://solo2.jzxhnh.com/app/gsb/submissions`
+历史来源：设备配置 `solo2.baseUrl` 下的 `/app/gsb/submissions`
 
 ## 本地缓存
 

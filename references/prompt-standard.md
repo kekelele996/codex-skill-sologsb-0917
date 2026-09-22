@@ -31,7 +31,7 @@
 
 ## 设计开始前的历史 GSB 去重
 
-历史提交页固定为 `https://solo2.jzxhnh.com/app/gsb/submissions`。在设计提示词之前，先运行：
+历史提交页为设备配置 `solo2.baseUrl` 下的 `/app/gsb/submissions`。在设计提示词之前，先运行：
 
 ```bash
 python3 "$CODEX_HOME/skills/gsb-submit-preflight/scripts/prompt_dedup.py" --task-root ROOT

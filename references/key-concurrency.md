@@ -21,7 +21,7 @@
 
 ## Base URL
 
-- 默认使用 `https://llm2.jzxhnh.com`。
+- 地址取自设备配置 `claude.baseUrl`，技能包里不预设域名。
 - 单个任务可通过 `run --base-url URL` 覆盖，也可使用环境变量
   `SOLOSB_ANTHROPIC_BASE_URL`。
 - 容器启动和 `docker exec` 都会显式注入 `ANTHROPIC_BASE_URL`，并校验实际值。

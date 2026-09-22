@@ -25,7 +25,7 @@ description: >
 
 认证读取 `SOLO_QA_COOKIE` / `SOLO_QA_CSRF`（由设备配置文件
 `~/.codex/sologsb/config.json` 自动注入），或回退到 Keychain 的
-`solo2-jzxhnh-cookie` / `solo2-jzxhnh-csrf`。会话失效时用配置里的账号密码自动重登，
+设备配置 `solo2.keychainService` 对应的 `-cookie` / `-csrf`。会话失效时用配置里的账号密码自动重登，
 不需要人工更换 Cookie。不把凭据写入交付物或日志。
 
 ## 提交顺序
