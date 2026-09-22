@@ -18,10 +18,23 @@ description: >
 本 Skill 把一道题做成一条可审计的 Pair-wise GSB 数据。所有事实必须来自原生轨迹、
 Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
+## Git 版本信息
+
+- 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
+- 跟踪分支：`main`
+- 发布标签：`v2026.09.22.1`
+- 精确提交号：运行 `git rev-parse v2026.09.22.1` 获取。
+- 机器可读版本：技能根目录的 `VERSION` 文件。
+
 ## 实测固定顺序
 
 - 困难题默认单 attempt 超时使用 7200 秒；先区分“仍在推进”与“已失败”，不要因自动重连次数频繁重启。
-- 单 Key 并发安全：`run` 默认全局最多同时 4 个 Claude 容器，按“两个任务、每个任务两个候选”共享名额。候选启动前检查同镜像容器；预计当前容器数加本批候选数超过 4 时等待。只有确认 Key 容量后才允许显式提高上限。
+- 单 Key 并发安全：`run` 默认全局最多同时 4 个 Claude 容器，按“两个任务、每个任务两个候选”共享名额。进门判定只看**正在运行的候选任务容器数**：运行数 `>=` 上限才禁止进入，不再按“当前数量加本批候选数”预判。候选可以分批逐个进入，每个容器启动前单独取一个名额，不需要一次性预留整批槽位。数据库、验证 clone、监控台辅助容器等非任务容器一律不占名额。只有确认 Key 容量后才允许显式提高上限。
+- 上限不是写死的 4：优先级为 `SOLOSB_MAX_CONTAINERS` > 容器上限配置文件的 `maxContainers` > 默认 4，并受绝对硬顶 6 约束。实际生效值用 `python3 scripts/side_runner.py` 内部的 `_CONTAINER_LIMITER.status()` 读取，它返回 `limit / runningContainers / reservedSlots / advisoryReservedSlots / used / available / runningNames`。其中 `used / available` 只按 `runningContainers` 计算，`reservedSlots` 是给监控台看的预占位提示，不再参与进门判定；预占位标记文件仍与监控台共用同一批。
+- 调度模式由监控台 `automation.scheduleMode` 决定，执行器按提示词里的 `{{schedule_mode}}` 取值行动：
+  - `容器优先`：保持运行中的候选容器数等于设定值，任务数可以少于上限；
+  - `任务数量优先`：保持并行任务数等于设定值，容器数可以少于上限。
+  两种模式共用同一条进门规则：**正在运行的候选任务容器数 `>=` 上限**时才等待；运行数未到上限就继续逐个放行，不再按整批预判。
 - Anthropic 兼容中转站地址取自设备配置 `claude.baseUrl`，可在 `run` 中传 `--base-url`，或通过 `SOLOSB_ANTHROPIC_BASE_URL` 覆盖；运行器会校验容器实际 Base URL。
 - 网关 429 `max_parallel_requests` 属于准入失败：正式候选运行前先等待最小 `/v1/messages` 探测成功；发生最终 429 后不要立即重启新容器，先等待 Key 恢复。恢复后仍按红线使用新容器、新 Claude home 和新 SessionID，实际尝试次数照记。
 - pnpm fresh clone 固定按“安装失败留证 → `pnpm approve-builds --all` → 再次安装 → 构建”顺序处理。
@@ -47,7 +60,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 前两个通过结构校验的候选按完成顺序映射为代号 A、B；文件夹和候选编号永不改名，
   映射写入 `monitor/state.json.candidateMapping`。一旦前两名产生，立即主动停止其余候选，
   不等待它们完成。
-- 候选阶段绝不创建 GitHub 仓库、绝不 push。
+- 候选阶段绝不创建 GitHub 仓库、绝不 push。重复启动同一任务根时，`run_candidates` 会先只读探测候选任务锁，占用就直接退出，不再清空状态或重建正在使用的工作区；`_clone_candidate` 也不会删除仍被运行中容器挂载的目录。
 - GitHub 仓库名必须以平台项目标识开头，再跟 3–6 位小写字母数字唯一后缀，例如 `cy-291-a1b2`；平台项目拿不到 `projectCode` 时禁止创建仓库。
 - GitHub 网络红线：所有 GitHub 网络访问，包括 `gh api`、`gh repo view/create/delete`、`git clone/fetch/push/ls-remote`，必须经 Loon 代理。优先使用显式 `SOLOSB_GITHUB_PROXY`，否则自动探测 HTTP `127.0.0.1:17890`，再探测 SOCKS5 `127.0.0.1:17891`；两者不可用时停止作业，禁止裸网直连。
 - Loon 端口都不可达或经代理仍出现 TLS/SSL 故障时，保留真实错误并按基础设施门禁停止，不得反复创建候选仓库。

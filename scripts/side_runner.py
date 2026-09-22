@@ -350,6 +350,11 @@ def _clone_candidate(task_root: Path, state: dict[str, Any], candidate: str) -> 
         if head == initial and not status:
             return destination
     if destination.exists():
+        mounted = _workspace_mounted_by_running_container(destination)
+        if mounted:
+            raise SologsbError(
+                f"{candidate} 工作区仍被运行中的容器 {mounted} 挂载，拒绝删除重建"
+            )
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     run(["git", "clone", "--no-hardlinks", str(origin), str(destination)])
@@ -438,8 +443,15 @@ class _ContainerLimiter:
 
     @staticmethod
     def _running_containers() -> list[tuple[str, str]]:
+        """列出正在运行的候选任务容器。
+
+        只看本题型自己创建的候选容器：带 ``sologsb-0917=true`` 标签，或者名字符合
+        ``sologsb-<任务>-candidate-<N>-...`` 的历史容器。数据库、验证 clone、监控台
+        辅助容器等 ``sologsb-`` 前缀容器都不算任务容器，不占用并发名额。
+        """
         proc = run(
-            ["docker", "ps", "--format", '{{.Names}}\t{{.Label "sologsb.project-code"}}'],
+            ["docker", "ps", "--format",
+             '{{.Names}}\t{{.Label "sologsb.project-code"}}\t{{.Label "sologsb-0917"}}'],
             check=False,
             timeout=15,
         )
@@ -447,10 +459,15 @@ class _ContainerLimiter:
             raise SologsbError(proc.stderr.decode("utf-8", errors="replace") or "无法读取 Docker 容器列表")
         records: list[tuple[str, str]] = []
         for raw in proc.stdout.decode("utf-8", errors="replace").splitlines():
-            name, _, label = raw.partition("\t")
-            name = name.strip()
-            if name.startswith("sologsb-"):
-                records.append((name, label.strip()))
+            parts = raw.split("\t")
+            name = parts[0].strip() if parts else ""
+            label = parts[1].strip() if len(parts) > 1 else ""
+            marker = parts[2].strip() if len(parts) > 2 else ""
+            if not name.startswith("sologsb-"):
+                continue
+            if marker != "true" and not CANDIDATE_CONTAINER_RE.match(name):
+                continue
+            records.append((name, label))
         return records
 
     @staticmethod
@@ -463,6 +480,67 @@ class _ContainerLimiter:
             return True
         except (TypeError, ValueError, OSError):
             return False
+
+    def _classify_markers(self, running_names: set[str]) -> tuple[set[str], list[Path]]:
+        """Split reservation markers into live reservations and dead ones.
+
+        Shared by :meth:`acquire` and :meth:`status` so the two can never
+        disagree about what a marker means.
+        """
+        limit, excluded, _wait = self._settings()
+        reservations: set[str] = set()
+        dead: list[Path] = []
+        for marker in list(self.reservations.glob("*.json")):
+            data = read_json(marker, {})
+            if not isinstance(data, dict):
+                dead.append(marker)
+                continue
+            name = str(data.get("container") or "").strip()
+            marker_code = str(data.get("projectCode") or "").strip()
+            if not name or self._container_is_excluded(name, marker_code, excluded):
+                continue
+            if name in running_names:
+                # The container exists, so this is no longer a reservation.
+                continue
+            if self._pid_alive(data.get("pid")):
+                reservations.add(name)
+                continue
+            dead.append(marker)
+        return reservations, dead
+
+    def status(self) -> dict[str, Any]:
+        """Read-only view of the slot ledger.
+
+        The scheduler monitor reads the same reservation files to show
+        "occupied / available" without taking a lock, so this never mutates
+        state: dead markers are reported, not removed.
+        """
+        limit, excluded, _wait = self._settings()
+        try:
+            running = self._running_containers()
+        except SologsbError as exc:
+            return {"ok": False, "error": str(exc), "limit": limit}
+        running_names = {
+            name for name, label in running
+            if not self._container_is_excluded(name, label, excluded)
+        }
+        self.reservations.mkdir(parents=True, exist_ok=True)
+        reservations, dead = self._classify_markers(running_names)
+        # 进门判定只看正在运行的候选任务容器：运行数达到上限才禁止进入。
+        used = len(running_names)
+        return {
+            "ok": True,
+            "limit": limit,
+            "excludedProjectCodes": sorted(excluded),
+            "runningContainers": len(running_names),
+            "reservedSlots": len(reservations),
+            "advisoryReservedSlots": len(reservations),
+            "used": used,
+            "available": max(0, limit - used),
+            "reservations": sorted(reservations),
+            "runningNames": sorted(running_names),
+            "deadMarkers": [str(path) for path in dead],
+        }
 
     def acquire(self, project_code: str, container_name: str) -> _ContainerReservation:
         limit, excluded, wait_seconds = self._settings()
@@ -479,29 +557,16 @@ class _ContainerLimiter:
                         name for name, label in running
                         if not self._container_is_excluded(name, label, excluded)
                     }
-                    reservations: set[str] = set()
-                    for marker in list(self.reservations.glob("*.json")):
-                        data = read_json(marker, {})
-                        if not isinstance(data, dict):
-                            try:
-                                marker.unlink()
-                            except OSError:
-                                pass
-                            continue
-                        name = str(data.get("container") or "").strip()
-                        marker_code = str(data.get("projectCode") or "").strip()
-                        if not name or self._container_is_excluded(name, marker_code, excluded):
-                            continue
-                        if name in running_names:
-                            continue
-                        if self._pid_alive(data.get("pid")):
-                            reservations.add(name)
-                            continue
+                    reservations, dead = self._classify_markers(running_names)
+                    for marker in dead:
                         try:
                             marker.unlink()
                         except OSError:
                             pass
-                    if len(running_names | reservations) < limit:
+                    # 判定口径：只按“正在运行的候选任务容器数”比较上限，
+                    # 运行数达到上限才禁止进入；预占位标记只给监控台看，不再占名额，
+                    # 因此候选可以分批逐个进入，不需要一次性预留整批槽位。
+                    if len(running_names) < limit:
                         marker_path = self.reservations / f"{uuid.uuid4().hex}.json"
                         write_json(marker_path, {
                             "container": container_name,
@@ -520,6 +585,8 @@ class _ContainerLimiter:
             _emit_live(project_code or "container", f"容器名额已满，排队等待（上限 {limit}）")
             time.sleep(5)
 
+
+CANDIDATE_CONTAINER_RE = re.compile(r"^sologsb-.+-candidate-\d+-")
 
 _CONTAINER_LIMITER = _ContainerLimiter()
 
@@ -1205,6 +1272,44 @@ def _pid_alive(pid: Any) -> bool:
         return False
 
 
+def _candidate_lock_is_held(task_root: Path, candidate: str) -> bool:
+    """只读探测候选任务锁是否已被其他执行器持有。
+
+    ``run_candidates`` 必须在改动任何状态之前调用它：重复启动的第二个执行器
+    过去会先把 ``state.json`` 清空、再重建候选工作区，然后才在取锁时失败，
+    结果把正在跑的候选现场破坏掉。
+    """
+    lock_path = task_root / "monitor" / f"run-{candidate}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return False
+
+
+def _workspace_mounted_by_running_container(workspace: Path) -> str:
+    """返回正在挂载该工作区的容器名，没有则返回空串。"""
+    target = str(workspace.resolve())
+    proc = run(["docker", "ps", "--format", "{{.Names}}"], check=False, timeout=15)
+    if proc.returncode != 0:
+        return ""
+    for name in proc.stdout.decode("utf-8", errors="replace").split():
+        inspect = run(
+            ["docker", "inspect", "-f", "{{range .Mounts}}{{.Source}}|{{end}}", name],
+            check=False,
+            timeout=15,
+        )
+        if inspect.returncode != 0:
+            continue
+        sources = inspect.stdout.decode("utf-8", errors="replace").strip().split("|")
+        if any(str(Path(item).resolve()) == target for item in sources if item.strip()):
+            return name
+    return ""
+
+
 @contextmanager
 def _candidate_run_lock(task_root: Path, candidate: str):
     lock_path = task_root / "monitor" / f"run-{candidate}.lock"
@@ -1627,6 +1732,12 @@ def run_candidates(
     ids = candidate_ids(candidate_count)
     if attempts < 1:
         raise SologsbError("attempts 必须至少为 1")
+    held = [candidate for candidate in ids if _candidate_lock_is_held(task_root, candidate)]
+    if held:
+        raise SologsbError(
+            "已有执行器正在运行 " + "、".join(held) + "，拒绝重复启动；"
+            "重复启动会清空任务状态并重建候选工作区，因此这里在任何改动之前直接退出。"
+        )
     state = read_json(task_root / "monitor" / "state.json", {})
     if state.get("status") not in {"prompt_ready", "candidates_running", "blocked", "attempt_invalid"}:
         raise SologsbError(
