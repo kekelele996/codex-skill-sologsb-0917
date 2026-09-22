@@ -2,6 +2,7 @@
 """Ingest source from a local directory, task package, or Solo Manager."""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -171,7 +172,8 @@ def ingest_source(
         return {"mode": "package", "packagePath": str(package), "fileCount": count}
 
     pb = _load_platform_bridge()
-    base_url = (platform_base_url or "http://192.168.31.26:8080").rstrip("/")
+    base_url = (platform_base_url or os.environ.get("SOLO_MANAGER_BASE_URL", "")
+                or "http://192.0.2.10:8080").rstrip("/")
     meta = {"baseUrl": base_url, "apiBaseUrl": base_url + "/api/v1"}
     token = pb.load_manager_token()
     root = (task_root or origin.parents[1]).expanduser().resolve()

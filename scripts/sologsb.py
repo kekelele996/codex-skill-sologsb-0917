@@ -247,7 +247,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 
 def cmd_approve_line_gate(args: argparse.Namespace) -> int:
-    """Create the only allowed manual exception approval, approved by liudong."""
+    """Create the only allowed manual exception approval (approver from device config)."""
     root = task_root_from_arg(args.task_root)
     script = Path(__file__).resolve().parent.parent / "submission" / "scripts" / "confirm_submission.py"
     if not script.is_file():
@@ -259,8 +259,6 @@ def cmd_approve_line_gate(args: argparse.Namespace) -> int:
         str(root),
         "--scope",
         "change-volume-line-gate",
-        "--approved-by",
-        "liudong",
     ]
     if args.payload:
         command += ["--payload", str(args.payload.expanduser().resolve())]
@@ -591,7 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     approve_line_gate = sub.add_parser(
         "approve-line-gate",
-        help="由 liudong 在 TTY 中批准唯一的改动量低于 10 行例外",
+        help="由设备配置里的审批人在 TTY 中批准唯一的改动量低于 10 行例外",
     )
     approve_line_gate.add_argument("--task-root", required=True)
     approve_line_gate.add_argument("--payload", type=Path)

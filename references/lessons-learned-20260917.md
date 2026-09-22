@@ -51,7 +51,7 @@
 - `status=complete` 前必须确认 Excel 中录屏路径已刷新为最终成功视频，而不是默认 `demo.mp4`。
 - GSB 负面 claim 的 `trigger` 必须原样出现在 240 字以内的理由中；理由句子需逐句映射 evidence ID。
 - GSB 理由不要用“10 个后端测试”“12 项 API 断言”这类数量堆砌，写成“后端关键路径完整覆盖”“完整接口流程验证”等业务覆盖表述，避免像审计清单。
-- 提交改走 `submission/scripts/submit_api.py` 的 Python API；不带 `--execute` 只作诊断。完整审核通过后的默认流程直接加 `--execute`，自动记录批准用户 `liudong`；只有改动量单项失败时才使用例外审批文件。
+- 提交改走 `submission/scripts/submit_api.py` 的 Python API；不带 `--execute` 只作诊断。完整审核通过后的默认流程直接加 `--execute`，自动记录批准用户（取自设备配置 `solo2.approver`）；只有改动量单项失败时才使用例外审批文件。
 
 ## 2026-09-20 G5 实测：过程与产物必须同时覆盖
 
@@ -72,9 +72,10 @@
 
 ## 2026-09-19 Manager 地址更新
 
-- Solo Manager 默认地址已由 `http://192.168.31.147:8080` 更新为 `http://192.168.31.26:8080`；
-  根页面探活返回 HTTP 200，API 无令牌访问返回 HTTP 403 属于预期。
-- 新任务应优先使用新地址；历史任务审计文件中的旧地址保留原值，不做批量回写。
+- Solo Manager 地址发生过一次迁移，具体地址不写在技能包里，统一由设备配置
+  `manager.baseUrl` 提供。
+- 根页面探活返回 HTTP 200、API 无令牌访问返回 HTTP 403 属于预期。
+- 新任务应使用设备配置里的地址；历史任务审计文件中的旧地址保留原值，不做批量回写。
 
 
 ## 2026-09-19 G11 实测
@@ -84,7 +85,7 @@
 - 固定处理顺序：发布阶段先在 `.git/info/exclude` 排除依赖目录、构建产物、缓存和锁文件；stage 后
   复算非测试业务代码改动并写入 `lineGate`。任一侧少于 10 行时仍创建 A/B 快照并 push，最终阻断延后到提交预检。
 - 提交预检必须从远端 `main` 与 A/B commit 复算业务改动量，并阻断脏仓库；只有低改动量是唯一阻断项时，
-  才允许 `liudong` 批准 `change-volume-line-gate` 例外。设计提示词时建议每个
+  才允许设备配置里的审批人批准 `change-volume-line-gate` 例外。设计提示词时建议每个
   A/B 至少 30 行、跨 3 个业务文件，避免贴着平台 10 行阈值。
 - 详细规则见 `references/change-volume-gate.md`。
 

@@ -28,7 +28,8 @@ FIELDS: dict[str, tuple[str | None, str]] = {
     "claude.image": ("SOLOSB_DOCKER_IMAGE", "adminfather/benzhi-claude-code:20260916-toolchains-v2"),
     "claude.contextWindow": ("SOLOSB_CONTEXT_WINDOW", "1000000"),
     "claude.maxContainers": ("SOLOSB_MAX_CONTAINERS", "4"),
-    "manager.baseUrl": ("SOLO_MANAGER_BASE_URL", "http://192.168.31.26:8080"),
+    # 默认值是 RFC 5737 文档用地址，真实地址必须在设备配置或环境变量里提供
+    "manager.baseUrl": ("SOLO_MANAGER_BASE_URL", "http://192.0.2.10:8080"),
     "manager.username": ("SOLO_MANAGER_USERNAME", ""),
     "manager.password": (None, ""),
     "manager.token": ("SOLO_MANAGER_TOKEN", ""),
@@ -37,6 +38,7 @@ FIELDS: dict[str, tuple[str | None, str]] = {
     "solo2.password": (None, ""),
     "solo2.cookie": ("SOLO_QA_COOKIE", ""),
     "solo2.csrf": ("SOLO_QA_CSRF", ""),
+    "solo2.approver": ("SOLOGBS_AUTO_APPROVER", "auto"),
     "github.token": ("GITHUB_TOKEN", ""),
     "github.username": ("SOLOSB_GITHUB_USERNAME", ""),
     "github.proxyHttp": ("SOLOSB_GITHUB_PROXY", "127.0.0.1:17890"),

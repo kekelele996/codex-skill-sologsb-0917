@@ -24,7 +24,7 @@
 14. 监控台会展示 `state.candidates` 与 `runtime/candidates/candidate-N`，竞速期间不必等 A/B 命名后才可见。
 
 15. 提交前强制刷新历史 GSB 文案并写入 `$CODEX_HOME/cache/sologsb-0917/gsb-history-cache.json`；`user_prompt` 与 `gsb_reason` 分别去重，理由命中 B-5 公共片段或模板 n-gram 时直接阻断。
-16. 技能内置 Python API 提交模块；不带 `--execute` 只作诊断。完整审核通过后的默认流程是直接运行 `submit --execute`，系统自动记录批准用户 `liudong`。只有改动量少于 10 行且为唯一阻断项时，才等待 `liudong` 批准 `change-volume-line-gate` 例外。不使用浏览器模拟点击。
+16. 技能内置 Python API 提交模块；不带 `--execute` 只作诊断。完整审核通过后的默认流程是直接运行 `submit --execute`，系统自动记录批准用户（取自设备配置 `solo2.approver`）。只有改动量少于 10 行且为唯一阻断项时，才等待设备配置里的审批人批准 `change-volume-line-gate` 例外。不使用浏览器模拟点击。
 
 ## 最终交付展示硬约束
 

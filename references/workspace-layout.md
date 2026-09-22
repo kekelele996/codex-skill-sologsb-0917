@@ -41,7 +41,7 @@
     │   └── pre-submit/
     │       ├── submission-payload.json
     │       ├── change-volume-review.json
-    │       ├── submission-approval.json  # 完整审核通过时自动写入，approvedBy=liudong
+    │       ├── submission-approval.json  # 完整审核通过时自动写入，approvedBy 为设备配置里的审批人
     │       └── change-volume-line-gate-approval.json  # 仅例外审批时生成
     ├── 轨迹文件/candidates/candidate-N/
     ├── 轨迹文件/{a,b}/

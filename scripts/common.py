@@ -545,10 +545,22 @@ def normalize_repo_url(value: str) -> str:
 
 
 def load_git_identity() -> dict[str, str]:
+    """解析提交产物要用的 Git 作者身份。
+
+    技能包里不内置任何个人姓名或邮箱：先读全局 git 配置，再读环境变量，
+    两者都没有就报错提示补齐。
+    """
     name_proc = run(["git", "config", "--global", "user.name"], check=False)
     email_proc = run(["git", "config", "--global", "user.email"], check=False)
-    name = name_proc.stdout.decode("utf-8", errors="replace").strip() or "gaobo"
-    email = email_proc.stdout.decode("utf-8", errors="replace").strip() or "304590126@qq.com"
+    name = name_proc.stdout.decode("utf-8", errors="replace").strip()
+    email = email_proc.stdout.decode("utf-8", errors="replace").strip()
+    name = name or os.environ.get("SOLOSB_GIT_AUTHOR_NAME", "").strip()
+    email = email or os.environ.get("SOLOSB_GIT_AUTHOR_EMAIL", "").strip()
+    if not name or not email:
+        raise SologsbError(
+            "缺少 Git 提交身份：请设置 git config --global user.name / user.email，"
+            "或设置 SOLOSB_GIT_AUTHOR_NAME / SOLOSB_GIT_AUTHOR_EMAIL"
+        )
     return {"name": name, "email": email}
 
 

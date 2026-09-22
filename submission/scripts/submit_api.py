@@ -2,8 +2,8 @@
 """Audit and submit an existing SOLO2 GSB bundle through the HTTP API.
 
 The browser form is intentionally not used. The default mode is a dry run. A
-fully passing audit is approved automatically as user liudong. Only a
-change-volume-line-gate failure may wait for a matching liudong approval file;
+fully passing audit is approved automatically as the configured approver. Only a
+change-volume-line-gate failure may wait for a matching approval file;
 all other audit failures remain blocking and cannot be bypassed.
 """
 from __future__ import annotations
@@ -51,7 +51,7 @@ TERMINAL_STATUS_HINTS = {
 PASS_STATUSES = {"QC_PASSED", "PASSED"}
 EXCLUDED_SUBMISSION_FIELDS = {"remark"}
 CHANGE_VOLUME_APPROVAL_SCOPE = "change-volume-line-gate"
-AUTO_APPROVER = "liudong"
+AUTO_APPROVER = os.environ.get("SOLOGBS_AUTO_APPROVER", "").strip() or "auto"
 
 
 def utc_now() -> str:
@@ -248,7 +248,7 @@ def verify_approval(
             raise RuntimeError("实时改动量复核哈希与 payload 不一致")
     if not approval_path.is_file():
         raise RuntimeError(
-            "改动量门禁是当前唯一阻断项，提交已停止；请等待 liudong 批准： "
+            "改动量门禁是当前唯一阻断项，提交已停止；请等待配置里的审批人批准： "
             f"approve-line-gate --task-root {payload.get('taskRoot') or ''}；审批文件: {approval_path}"
         )
     approval = load_json(approval_path)

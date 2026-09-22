@@ -2,14 +2,14 @@
 name: gsb-submit-api
 description: >
   审核并通过 Python HTTP API 提交 SOLO2 GSB 数据，不使用浏览器模拟点击。
-  先执行只读预检、历史提示词与 GSB 理由双重去重和交付哈希校验；完整审核通过后自动批准并记录 liudong，只有改动量低于 10 行且为唯一阻断项时才要求 liudong 例外审批，最后上传轨迹/录屏并调用
+  先执行只读预检、历史提示词与 GSB 理由双重去重和交付哈希校验；完整审核通过后自动批准并记录设备配置里的审批人，只有改动量低于 10 行且为唯一阻断项时才要求设备配置里的审批人做例外审批，最后上传轨迹/录屏并调用
   /api/v1/gsb/submissions，轮询 /api/v1/gsb/submissions/{id} 直到质检终态。
   用于“GSB 提交”“提交 0917 数据”“用 Python 提交 GSB”“提取独立提交技能”等场景。
 ---
 
 # GSB Submit API
 
-这个技能把 GSB 提交从浏览器表单中抽离出来。任何上传或提交都必须显式加 `--execute`；不带该参数只作诊断。完整审核通过时自动生成批准记录，`approvedBy=liudong`。只有 `change-volume-line-gate` 例外需要与 payload、交付表和改动量复核哈希一致的人工审批。
+这个技能把 GSB 提交从浏览器表单中抽离出来。任何上传或提交都必须显式加 `--execute`；不带该参数只作诊断。完整审核通过时自动生成批准记录，`approvedBy` 为设备配置里的审批人。只有 `change-volume-line-gate` 例外需要与 payload、交付表和改动量复核哈希一致的人工审批。
 
 ## 依赖
 
@@ -44,13 +44,13 @@ python3 scripts/submit_api.py --task-root /absolute/task/root
 
 默认不会上传、不会提交。
 
-3. 完整审核通过时直接上传并提交；系统自动批准并记录 `liudong`：
+3. 完整审核通过时直接上传并提交；系统自动批准并记录设备配置里的审批人：
 
 ```bash
 python3 scripts/submit_api.py --task-root /absolute/task/root --execute
 ```
 
-4. 只有实时预检状态为 `line_gate_approval_required` 时，才由 `liudong` 在真实 TTY 中生成例外审批：
+4. 只有实时预检状态为 `line_gate_approval_required` 时，才由设备配置里的审批人在真实 TTY 中生成例外审批：
 
 ```bash
 python3 scripts/confirm_submission.py --task-root /absolute/task/root
@@ -81,7 +81,7 @@ $CODEX_HOME/cache/sologsb-0917/gsb-history-cache.json
 ## G11 改动量与仓库洁净门禁
 
 - 发布阶段仍生成 A/B 产物快照，并记录每侧业务代码行数；任一侧低于 `10` 行时 `lineGate=failed`。
-- 提交预检按远端 `main` 与 A/B commit 复算。低于 `10` 行且这是唯一阻断项时，只允许 `liudong` 批准 `change-volume-line-gate` 例外。
+- 提交预检按远端 `main` 与 A/B commit 复算。低于 `10` 行且这是唯一阻断项时，只允许设备配置里的审批人批准 `change-volume-line-gate` 例外。
 - 例外审批绑定 payload 哈希、交付表哈希和 `change-volume-review.json` 的改动量复核哈希；任一变化都使审批失效。
 - 仓库存在依赖、构建、缓存、虚拟环境或锁文件，以及其他任何门禁失败时，都不能使用该例外。
 - 建议至少 `30` 行且跨 `3` 个业务文件；不足时警告并重新评估题目难度。

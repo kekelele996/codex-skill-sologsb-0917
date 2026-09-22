@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create the human approval file for a change-volume-line-gate exception.
 
-Normal submissions are approved automatically as user liudong after a complete
+Normal submissions are approved automatically as the configured approver after a complete
 audit passes. This command is only for the single allowed exception: at least
 one side has fewer than 10 non-test business code lines and that is the only
 blocking condition. Approval is bound to the payload, delivery sheet, and
@@ -12,12 +12,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 SCOPE = "change-volume-line-gate"
-APPROVER = "liudong"
+APPROVER = os.environ.get("SOLOGBS_AUTO_APPROVER", "").strip() or "auto"
 PHRASE = "批准改动量例外"
 
 

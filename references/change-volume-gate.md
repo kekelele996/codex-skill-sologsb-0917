@@ -32,9 +32,9 @@
 - 预检从远端 `main` 初始快照与 A/B 产物 commit 复算业务代码改动量。
 - 任一侧少于 `10` 行时写入 `workspace/评审文件/pre-submit/change-volume-review.json`，
   并把 `change-volume-line-gate` 作为例外审批类型写入 `submission-payload.json`。
-- 只有当低改动量是唯一阻断项时，才允许 `liudong` 批准
+- 只有当低改动量是唯一阻断项时，才允许设备配置里的审批人批准
   `change-volume-line-gate` 例外。
 - 例外审批必须同时绑定当前 payload 哈希、交付表哈希和改动量复核包哈希。
 - 仓库存在依赖、构建、缓存或锁文件时，以及其他任何门禁失败时，都不能使用该例外。
-- 正常流程在完整审核通过后自动由 `liudong` 记录批准，并直接执行
+- 正常流程在完整审核通过后自动由设备配置里的审批人记录批准，并直接执行
   `submit --task-root ROOT --execute`，不需要人工审批文件。

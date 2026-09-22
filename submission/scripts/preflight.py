@@ -97,7 +97,7 @@ NON_CONTAINER_TEST_ARTIFACT_RE = re.compile(
     re.I,
 )
 CHANGE_VOLUME_APPROVAL_SCOPE = "change-volume-line-gate"
-AUTO_APPROVER = "liudong"
+AUTO_APPROVER = os.environ.get("SOLOGBS_AUTO_APPROVER", "").strip() or "auto"
 BANNED_REASON_PATTERN = re.compile(r"落在.{0,16}")
 # 文案通则里的禁用词、排版与文风规则统一委托给 scripts/gsb_tools.py，避免两处口径漂移。
 SKILL_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
@@ -1491,7 +1491,7 @@ def main() -> int:
     if reason_decision == "REVIEW_REQUIRED":
         manual_reason_ok, manual_reason_evidence = validate_reason_similarity_approval(task_root, reason_text, reason_dedup)
         if manual_reason_ok:
-            reason_message += "；已由 liudong 人工审核通过"
+            reason_message += "；已由配置里的审批人人工审核通过"
     add(
         "gsb-reason-dedup",
         reason_decision == "UNIQUE" or manual_reason_ok,

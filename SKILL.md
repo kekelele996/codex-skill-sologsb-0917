@@ -8,8 +8,8 @@ description: >
   生成证据约束的 GSB 结论、官方当前 schema Excel、字段填写说明和两段真实运行录屏。
   用于“sologsb-0917”“Pair-wise GSB”“A/B 两次跑”“GSB 0917”等任务；技能内置审核与
   Python HTTP API 提交模块。完整审核通过后的默认流程是直接执行 submit --execute；
-  自动批准用户记录为 liudong。只有任一侧业务代码少于 10 行且这是唯一阻断项时，才等待
-  liudong 批准 change-volume-line-gate 例外。不使用浏览器模拟点击。最终交付展示严格使用
+  自动批准用户记录为设备配置里的审批人。只有任一侧业务代码少于 10 行且这是唯一阻断项时，才等待
+  设备配置里的审批人批准 change-volume-line-gate 例外。不使用浏览器模拟点击。最终交付展示严格使用
   固定八段式模板，不得增删标题或附加说明。
 ---
 
@@ -35,7 +35,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 只允许 `困难`、`地狱`；任务类型不得选择 `代码理解`。
 - 提示词不得设计成低改动量任务。困难、地狱题建议每个 A/B 至少产生 30 行非测试业务代码改动并跨至少 3 个业务文件。发布阶段仍生成 A/B 产物快照并记录行数门禁失败，平台提交前再执行最终阻断。
 - 发布产物前必须排除 `node_modules`、构建目录、缓存、虚拟环境和锁文件；提交预检必须从远端 commit 复算改动量并按平台 G11 口径阻断低改动或脏仓库。只有“任一侧业务代码少于 10 行”且这是唯一阻断项时，才允许 `change-volume-line-gate` 例外审批。
-- 例外审批必须绑定 payload 哈希、交付表哈希和改动量复核哈希，批准用户固定为 `liudong`；其他任何门禁失败都不能绕过。
+- 例外审批必须绑定 payload 哈希、交付表哈希和改动量复核哈希，批准用户取自设备配置 `solo2.approver`；其他任何门禁失败都不能绕过。
 - 默认先拉取同一初始快照的 2 份独立候选源码，不使用 A/B 目录名，也不改名。
   固定目录为 `source/candidates/candidate-1..N`，每份源码各自使用独立容器、Claude home、
   SessionID 和轨迹；默认用 `run --side both --candidates 2` 并行无头执行，需要观察时加 `--live`。
@@ -126,7 +126,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 禁止在 GSB 理由中引用 `evaluationExcluded` 的环境或工具噪声证据；这类证据也不能作为独立 claim、评分或胜负依据。
 - GSB 理由不堆测试或断言数量，改成“后端关键路径完整覆盖”“完整接口流程验证”等业务覆盖描述；`gsb_tools.py` 会直接阻断计数式写法。
 - 低价值环境/工具噪声不直接参与 GSB 评定：解释器或命令未找到、测试 PYTHONPATH 缺失、编辑工具替换文本未匹配、临时工作目录、重跑等，不能作为独立 claim、评分项或胜负依据。标记为 `evaluationExcluded` 的证据不得进入 GSB 理由正文。
-- 完整审核通过后必须直接执行 `submit --execute`，不需要人工审批文件，系统自动记录批准用户 `liudong`；不带 `--execute` 只作人工诊断。只有改动量单项失败时才停止并等待 `liudong` 批准例外；确认必须重提时才使用 `--force`。
+- 完整审核通过后必须直接执行 `submit --execute`，不需要人工审批文件，系统自动记录批准用户（取自设备配置 `solo2.approver`）；不带 `--execute` 只作人工诊断。只有改动量单项失败时才停止并等待设备配置里的审批人批准例外；确认必须重提时才使用 `--force`。
 - 禁止用浏览器模拟点击、Playwright 填表或文件选择器提交 GSB；统一调用 `submission/scripts/submit_api.py`。
 - 最终交付展示硬门禁：`status=complete` 后的最终回复及 SOLO2 推送后的最终回复，必须逐字遵守 `references/final-delivery-format.md`。固定八段顺序为“仓库与初始快照、A / B 会话、提交与轨迹、审核结论、GSB 文案、Excel 与字段说明、两段视频、SOLO2 推送结果、未解决问题”；不得增删二级标题、添加前言/结束语或改写标题。所有本地路径必须为绝对路径，视频必须内嵌，未提交时明确写“未执行（仅本地交付）”，无未解决问题时写“无”。
 
@@ -198,8 +198,8 @@ SOLO2 会话失效时，运行器会用配置里的账号密码自动重新登�
    纯后端/API 题在 `apiRequests` 中模拟多步业务请求（可用 `extract` 提取 token 传给后续请求），断言失败按真实失败结果记录。
 10. 运行 `status` 复核所有产物。
 11. `status=complete` 后直接运行 `submit --task-root ROOT --execute`，不再先做单独的人工 dry-run。提交命令会先执行完整预检、刷新历史文案缓存并对 `user_prompt` 与 `gsb_reason` 双重去重。
-12. 完整审核通过时，系统自动生成批准记录，`approvedBy=liudong`，不使用人工审批文件；脚本通过 `/api/v1/submissions/upload` 上传四个文件，再调用 `/api/v1/gsb/submissions` 创建记录并轮询质检终态。
-    - 如果预检状态为 `line_gate_approval_required`，确认低于 10 行是唯一阻断项后停止提交，等待 `liudong` 在真实 TTY 中运行 `approve-line-gate --task-root ROOT`；审批后重新运行 `submit --task-root ROOT --execute`。
+12. 完整审核通过时，系统自动生成批准记录，`approvedBy` 为设备配置里的审批人，不使用人工审批文件；脚本通过 `/api/v1/submissions/upload` 上传四个文件，再调用 `/api/v1/gsb/submissions` 创建记录并轮询质检终态。
+    - 如果预检状态为 `line_gate_approval_required`，确认低于 10 行是唯一阻断项后停止提交，等待设备配置里的审批人 在真实 TTY 中运行 `approve-line-gate --task-root ROOT`；审批后重新运行 `submit --task-root ROOT --execute`。
     - 如果存在其他任何阻断项，直接修复后重跑，不得使用例外审批。
 
 ## CLI
@@ -223,8 +223,8 @@ python3 scripts/sologsb.py gsb --task-root ROOT --draft FILE --review FILE
 python3 scripts/sologsb.py record --task-root ROOT --side A --plan FILE [--lock-timeout SECONDS]
 python3 scripts/sologsb.py status --task-root ROOT
 python3 scripts/sologsb.py submit --task-root ROOT                         # 可选诊断：审核 + dry-run
-python3 scripts/sologsb.py submit --task-root ROOT --execute              # 完整审核通过后直接提交，自动记为 liudong
-python3 scripts/sologsb.py approve-line-gate --task-root ROOT            # 仅改动量单项失败时，由 liudong 在 TTY 中批准
+python3 scripts/sologsb.py submit --task-root ROOT --execute              # 完整审核通过后直接提交，自动记录设备配置里的审批人
+python3 scripts/sologsb.py approve-line-gate --task-root ROOT            # 仅改动量单项失败时，由设备配置里的审批人在 TTY 中批准
 python3 scripts/sologsb.py submit --task-root ROOT --approval APPROVAL --execute
 python3 scripts/sologsb.py cleanup --task-root ROOT  # 同时释放平台项目占用锁
 ```

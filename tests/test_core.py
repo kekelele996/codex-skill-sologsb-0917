@@ -1934,7 +1934,7 @@ class SubmitApprovalTests(unittest.TestCase):
         payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return payload_path, payload
 
-    def test_complete_audit_gets_automatic_liudong_approval(self) -> None:
+    def test_complete_audit_gets_automatic_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             payload_path, payload = self._bundle(root)
@@ -1947,11 +1947,11 @@ class SubmitApprovalTests(unittest.TestCase):
                 approval_path,
                 {"status": "pass", "submissionPayloadSha256": self.submit_api.sha256_file(payload_path)},
             )
-            self.assertEqual(approval["approvedBy"], "liudong")
+            self.assertEqual(approval["approvedBy"], self.submit_api.AUTO_APPROVER)
             self.assertEqual(approval["approvalKind"], "automatic")
             self.assertTrue(approval_path.is_file())
 
-    def test_line_gate_exception_requires_liudong_and_exact_hashes(self) -> None:
+    def test_line_gate_exception_requires_configured_approver_and_exact_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             payload_path, payload = self._bundle(root)
@@ -1989,7 +1989,7 @@ class SubmitApprovalTests(unittest.TestCase):
                 "manualConfirmed": True,
                 "approvalKind": "manual",
                 "scope": "change-volume-line-gate",
-                "approvedBy": "liudong",
+                "approvedBy": self.submit_api.AUTO_APPROVER,
                 "taskRoot": str(root),
                 "payloadPath": str(payload_path.resolve()),
                 "payloadSha256": self.submit_api.sha256_file(payload_path),
@@ -2005,7 +2005,7 @@ class SubmitApprovalTests(unittest.TestCase):
             }
             approval_path.write_text(json.dumps(approval, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             verified = self.submit_api.verify_approval(payload_path, payload, approval_path, preflight)
-            self.assertEqual(verified["approvedBy"], "liudong")
+            self.assertEqual(verified["approvedBy"], self.submit_api.AUTO_APPROVER)
             with self.assertRaisesRegex(RuntimeError, "唯一阻断项"):
                 self.submit_api.verify_approval(
                     payload_path,
