@@ -1,0 +1,11 @@
+{
+  "policyVersion": "solo-ra-renhua-v1",
+  "targetType": "comments",
+  "textSha256": "<替换为 final reason.strip() 的 SHA-256>",
+  "upstreamRevision": "7cbf47b57cbae0596d46c10c4a1445cbb27904b3",
+  "hardBans": [],
+  "unresolvedFindings": [],
+  "rewriteRounds": 0,
+  "reviewedBy": "rnskill/ra-人话",
+  "passed": true
+}

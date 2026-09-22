@@ -1,0 +1,26 @@
+{
+  "side": "A",
+  "completed": true,
+  "interrupted": false,
+  "unfinished": [],
+  "requirements": [
+    {
+      "requirement": "提示词中的一条明确需求",
+      "status": "satisfied",
+      "evidence": [
+        {
+          "type": "trace",
+          "eventIndex": 12,
+          "quote": "轨迹中的逐字证据"
+        },
+        {
+          "type": "artifact",
+          "path": "backend/internal/repository/example.go",
+          "quote": "产物中的实现证据"
+        }
+      ]
+    }
+  ],
+  "reason": "逐条说明为什么可以判定本轮已完成，以及没有中断或未完成事项。",
+  "reviewedBy": "Codex"
+}

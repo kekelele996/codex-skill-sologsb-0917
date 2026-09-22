@@ -1,0 +1,4 @@
+interface:
+  display_name: "sologsb-0917 Pair-wise GSB"
+  short_description: "固定提示词并行跑 N 个候选，前两名映射 A/B，生成可审计 GSB 本地交付"
+  default_prompt: "使用 $sologsb-0917 为一个题目先并行运行 3 个候选，前两名映射 A/B，再完成 Git、审核、Excel、录屏和 Python API 提交模块；完整审核通过后的默认流程是直接执行 submit --execute 并自动记录 liudong，只有改动量少于 10 行且为唯一阻断项时才等待 liudong 例外审批；最终交付展示严格使用八段式模板，不得增删标题或附加说明。"

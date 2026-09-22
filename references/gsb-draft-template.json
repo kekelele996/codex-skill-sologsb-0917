@@ -1,0 +1,113 @@
+{
+  "verdict": "A 更好",
+  "reason": "A 侧方案在联调阶段读取database/init.sql时检查迁移脚本，数据库配置仍然保留旧约束；升级后索引列表没有使用新的版本字段，接口返回仍然缺少版本信息。B 侧方案在新增指标时同步了口径说明和默认单位，但新增、编辑和重命名流程仍未接入；提交后对应配置没有写入，页面上的编辑结果还是照旧读回旧值。A 侧方案的约束已经去掉，B 侧方案的流程接入不完整；两边都写清了过程与产物事实，因此 A 侧方案更好。",
+  "languages": "Go, Gin, PostgreSQL",
+  "repro_level": "已容器化，可一键起环境",
+  "remark": "",
+  "claims": [
+    {
+      "side": "A",
+      "type": "process",
+      "polarity": "positive",
+      "text": "A 侧方案在联调阶段读取database/init.sql时检查迁移脚本",
+      "evidenceIds": [
+        "A-process-0001"
+      ]
+    },
+    {
+      "side": "A",
+      "type": "artifact",
+      "polarity": "negative",
+      "triggerKind": "file",
+      "trigger": "读取database/init.sql时",
+      "text": "数据库配置仍然保留旧约束",
+      "evidenceIds": [
+        "A-artifact-check-01"
+      ],
+      "objectiveConsequence": "升级后索引列表没有使用新的版本字段，接口返回仍然缺少版本信息"
+    },
+    {
+      "side": "B",
+      "type": "process",
+      "polarity": "positive",
+      "text": "B 侧方案在新增指标时同步了口径说明和默认单位",
+      "evidenceIds": [
+        "B-process-0001"
+      ]
+    },
+    {
+      "side": "B",
+      "type": "artifact",
+      "polarity": "negative",
+      "triggerKind": "requirement",
+      "trigger": "新增指标时",
+      "text": "提交后对应配置没有写入",
+      "evidenceIds": [
+        "B-artifact-check-01"
+      ],
+      "objectiveConsequence": "提交后对应配置没有写入，页面上的编辑结果还是照旧读回旧值"
+    }
+  ],
+  "sentenceEvidence": [
+    {
+      "sentence": "A 侧方案在联调阶段读取database/init.sql时检查迁移脚本，数据库配置仍然保留旧约束；",
+      "evidenceIds": [
+        "A-process-0001",
+        "A-artifact-check-01"
+      ]
+    },
+    {
+      "sentence": "升级后索引列表没有使用新的版本字段，接口返回仍然缺少版本信息。",
+      "evidenceIds": [
+        "A-artifact-check-01"
+      ]
+    },
+    {
+      "sentence": "B 侧方案在新增指标时同步了口径说明和默认单位，但新增、编辑和重命名流程仍未接入；",
+      "evidenceIds": [
+        "B-process-0001",
+        "B-artifact-check-01"
+      ]
+    },
+    {
+      "sentence": "提交后对应配置没有写入，页面上的编辑结果还是照旧读回旧值。",
+      "evidenceIds": [
+        "B-artifact-check-01"
+      ]
+    },
+    {
+      "sentence": "A 侧方案的约束已经去掉，B 侧方案的流程接入不完整；",
+      "evidenceIds": [
+        "A-artifact-check-01",
+        "B-artifact-check-01"
+      ]
+    },
+    {
+      "sentence": "两边都写清了过程与产物事实，因此 A 侧方案更好。",
+      "evidenceIds": [
+        "A-artifact-check-01",
+        "B-artifact-check-01"
+      ]
+    }
+  ],
+  "stylePolicy": {
+    "plainTextOnly": true,
+    "markdownAllowed": false,
+    "bannedWords": [
+      "闭环",
+      "根因",
+      "落库"
+    ],
+    "writeOperationLabel": "入库",
+    "externalFactorReferencesAllowed": false,
+    "evaluationExcludedEvidenceAllowed": false,
+    "maxSentenceNonWhitespaceChars": 56,
+    "vagueExpressionWarnings": [
+      "真实",
+      "真正",
+      "其实",
+      "本质上",
+      "实际上"
+    ]
+  }
+}

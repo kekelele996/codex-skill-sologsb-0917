@@ -1,0 +1,21 @@
+{
+  "a": [
+    {
+      "name": "构建或测试",
+      "command": "把 A 侧真实可执行命令写在这里",
+      "timeout": 900,
+      "expectedExit": 0,
+      "expectedContains": [],
+      "observedFailure": false
+    }
+  ],
+  "b": [
+    {
+      "name": "构建或测试",
+      "command": "把 B 侧真实可执行命令写在这里",
+      "timeout": 900,
+      "expectedExit": 0,
+      "expectedContains": []
+    }
+  ]
+}
