@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
+import platform
 import random
 import re
 import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Mapping
@@ -20,6 +23,7 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from common import (
+    CODEX_HOME,
     DEFAULT_RECORDING_LOCK_TIMEOUT,
     RECORDER_DIR,
     SologsbError,
@@ -37,9 +41,11 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 CHECK_ENV = RECORDER_DIR / "scripts" / "check_environment.sh"
 OTTY_CLI = Path("/Applications/Otty.app/Contents/MacOS/otty-cli")
 OTTY_BROWSER_DRIVER = RECORDER_DIR / "scripts" / "human_browser_driver.cjs"
-SCREENCAPTURE = Path("/usr/sbin/screencapture")
+SCK_RECORDER_SOURCE = SKILL_ROOT / "scripts" / "screencapturekit_window_recorder.swift"
+SCK_RECORDER_CACHE_DIR = CODEX_HOME / "cache" / "sologsb-0917" / "bin"
+SCK_RECORDER_MIN_MACOS = "15.0"
+SCK_READY_TIMEOUT_SECONDS = 20.0
 WINDOW_CAPTURE_MAX_SECONDS = 90
-# screencapture needs a short initialization window before SIGINT can finalize a movie.
 WINDOW_CAPTURE_MINIMUM_SECONDS = 4.0
 FRONTMOST_SAMPLE_SECONDS = 1.0
 POINTER_POLICIES = {
@@ -724,6 +730,107 @@ def _stop_cursor_guard(status: str = "ok") -> None:
         guard.stop(status)
 
 
+def _swift_compiler() -> str:
+    explicit = os.environ.get("SOLOSB_SWIFTC", "").strip()
+    if explicit:
+        path = Path(explicit).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        raise SologsbError(f"SOLOSB_SWIFTC 不可执行: {path}")
+    compiler = shutil.which("swiftc")
+    if compiler:
+        return compiler
+    xcrun = shutil.which("xcrun")
+    if xcrun:
+        proc = subprocess.run(
+            [xcrun, "--find", "swiftc"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+        )
+        if proc.returncode == 0:
+            candidate = proc.stdout.decode("utf-8", errors="replace").strip()
+            if candidate:
+                return candidate
+    raise SologsbError("缺少 Swift 编译器，无法构建 ScreenCaptureKit 窗口录制器")
+
+
+def _ensure_sck_recorder() -> Path:
+    """Return the cached macOS ScreenCaptureKit window recorder binary."""
+    override = os.environ.get("SOLOSB_SCK_RECORDER", "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+        raise SologsbError(f"SOLOSB_SCK_RECORDER 不可执行: {path}")
+
+    if platform.system() != "Darwin":
+        raise SologsbError("ScreenCaptureKit 窗口录制仅支持 macOS")
+    version = platform.mac_ver()[0].split(".")[0]
+    if version.isdigit() and int(version) < 15:
+        raise SologsbError(f"ScreenCaptureKit 录制要求 macOS 15 或更高，当前 {platform.mac_ver()[0]}")
+    if not SCK_RECORDER_SOURCE.is_file():
+        raise SologsbError(f"缺少 ScreenCaptureKit 录制器源码: {SCK_RECORDER_SOURCE}")
+
+    digest = hashlib.sha256(SCK_RECORDER_SOURCE.read_bytes()).hexdigest()[:16]
+    machine = platform.machine() or "arm64"
+    binary = SCK_RECORDER_CACHE_DIR / f"screencapturekit-window-recorder-{machine}-{digest}"
+    if binary.is_file() and os.access(binary, os.X_OK):
+        return binary
+
+    compiler = _swift_compiler()
+    SCK_RECORDER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{binary.name}.",
+        suffix=".tmp",
+        dir=str(SCK_RECORDER_CACHE_DIR),
+    )
+    os.close(fd)
+    temp_binary = Path(temp_name)
+    temp_binary.unlink(missing_ok=True)
+    command = [
+        compiler,
+        "-O",
+        "-parse-as-library",
+        "-swift-version",
+        "5",
+        "-target",
+        f"{machine}-apple-macosx{SCK_RECORDER_MIN_MACOS}",
+        "-framework",
+        "ScreenCaptureKit",
+        "-framework",
+        "AVFoundation",
+        "-framework",
+        "AppKit",
+        "-framework",
+        "CoreGraphics",
+        "-framework",
+        "CoreMedia",
+        str(SCK_RECORDER_SOURCE),
+        "-o",
+        str(temp_binary),
+    ]
+    try:
+        proc = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=240,
+            check=False,
+        )
+    except Exception:
+        temp_binary.unlink(missing_ok=True)
+        raise
+    if proc.returncode != 0:
+        error = proc.stderr.decode("utf-8", errors="replace").strip()
+        temp_binary.unlink(missing_ok=True)
+        raise SologsbError(f"ScreenCaptureKit 录制器编译失败: {error or proc.stdout.decode('utf-8', errors='replace').strip()}")
+    os.chmod(temp_binary, 0o755)
+    os.replace(temp_binary, binary)
+    return binary
+
+
 def _start_window_segment(
     *,
     output: Path,
@@ -735,9 +842,8 @@ def _start_window_segment(
     global _ACTIVE_WINDOW_CAPTURE, _ACTIVE_WINDOW_CAPTURE_LOG, _ACTIVE_WINDOW_CAPTURE_WATCHDOG, _ACTIVE_WINDOW_CAPTURE_STARTED
     if _ACTIVE_WINDOW_CAPTURE is not None and _ACTIVE_WINDOW_CAPTURE.poll() is None:
         raise SologsbError("已有窗口录屏进程在运行")
-    if not SCREENCAPTURE.is_file():
-        raise SologsbError(f"缺少系统窗口录制工具: {SCREENCAPTURE}")
 
+    recorder = _ensure_sck_recorder()
     output.parent.mkdir(parents=True, exist_ok=True)
     window_info = _validate_recording_window(window_info)
     bounds = str(window_info["bounds"])
@@ -750,48 +856,104 @@ def _start_window_segment(
     )
     if frontmost_monitor is not None:
         frontmost_monitor.register_target(window_info)
-    log_path = output.with_name(f"{output.stem}-screencapture.log")
+
+    log_path = output.with_name(f"{output.stem}-window-recorder.log")
+    ready_path = output.with_name(f"{output.stem}-window-recorder-ready.json")
+    ready_path.unlink(missing_ok=True)
+    output.unlink(missing_ok=True)
     handle = log_path.open("wb")
     command = [
-        str(SCREENCAPTURE),
-        "-x",
-        "-v",
-        f"-l{int(window_info['windowId'])}",
+        str(recorder),
+        "--window-id",
+        str(int(window_info["windowId"])),
+        "--output",
         str(output),
+        "--ready-file",
+        str(ready_path),
+        "--max-seconds",
+        str(WINDOW_CAPTURE_MAX_SECONDS),
     ]
-    started_at = utc_now()
+    proc: subprocess.Popen[bytes] | None = None
+    watchdog: threading.Timer | None = None
     try:
         proc = subprocess.Popen(command, stdout=handle, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + SCK_READY_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if ready_path.is_file():
+                break
+            exit_code = proc.poll()
+            if exit_code is not None:
+                raise SologsbError(f"ScreenCaptureKit 录制器提前退出({exit_code})，详见 {log_path}")
+            time.sleep(0.1)
+        else:
+            raise SologsbError(f"等待 ScreenCaptureKit 录制器就绪超时，详见 {log_path}")
+
+        ready = read_json(ready_path, {}) or {}
+        if not isinstance(ready, dict):
+            raise SologsbError("ScreenCaptureKit 录制器就绪文件格式无效")
+        if ready.get("backend") != "screen-capture-kit":
+            raise SologsbError(f"窗口录制后端不是 ScreenCaptureKit: {ready.get('backend')!r}")
+        if ready.get("showsCursor") is not False or ready.get("cursorCaptured") is not False:
+            raise SologsbError("ScreenCaptureKit 未确认关闭鼠标光标采集")
+        if int(ready.get("windowId") or 0) != int(window_info["windowId"]):
+            raise SologsbError("ScreenCaptureKit 录制器窗口 ID 不一致")
+
+        _ACTIVE_WINDOW_CAPTURE = proc
+        _ACTIVE_WINDOW_CAPTURE_LOG = handle
+        _ACTIVE_WINDOW_CAPTURE_STARTED = time.monotonic()
+        watchdog = threading.Timer(
+            WINDOW_CAPTURE_MAX_SECONDS,
+            lambda: proc.poll() is None and proc.send_signal(signal.SIGINT),
+        )
+        watchdog.daemon = True
+        watchdog.start()
+        _ACTIVE_WINDOW_CAPTURE_WATCHDOG = watchdog
+        pid_file.write_text(f"{proc.pid}\t{output}\n", encoding="utf-8")
+        write_json(
+            output.with_name(f"{output.stem}-window-capture.json"),
+            {
+                "status": "recording",
+                "captureKind": "window-id",
+                "captureBackend": "screen-capture-kit",
+                "showsCursor": False,
+                "cursorCaptured": False,
+                "minimumMacOS": SCK_RECORDER_MIN_MACOS,
+                "windowId": int(window_info["windowId"]),
+                "ownerPid": int(window_info["ownerPid"]),
+                "ownerName": str(window_info["ownerName"]),
+                "windowName": str(window_info["windowName"]),
+                "bounds": bounds,
+                "captureWidth": int(ready.get("width") or 0),
+                "captureHeight": int(ready.get("height") or 0),
+                "command": command,
+                "rawPath": str(output.resolve()),
+                "readyPath": str(ready_path.resolve()),
+                "logPath": str(log_path.resolve()),
+                "ready": ready,
+                "startedAt": utc_now(),
+            },
+        )
     except Exception:
-        handle.close()
+        if watchdog is not None:
+            watchdog.cancel()
+        if proc is not None and proc.poll() is None:
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=3)
         _stop_cursor_guard("start-failed")
+        handle.close()
+        _ACTIVE_WINDOW_CAPTURE = None
+        _ACTIVE_WINDOW_CAPTURE_LOG = None
+        _ACTIVE_WINDOW_CAPTURE_WATCHDOG = None
+        _ACTIVE_WINDOW_CAPTURE_STARTED = None
         raise
-    _ACTIVE_WINDOW_CAPTURE = proc
-    _ACTIVE_WINDOW_CAPTURE_LOG = handle
-    _ACTIVE_WINDOW_CAPTURE_STARTED = time.monotonic()
-    watchdog = threading.Timer(
-        WINDOW_CAPTURE_MAX_SECONDS,
-        lambda: proc.poll() is None and proc.send_signal(signal.SIGINT),
-    )
-    watchdog.daemon = True
-    watchdog.start()
-    _ACTIVE_WINDOW_CAPTURE_WATCHDOG = watchdog
-    pid_file.write_text(f"{proc.pid}\t{output}\n", encoding="utf-8")
-    write_json(
-        output.with_name(f"{output.stem}-window-capture.json"),
-        {
-            "status": "recording",
-            "captureKind": "window-id",
-            "windowId": int(window_info["windowId"]),
-            "ownerPid": int(window_info["ownerPid"]),
-            "ownerName": str(window_info["ownerName"]),
-            "windowName": str(window_info["windowName"]),
-            "bounds": bounds,
-            "command": command,
-            "rawPath": str(output.resolve()),
-            "startedAt": started_at,
-        },
-    )
 
 
 def _stop_window_segment(
@@ -873,9 +1035,14 @@ def _stop_window_segment(
         )
     metadata_path = raw.with_name(f"{raw.stem}-window-capture.json")
     metadata = read_json(metadata_path, {}) or {}
+    backend_ok = (
+        metadata.get("captureBackend") == "screen-capture-kit"
+        and metadata.get("showsCursor") is False
+        and metadata.get("cursorCaptured") is False
+    )
     metadata.update(
         {
-            "status": "ok" if exit_code in (0, None) else "failed",
+            "status": "ok" if exit_code in (0, None) and backend_ok else "failed",
             "exitCode": exit_code,
             "finishedAt": utc_now(),
             "outputPath": str(cropped.resolve()),
@@ -1389,6 +1556,9 @@ def recording_isolation_ok(
         return (
             item.get("status") == "ok"
             and item.get("captureKind") == "window-id"
+            and item.get("captureBackend") == "screen-capture-kit"
+            and item.get("showsCursor") is False
+            and item.get("cursorCaptured") is False
             and window_id > 0
             and owner_pid > 0
         )
@@ -2260,18 +2430,31 @@ def _record_side_locked(
                 "path": str(capture_path.resolve()),
                 "status": report.get("status"),
                 "captureKind": report.get("captureKind"),
+                "captureBackend": report.get("captureBackend"),
+                "showsCursor": report.get("showsCursor"),
+                "cursorCaptured": report.get("cursorCaptured"),
                 "windowId": report.get("windowId"),
                 "ownerPid": report.get("ownerPid"),
                 "ownerName": report.get("ownerName"),
                 "windowName": report.get("windowName"),
                 "bounds": report.get("bounds"),
                 "exitCode": report.get("exitCode"),
+                "readyPath": report.get("readyPath"),
+                "logPath": report.get("logPath"),
             }
         )
     chrome_profile_cleanup = read_json(runtime_dir / "chrome-profile-cleanup.json", {}) or {}
+    capture_backend_ok = bool(window_capture_reports) and all(
+        item.get("captureBackend") == "screen-capture-kit"
+        and item.get("showsCursor") is False
+        and item.get("cursorCaptured") is False
+        for item in window_capture_reports
+    )
     recording_metadata = {
         "activationPerformed": False,
         "untouched": True,
+        "captureBackend": "screen-capture-kit",
+        "captureExcludesCursor": capture_backend_ok,
         "userFrontmostAppAtStart": (focus_guard.user_frontmost_app if focus_guard else {}),
         "focusRestores": (focus_guard.events if focus_guard else []),
         "focusRestoreOk": bool(focus_guard and focus_guard.events) and all(
@@ -2294,10 +2477,13 @@ def _record_side_locked(
         "ok": recording_ok,
         "mode": mode,
         "captureMethod": "window-id",
+        "captureBackend": "screen-capture-kit",
+        "cursorExcludedFromCapture": capture_backend_ok,
         "recordingMetadata": recording_metadata,
         "windowCaptures": window_capture_reports,
         "cursorSuppression": {
             "reports": guard_reports,
+            "captureExcludesCursor": capture_backend_ok,
             "allHostInputUntouched": bool(guard_reports) and all(
                 item.get("pointerPolicy") == "host-input-untouched"
                 and item.get("hostInputRespected") is True

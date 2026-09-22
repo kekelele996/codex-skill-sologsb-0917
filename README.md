@@ -21,8 +21,8 @@
 9. 平台选项目复用 `solo2-auto` 的共享项目锁：全局选择串行化，选中后立即占用项目；
    已占用或运行中的项目自动跳过，显式指定时拒绝，`cleanup` 完成后释放。
 10. 所有任务共用一个全局录屏锁，并以项目为持有单位；后到项目等待，避免 Otty/Chrome 与系统录屏并发争抢。
-11. 录屏只允许窗口级后台采集：Web 题分别定位 Otty 与 Chrome 的数字 `CGWindowID`，纯终端题定位 Otty；开录瞬间复核当前 Space、最小化状态和 `ownerPid + ownerName`，找不到立即停止。
-12. 录制全程不激活、不置前录制窗口；统一使用 `pointerStrategy=none`，不移动、不停靠、不恢复鼠标，也不查询鼠标按键。指针进入画面不影响录制结果。Chrome 驱动关闭定时抢前台，并记录可见成功的焦点恢复。
+11. 录屏只允许窗口级后台采集：Web 题分别定位 Otty 与 Chrome 的数字 `CGWindowID`，纯终端题定位 Otty；使用 ScreenCaptureKit 独立窗口滤镜和 `SCRecordingOutput`，并强制 `showsCursor=false`。开录瞬间复核当前 Space、最小化状态和 `ownerPid + ownerName`，找不到立即停止。
+12. 录制全程不激活、不置前录制窗口；统一使用 `pointerStrategy=none`，不移动、不停靠、不恢复鼠标，也不查询鼠标按键。ScreenCaptureKit 不采集鼠标图层，用户可继续操作鼠标。Chrome 驱动关闭定时抢前台，并记录可见成功的焦点恢复。
 13. Web 收尾抓取真实 Otty pane 文本，执行 `cleanupCommands` 并清理本次新起的应用端口监听进程；每秒采样最前窗口，录制窗口置前采样必须为 0。
 14. 监控台会展示 `state.candidates` 与 `runtime/candidates/candidate-N`，竞速期间不必等 A/B 命名后才可见。
 

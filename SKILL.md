@@ -22,8 +22,8 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 发布标签：`v2026.09.22.3`
-- 精确提交号：运行 `git rev-parse v2026.09.22.3` 获取。
+- 发布标签：`v2026.09.22.4`
+- 精确提交号：运行 `git rev-parse v2026.09.22.4` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件。
 
 ## 实测固定顺序
@@ -39,7 +39,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 网关 429 `max_parallel_requests` 属于准入失败：正式候选运行前先等待最小 `/v1/messages` 探测成功；发生最终 429 后不要立即重启新容器，先等待 Key 恢复。恢复后仍按红线使用新容器、新 Claude home 和新 SessionID，实际尝试次数照记。
 - pnpm fresh clone 固定按“安装失败留证 → `pnpm approve-builds --all` → 再次安装 → 构建”顺序处理。
 - Web 录屏先确认默认 Tab、当前用户和重复卡片选择器；同名操作按钮使用卡片范围或 `.last()`；同时清除 Chrome 登录/同步/密码/通知等浮层与终端多网卡干扰行。
-- 录屏必须使用窗口级后台模式：先用 Quartz 定位 Otty/Chrome 的数字 `CGWindowID`，再由 `screencapture -x -v -l<windowId>` 采集；全程不激活、不置前、不最小化录制窗口。开录瞬间必须复核窗口仍在当前 Space 且 `ownerPid + ownerName` 未变化，找不到就停机。
+- 录屏必须使用窗口级后台模式：先用 Quartz 定位 Otty/Chrome 的数字 `CGWindowID`，再调用 ScreenCaptureKit 的 `SCContentFilter(desktopIndependentWindow:)` 和 `SCRecordingOutput` 采集；必须设置 `showsCursor=false`、`showMouseClicks=false`、`capturesAudio=false`。全程不激活、不置前、不最小化录制窗口。开录瞬间必须复核窗口仍在当前 Space 且 `ownerPid + ownerName` 未变化，找不到就停机。
 - 具体踩坑记录见 `references/lessons-learned-20260917.md`。
 
 ## 固定红线
@@ -82,7 +82,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 录屏 `ok` 不能只看文件是否生成：`expectedAppFailure=false` 而浏览器/API 非零退出时必须写 `ok=false`、`observedAppFailure=true`，
   `record` 命令返回非零并把状态退回 `gsb_ready`；先归档失败片段，修正 scenario 或应用后重录，未通过前不得进入 `recorded/complete`。
 - 录屏窗口 ID 红线：任何必须录屏的步骤只能使用 `window-id`。Web 题必须分别打开或定位 Otty 与 Chrome 窗口，并记录各自 `windowId`；API/CLI/失败题必须定位 Otty 窗口 ID。窗口缺失时先打开，无法定位或 `windowId<=0` 时立即停止，禁止回退到整屏、裁切、iTerm2 或 headless。
-- 每个片段必须写 `<片段>-window-capture.json`，其中必须包含 `captureKind=window-id`、目标 `windowId`、所属 PID、bounds、退出码和采集状态；窗口 ID 缺失、失效或采集状态非 `ok` 时该侧录屏失败。
+- 每个片段必须写 `<片段>-window-capture.json`，其中必须包含 `captureKind=window-id`、`captureBackend=screen-capture-kit`、`showsCursor=false`、`cursorCaptured=false`、目标 `windowId`、所属 PID、bounds、退出码和采集状态；窗口 ID 缺失、失效、后端不是 ScreenCaptureKit、鼠标排除标记不为 false 或采集状态非 `ok` 时该侧录屏失败。
 - 开录瞬间必须再次确认目标窗口仍在当前 Space、未被最小化，且 `ownerPid + ownerName` 与定位时一致；窗口不在 Otty/Google Chrome 白名单内时立即停机。
 - ChatGPT 不属于录制目标。录制器不得最小化、激活、移动或恢复任何 ChatGPT 窗口，也不生成
   `chatgpt-window-guard.json`；窗口级后台采集只处理 Otty/Google Chrome。
@@ -206,8 +206,8 @@ SOLO2 会话失效时，运行器会用配置里的账号密码自动重新登�
    命令会在锁内执行预检/预构建、环境检查、真实录屏和收尾；另一项目持锁时当前任务等待而不是并发启动。
    默认使用 Otty；终端只显示相对路径，不暴露真实绝对路径。录制固定当前 Space，不切换 Space；
    不对 ChatGPT 做任何窗口操作；先定位或打开 Otty/Chrome 窗口并取得数字 `CGWindowID`，开录瞬间复核后只用
-   `screencapture -l<id>` 采集，不激活录制窗口。若开窗短暂抢到前台，只把用户原应用恢复；默认
-   `pointerStrategy=none`，全程不操作鼠标；指针进入画面不影响录制结果。结束后检查前台采样、焦点恢复和服务清理。
+   ScreenCaptureKit 按窗口 ID 后台采集，不激活录制窗口。若开窗短暂抢到前台，只把用户原应用恢复；默认
+   `pointerStrategy=none`，全程不操作鼠标，并强制 `showsCursor=false`，用户仍可正常操作鼠标。结束后检查前台采样、焦点恢复和服务清理。
    视频统一保存为 `<项目编号-项目名>-验证A产物.mp4` 和 `<项目编号-项目名>-验证B产物.mp4`。
    成功侧录成功链路，失败侧录真实失败链路；场景脚本必须执行到可观察的最终状态，不能因预期失败而提前停止或伪造成功。
    纯后端/API 题在 `apiRequests` 中模拟多步业务请求（可用 `extract` 提取 token 传给后续请求），断言失败按真实失败结果记录。

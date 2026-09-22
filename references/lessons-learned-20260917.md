@@ -100,9 +100,9 @@
 ## 2026-09-20 录屏窗口隔离实测
 
 - 全屏录屏后按窗口 bounds 裁切无法识别像素归属，其他窗口只要覆盖目标矩形就会进入视频；`bringToFront` 只能降低概率。
-- 固定方案为当前 Space 直接按 `kCGWindowNumber` 采集：`screencapture -x -v -l<windowId> <输出.mov>`，再统一转码为 1280x720。
+- 固定方案为当前 Space 直接按 `kCGWindowNumber` 采集：ScreenCaptureKit 使用独立窗口滤镜和 `SCRecordingOutput` 写入 `.mov`，再统一转码为 1280x720。macOS 26/27 共用同一套 macOS 15+ 部署目标和缓存二进制。
 - 不自动切换 Space；录制直接在当前 Space 对目标窗口 ID 采集。
-- `screencapture` 启动后过早发送停止信号可能得到空文件；停止器至少保留 4 秒采集时间，正常录屏远长于该窗口。
+- ScreenCaptureKit 录制器必须等待 ready 文件后再开始停止计时；停止信号后要等待 `SCRecordingOutput` 完成文件落盘。停止器至少保留 4 秒采集时间，正常录屏远长于该窗口。
 - 旧版曾要求最小化并恢复 ChatGPT 窗口；该规则已于 2026-09-21 废除。录制器不得触碰 ChatGPT，
   窗口采集与前台采样只围绕 Otty/Google Chrome 执行。
 - Otty CLI 偶发“IPC response timed out”后仍可能延迟创建窗口；打开失败时按标题继续轮询十秒并关闭迟到窗口，避免残留 Orphan Window。
@@ -119,7 +119,7 @@
 
 - `kCGWindowBounds` 在 PyObjC 下不能按普通 `dict` 判断；必须用 `collections.abc.Mapping` 接收并
   `dict()` 归一化，否则窗口在录制开始时会因 bounds 假无效而被错误阻断。
-- 开录前只定位一次窗口不够。真正调用 `screencapture` 前必须重新读取同一个数字 `CGWindowID`，复核
+- 开录前只定位一次窗口不够。真正启动 ScreenCaptureKit 前必须重新读取同一个数字 `CGWindowID`，复核
   当前 Space、未最小化状态和 `ownerPid + ownerName`；任何一项变化都停机，禁止退回整屏或裁切。
 - 录制窗口不得靠 `window focus` 或定时 `page.bringToFront()` 保持前台。开窗短暂抢到前台时，只在最前普通窗口
   属于本次录制进程的条件下恢复用户原应用；用户切到其他应用后不得抢回。

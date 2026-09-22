@@ -9,7 +9,7 @@
 - 启动失败或场景失败是非零结果，不是录制失败；只要视频真实生成，就必须保留 `browser-result.json`、
   终端日志、退出码和失败截图，并把失败事实写进评分与 GSB。
 - 禁止 headless 冒充、注入字幕、Demo 标签或后期伪造终端。
-- 所有录屏强制使用 macOS 数字 `CGWindowID` 采集，命令固定为 `screencapture -x -v -l<windowId>`；不再录制整屏后按 bounds 裁切，也不得保留桌面、Dock、菜单栏、通知或其他应用窗口。
+- 所有录屏强制使用 macOS 数字 `CGWindowID`，通过 ScreenCaptureKit 的独立窗口滤镜和 `SCRecordingOutput` 采集；必须设置 `showsCursor=false`、`showMouseClicks=false`、`capturesAudio=false`。不再录制整屏后按 bounds 裁切，也不得保留桌面、Dock、菜单栏、通知或其他应用窗口。
 - 红线：录制前必须分别定位目标应用的 `kCGWindowNumber`。Web 题缺少 Otty 或 Chrome 窗口时先打开；仍无法定位、`windowId<=0`、窗口 ID 失效、窗口被最小化、不在当前 Space、应用不是 Otty/Google Chrome，或采集状态非 `ok` 时立即停止，禁止回退到整屏/裁切/iTerm2/headless。
 - 开录瞬间必须再次读取该窗口 ID，确认 `ownerPid + ownerName` 与首次定位一致；不允许只按 PID、标题或面积猜测目标窗口。
 - 录制全程不得激活、置前或最小化录制窗口，也不得调用 Otty `window focus` 或定时 `page.bringToFront()`。
@@ -84,8 +84,8 @@
 
 ## 窗口 ID 采集与当前 Space
 
-- Otty、Chrome 都必须先通过 Quartz 定位具体 `kCGWindowNumber`，再用该 ID 录音：
-  `screencapture -x -v -l<windowId> <输出.mov>`。窗口被其他应用遮挡不影响采集内容。
+- Otty、Chrome 都必须先通过 Quartz 定位具体 `kCGWindowNumber`，再用该 ID 启动 ScreenCaptureKit 录制：
+  `SCContentFilter(desktopIndependentWindow:)` 只绑定目标窗口，`SCRecordingOutput` 写入 `.mov`。窗口被其他应用遮挡不影响采集内容。
 - 必须记录 `windowId`、所属 PID、应用名、窗口名和 bounds。仅按 PID、标题或“面积最大的窗口”还不够，
   实际采集必须绑定稳定窗口 ID。
 - 不创建、不切换 macOS Space。录制在当前 Space 执行；脚本不得调用 Space 切换或全屏模式。
@@ -93,9 +93,12 @@
 - 开窗可能短暂把新窗口置前。录制器必须在开窗前记录用户前台应用；仅当最前普通窗口属于本次打开的 Otty/Chrome 进程时，才把用户原应用恢复。恢复事实写入
   `recordingMetadata.userFrontmostAppAtStart` 和 `recordingMetadata.focusRestores`；用户此后切到的其他应用不得被抢回。
   发生抢占时必须在 1 秒内观察到用户原应用重新成为最前应用，并写 `focusRestoreOk=true`。
-- 窗口视频报告写 `<片段>-window-capture.json`，包含 `captureKind=window-id`、`windowId`、所属 PID、
-  bounds、`screencapture` 命令、退出码和实际输出文件。
-- `screencapture` 启动初期需要稳定时间。停止器会至少保留 4 秒采集时间；最长由看门狗限制为 90 秒，
+- 窗口视频报告写 `<片段>-window-capture.json`，包含 `captureKind=window-id`、`captureBackend=screen-capture-kit`、
+  `showsCursor=false`、`cursorCaptured=false`、`windowId`、所属 PID、bounds、录制命令、退出码和实际输出文件。
+- ScreenCaptureKit 录制器首次运行会在 `$CODEX_HOME/cache/sologsb-0917/bin/` 按源码哈希编译并缓存；
+  macOS 26/27 共用 macOS 15+ 部署目标，不需要分别维护两套二进制。首次运行需要给实际启动技能的
+  终端或 Codex 应用授予“屏幕录制”权限；未授权时录制器会在 ready 文件出现前失败并写日志。
+- 录制器就绪后用信号停止并等待文件落盘。停止器至少保留 4 秒采集时间；最长由看门狗限制为 90 秒，
   避免异常场景无限占用录屏。
 - Web 题的 Otty 与 Chrome 分别按各自窗口 ID 采集，再拼接成最终视频。不得用同一窗口 ID、PID 粗匹配或标题猜测替代实际目标窗口 ID。
 - Web 题 Chrome 必须增加 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`；浏览器驱动传 `HUMAN_BROWSER_KEEP_FRONT=0`，默认值仍为保持旧行为的 `1`。
@@ -110,13 +113,14 @@
 
 - 录制器不得干扰用户鼠标。禁止移动、停靠、恢复指针，禁止查询鼠标按键，也禁止调用任何会改变鼠标位置的系统接口。
 - 统一使用 `pointerStrategy=none`，对应 `pointerPolicy=host-input-untouched`。旧计划中的 `background`、`park-pointer` 会自动归一到该策略。
-- 指针是否出现在录屏画面中不作为录制失败条件，也不要求为规避指针而重录。录制结果只依据业务链路、窗口采集和运行结果判断。
+- ScreenCaptureKit 必须设置 `showsCursor=false`，只把目标窗口内容编码进视频。鼠标可以继续在当前桌面正常移动和点击，不应出现在最终视频里。
 - 每个片段旁写纯 JSON `<片段>-cursor-guard.json`，字段包含 `segment`、`windowId`、`captureKind`、
   `pointerStrategy`、`pointerPolicy`、`hostInputRespected`、`pointerMoved`、`mouseButtonsQueried`、`parkApplied`、`positionReadOnly`、
   `finalPointerInsideWindow` 和 `status`。`finalPointerInsideWindow` 只记录只读观察结果，不参与门禁。
 - 验收要求 `status=ok`、`pointerStrategy=none`、`pointerPolicy=host-input-untouched`、`hostInputRespected=true`、
   `pointerMoved=false`、`mouseButtonsQueried=false`、`parkApplied=false`。鼠标位置读取失败也不得导致重录或阻断。
-- 不执行“无鼠标”抽帧或模板匹配。允许系统指针在窗口内容上正常显示。
+- 窗口视频还必须满足 `captureBackend=screen-capture-kit`、`showsCursor=false`、`cursorCaptured=false`；
+  不执行抽帧擦除、模板匹配或后期去除鼠标，因为这些做法会破坏录屏证据。
 
 ## Web 终端日志与收尾
 

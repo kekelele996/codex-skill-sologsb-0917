@@ -68,7 +68,9 @@ from recorder import default_plan, prepare_recording, recording_output_name  # n
 from recorder import (  # noqa: E402
     _capture_otty_pane_text,
     _copy_final,
+    _ensure_sck_recorder,
     _MouseCursorGuard,
+    SCK_RECORDER_SOURCE,
     normalize_pointer_strategy,
     _otty_open_window,
     _recording_service_ports,
@@ -765,7 +767,7 @@ class VideoTests(unittest.TestCase):
         close_window.assert_called_once_with("w_late")
 
     def test_recording_isolation_gate_requires_window_ids(self) -> None:
-        captures = [{"status": "ok", "captureKind": "window-id", "windowId": 6457, "ownerPid": 768, "ownerName": "Otty"}]
+        captures = [{"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6457, "ownerPid": 768, "ownerName": "Otty"}]
         guards = [{
             "status": "ok",
             "pointerStrategy": "none",
@@ -805,9 +807,24 @@ class VideoTests(unittest.TestCase):
                 service_cleanup=service_cleanup,
             )
         )
+        self.assertFalse(
+            recording_isolation_ok(
+                mode="terminal",
+                window_capture_reports=[{
+                    "status": "ok",
+                    "captureKind": "window-id",
+                    "windowId": 6457,
+                    "ownerPid": 768,
+                    "ownerName": "Otty",
+                }],
+                guard_reports=guards,
+                frontmost_report=frontmost,
+                service_cleanup=service_cleanup,
+            )
+        )
         web_captures = [
-            {"status": "ok", "captureKind": "window-id", "windowId": 6457, "ownerPid": 768, "ownerName": "Otty"},
-            {"status": "ok", "captureKind": "window-id", "windowId": 6458, "ownerPid": 769, "ownerName": "Chrome"},
+            {"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6457, "ownerPid": 768, "ownerName": "Otty"},
+            {"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6458, "ownerPid": 769, "ownerName": "Chrome"},
         ]
         self.assertTrue(
             recording_isolation_ok(
@@ -845,6 +862,28 @@ class VideoTests(unittest.TestCase):
                 service_cleanup={"status": "failed", "residualAppPortListeners": [{"pid": 1}]},
             )
         )
+
+    def test_screen_capturekit_source_disables_cursor(self) -> None:
+        source = SCK_RECORDER_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("configuration.showsCursor = false", source)
+        self.assertIn("configuration.showMouseClicks = false", source)
+        self.assertIn("configuration.capturesAudio = false", source)
+
+    def test_screen_capturekit_recorder_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "window-recorder"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            with mock.patch.dict(os.environ, {
+                "SOLOSB_SCK_RECORDER": str(binary),
+            }, clear=False):
+                self.assertEqual(_ensure_sck_recorder(), binary)
+            binary.chmod(0o644)
+            with mock.patch.dict(os.environ, {
+                "SOLOSB_SCK_RECORDER": str(binary),
+            }, clear=False):
+                with self.assertRaisesRegex(SologsbError, "不可执行"):
+                    _ensure_sck_recorder()
 
     def test_window_id_gate_rejects_missing_identity(self) -> None:
         self.assertEqual(_require_window_id({"windowId": 6457, "ownerPid": 768}, "Otty")["windowId"], 6457)
