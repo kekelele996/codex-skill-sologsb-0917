@@ -1,11 +1,13 @@
 {
   "schemaVersion": 1,
-  "source": "https://solo2.jzxhnh.com/app/gsb/submit",
+  "source": "/app/gsb/submit",
   "inspectedAt": "2026-09-18T01:20:00+08:00",
   "form": {
     "fieldCount": 20,
     "requiredCount": 19,
-    "optionalFields": ["remark"],
+    "optionalFields": [
+      "remark"
+    ],
     "submitButton": "提交并质检",
     "clearButton": "清空重填",
     "draftNotice": "填写内容会自动存为本地草稿。",
@@ -13,15 +15,26 @@
   },
   "uploadRules": {
     "trace": {
-      "fields": ["a_trace_file", "b_trace_file"],
+      "fields": [
+        "a_trace_file",
+        "b_trace_file"
+      ],
       "extension": ".jsonl",
       "maxFiles": 1,
       "maxBytes": 28311552,
       "maxDisplay": "27 MB"
     },
     "video": {
-      "fields": ["a_screencast", "b_screencast"],
-      "extensions": [".mp4", ".mov", ".webm", ".m4v"],
+      "fields": [
+        "a_screencast",
+        "b_screencast"
+      ],
+      "extensions": [
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".m4v"
+      ],
       "maxFiles": 1,
       "maxBytes": 524288000,
       "maxDisplay": "500 MB"
@@ -34,25 +47,199 @@
     "执行 A：Prompt 与本期已有数据雷同直接废弃"
   ],
   "fields": [
-    {"order": 10, "key": "user_prompt", "label": "User Prompt", "type": "textarea", "required": true, "maxLength": null, "options": []},
-    {"order": 20, "key": "question_type", "label": "任务类型", "type": "select", "required": true, "maxLength": null, "options": ["0-1代码生成", "feature迭代", "Bug修复", "代码理解", "代码重构", "工程化", "代码测试"]},
-    {"order": 30, "key": "difficulty", "label": "任务难度", "type": "select", "required": true, "maxLength": null, "options": ["困难", "地狱"]},
-    {"order": 40, "key": "languages", "label": "语言/框架", "type": "text", "required": true, "maxLength": 255, "options": []},
-    {"order": 50, "key": "harness", "label": "Harness", "type": "select", "required": true, "maxLength": null, "options": ["Claude Code", "Codex CLI"]},
-    {"order": 60, "key": "harness_version", "label": "Harness 版本", "type": "text", "required": true, "maxLength": 64, "options": []},
-    {"order": 70, "key": "os_platform", "label": "操作系统", "type": "select", "required": true, "maxLength": null, "options": ["MacOS/Linux", "Windows"]},
-    {"order": 80, "key": "repro_level", "label": "环境可复现等级", "type": "select", "required": true, "maxLength": null, "options": ["无外部依赖", "有外部依赖，未容器化", "已容器化，可一键起环境"], "uiNote": "页面文案写“选填”，但官方 schema 为 required=true，按必填处理。"},
-    {"order": 90, "key": "env_snapshot", "label": "初始环境快照", "type": "url", "required": true, "maxLength": 512, "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$"},
-    {"order": 100, "key": "a_session_id", "label": "A-SessionID", "type": "text", "required": true, "maxLength": 128},
-    {"order": 110, "key": "a_trace_file", "label": "A-轨迹文件", "type": "attachment", "required": true},
-    {"order": 120, "key": "a_artifact_snapshot", "label": "A-产物快照", "type": "url", "required": true, "maxLength": 512, "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$"},
-    {"order": 130, "key": "a_screencast", "label": "A-运行录屏", "type": "video", "required": true},
-    {"order": 140, "key": "b_session_id", "label": "B-SessionID", "type": "text", "required": true, "maxLength": 128},
-    {"order": 150, "key": "b_trace_file", "label": "B-轨迹文件", "type": "attachment", "required": true},
-    {"order": 160, "key": "b_artifact_snapshot", "label": "B-产物快照", "type": "url", "required": true, "maxLength": 512, "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$"},
-    {"order": 170, "key": "b_screencast", "label": "B-运行录屏", "type": "video", "required": true},
-    {"order": 180, "key": "gsb_verdict", "label": "GSB 结论", "type": "select", "required": true, "maxLength": null, "options": ["A 更好", "Same", "B 更好"]},
-    {"order": 190, "key": "gsb_reason", "label": "GSB 理由", "type": "textarea", "required": true, "maxLength": null},
-    {"order": 210, "key": "remark", "label": "备注", "type": "textarea", "required": false, "maxLength": null}
+    {
+      "order": 10,
+      "key": "user_prompt",
+      "label": "User Prompt",
+      "type": "textarea",
+      "required": true,
+      "maxLength": null,
+      "options": []
+    },
+    {
+      "order": 20,
+      "key": "question_type",
+      "label": "任务类型",
+      "type": "select",
+      "required": true,
+      "maxLength": null,
+      "options": [
+        "0-1代码生成",
+        "feature迭代",
+        "Bug修复",
+        "代码理解",
+        "代码重构",
+        "工程化",
+        "代码测试"
+      ]
+    },
+    {
+      "order": 30,
+      "key": "difficulty",
+      "label": "任务难度",
+      "type": "select",
+      "required": true,
+      "maxLength": null,
+      "options": [
+        "困难",
+        "地狱"
+      ]
+    },
+    {
+      "order": 40,
+      "key": "languages",
+      "label": "语言/框架",
+      "type": "text",
+      "required": true,
+      "maxLength": 255,
+      "options": []
+    },
+    {
+      "order": 50,
+      "key": "harness",
+      "label": "Harness",
+      "type": "select",
+      "required": true,
+      "maxLength": null,
+      "options": [
+        "Claude Code",
+        "Codex CLI"
+      ]
+    },
+    {
+      "order": 60,
+      "key": "harness_version",
+      "label": "Harness 版本",
+      "type": "text",
+      "required": true,
+      "maxLength": 64,
+      "options": []
+    },
+    {
+      "order": 70,
+      "key": "os_platform",
+      "label": "操作系统",
+      "type": "select",
+      "required": true,
+      "maxLength": null,
+      "options": [
+        "MacOS/Linux",
+        "Windows"
+      ]
+    },
+    {
+      "order": 80,
+      "key": "repro_level",
+      "label": "环境可复现等级",
+      "type": "select",
+      "required": true,
+      "maxLength": null,
+      "options": [
+        "无外部依赖",
+        "有外部依赖，未容器化",
+        "已容器化，可一键起环境"
+      ],
+      "uiNote": "页面文案写“选填”，但官方 schema 为 required=true，按必填处理。"
+    },
+    {
+      "order": 90,
+      "key": "env_snapshot",
+      "label": "初始环境快照",
+      "type": "url",
+      "required": true,
+      "maxLength": 512,
+      "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$"
+    },
+    {
+      "order": 100,
+      "key": "a_session_id",
+      "label": "A-SessionID",
+      "type": "text",
+      "required": true,
+      "maxLength": 128
+    },
+    {
+      "order": 110,
+      "key": "a_trace_file",
+      "label": "A-轨迹文件",
+      "type": "attachment",
+      "required": true
+    },
+    {
+      "order": 120,
+      "key": "a_artifact_snapshot",
+      "label": "A-产物快照",
+      "type": "url",
+      "required": true,
+      "maxLength": 512,
+      "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$"
+    },
+    {
+      "order": 130,
+      "key": "a_screencast",
+      "label": "A-运行录屏",
+      "type": "video",
+      "required": true
+    },
+    {
+      "order": 140,
+      "key": "b_session_id",
+      "label": "B-SessionID",
+      "type": "text",
+      "required": true,
+      "maxLength": 128
+    },
+    {
+      "order": 150,
+      "key": "b_trace_file",
+      "label": "B-轨迹文件",
+      "type": "attachment",
+      "required": true
+    },
+    {
+      "order": 160,
+      "key": "b_artifact_snapshot",
+      "label": "B-产物快照",
+      "type": "url",
+      "required": true,
+      "maxLength": 512,
+      "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$"
+    },
+    {
+      "order": 170,
+      "key": "b_screencast",
+      "label": "B-运行录屏",
+      "type": "video",
+      "required": true
+    },
+    {
+      "order": 180,
+      "key": "gsb_verdict",
+      "label": "GSB 结论",
+      "type": "select",
+      "required": true,
+      "maxLength": null,
+      "options": [
+        "A 更好",
+        "Same",
+        "B 更好"
+      ]
+    },
+    {
+      "order": 190,
+      "key": "gsb_reason",
+      "label": "GSB 理由",
+      "type": "textarea",
+      "required": true,
+      "maxLength": null
+    },
+    {
+      "order": 210,
+      "key": "remark",
+      "label": "备注",
+      "type": "textarea",
+      "required": false,
+      "maxLength": null
+    }
   ]
 }
