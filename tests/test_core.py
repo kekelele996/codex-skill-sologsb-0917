@@ -2028,7 +2028,7 @@ class ContainerLimitTests(unittest.TestCase):
                 limit, _, _ = side_runner._ContainerLimiter(config)._settings()
             self.assertEqual(limit, 4)
 
-    def test_device_config_limit_overrides_legacy_file(self) -> None:
+    def test_device_config_limit_overrides_legacy_file_and_env(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = Path(temp) / "container-limit.json"
             device_config = Path(temp) / "config.json"
@@ -2036,7 +2036,7 @@ class ContainerLimitTests(unittest.TestCase):
             write_json(device_config, {"claude": {"maxContainers": "3"}})
             with mock.patch.dict(os.environ, {
                 "SOLOSB_CONFIG": str(device_config),
-                "SOLOSB_MAX_CONTAINERS": "",
+                "SOLOSB_MAX_CONTAINERS": "1",
             }, clear=False):
                 limit, _, _ = side_runner._ContainerLimiter(config)._settings()
             self.assertEqual(limit, 3)
@@ -2088,12 +2088,63 @@ class ContainerLimitTests(unittest.TestCase):
                 if second is not None:
                     second.release()
 
+    def test_waiting_task_reloads_device_config_after_refresh_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "container-limit.json"
+            device_config = root / "config.json"
+            write_json(config, {"waitSeconds": 30})
+            write_json(device_config, {"claude": {"maxContainers": "1"}})
+            limiter = side_runner._ContainerLimiter(config)
+            first = None
+            second = None
+            try:
+                with mock.patch.dict(os.environ, {
+                    "SOLOSB_CONFIG": str(device_config),
+                    "SOLOSB_MAX_CONTAINERS": "",
+                }, clear=False), mock.patch.object(
+                    limiter, "_running_containers", return_value=[]
+                ):
+                    first = limiter.acquire(
+                        "project-1", "sologsb-project-1-candidate-1-1-a"
+                    )
+                    sleeps: list[float] = []
+
+                    def reload_limit(seconds: float) -> None:
+                        sleeps.append(seconds)
+                        write_json(device_config, {"claude": {"maxContainers": "2"}})
+
+                    with mock.patch.object(
+                        side_runner, "CONTAINER_SETTINGS_REFRESH_SECONDS", 0.0
+                    ), mock.patch.object(
+                        side_runner.time, "sleep", side_effect=reload_limit
+                    ):
+                        second = limiter.acquire(
+                            "project-2", "sologsb-project-2-candidate-1-1-a"
+                        )
+                    self.assertEqual(len(sleeps), 1)
+                    self.assertIsNotNone(second.path)
+                    status = limiter.status()
+                    self.assertEqual(status["limit"], 2)
+                    self.assertEqual(status["used"], 2)
+            finally:
+                if first is not None:
+                    first.release()
+                if second is not None:
+                    second.release()
+
     def test_absolute_cap_cannot_be_raised_by_env_or_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            config = Path(temp) / "container-limit.json"
+            root = Path(temp)
+            config = root / "container-limit.json"
+            device_config = root / "config.json"
             write_json(config, {"maxContainers": 99, "excludedProjectCodes": []})
+            write_json(device_config, {"claude": {"maxContainers": "99"}})
             limiter = side_runner._ContainerLimiter(config)
-            with mock.patch.dict(os.environ, {"SOLOSB_MAX_CONTAINERS": "99"}):
+            with mock.patch.dict(os.environ, {
+                "SOLOSB_CONFIG": str(device_config),
+                "SOLOSB_MAX_CONTAINERS": "99",
+            }, clear=False):
                 limit, _, _ = limiter._settings()
             self.assertEqual(limit, 6)
 

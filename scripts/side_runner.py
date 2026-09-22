@@ -62,6 +62,8 @@ CONTAINER_LIMIT_PATH = Path(os.environ.get(
 ))
 DEFAULT_MAX_CONTAINERS = 4
 ABSOLUTE_MAX_CONTAINERS = 6
+CONTAINER_QUEUE_POLL_SECONDS = 5.0
+CONTAINER_SETTINGS_REFRESH_SECONDS = 180.0
 
 
 def anthropic_base_url() -> str:
@@ -416,11 +418,11 @@ class _ContainerLimiter:
         return max(1, parsed)
 
     def _configured_limit(self, data: dict[str, Any]) -> int:
-        """按环境变量、设备配置、兼容配置、代码默认值的顺序解析上限。"""
-        env_value = str(os.environ.get("SOLOSB_MAX_CONTAINERS") or "").strip()
-        if env_value:
-            return self._positive_int(env_value)
+        """按设备配置、环境变量、兼容配置、代码默认值的顺序解析上限。
 
+        设备配置优先是为了让运行中的任务在排队期间重新读取同一份配置；
+        否则进程启动时注入的 ``SOLOSB_MAX_CONTAINERS`` 会一直遮住后续修改。
+        """
         device_value = ""
         try:
             device_data = device_config.load()
@@ -428,11 +430,12 @@ class _ContainerLimiter:
                 device_config.get_path(device_data, "claude.maxContainers", "") or ""
             ).strip()
         except (device_config.ConfigError, OSError):
-            # 设备配置缺失或暂时不可读时继续使用兼容配置，不让容器执行因本地展示配置中断。
+            # 设备配置缺失或暂时不可读时继续使用环境变量或兼容配置。
             device_value = ""
 
+        env_value = str(os.environ.get("SOLOSB_MAX_CONTAINERS") or "").strip()
         legacy_value = str(data.get("maxContainers") or "").strip()
-        return self._positive_int(device_value or legacy_value or DEFAULT_MAX_CONTAINERS)
+        return self._positive_int(device_value or env_value or legacy_value or DEFAULT_MAX_CONTAINERS)
 
     def _settings(self) -> tuple[int, set[str], float]:
         data = read_json(self.config_path, {})
@@ -501,13 +504,19 @@ class _ContainerLimiter:
         except (TypeError, ValueError, OSError):
             return False
 
-    def _classify_markers(self, running_names: set[str]) -> tuple[set[str], list[Path]]:
+    def _classify_markers(
+        self,
+        running_names: set[str],
+        excluded: set[str] | None = None,
+    ) -> tuple[set[str], list[Path]]:
         """Split reservation markers into live reservations and dead ones.
 
         Shared by :meth:`acquire` and :meth:`status` so the two can never
-        disagree about what a marker means.
+        disagree about what a marker means. Callers inside ``acquire`` pass
+        the same settings snapshot used for admission.
         """
-        _limit, excluded, _wait = self._settings()
+        if excluded is None:
+            _limit, excluded, _wait = self._settings()
         reservations: set[str] = set()
         dead: list[Path] = []
         for marker in list(self.reservations.glob("*.json")):
@@ -545,7 +554,7 @@ class _ContainerLimiter:
             if not self._container_is_excluded(name, label, excluded)
         }
         self.reservations.mkdir(parents=True, exist_ok=True)
-        reservations, dead = self._classify_markers(running_names)
+        reservations, dead = self._classify_markers(running_names, excluded)
         # 运行中的容器与仍存活的预占位都占用名额，避免并发 docker run 突破上限。
         active_names = running_names | reservations
         used = len(active_names)
@@ -564,12 +573,29 @@ class _ContainerLimiter:
         }
 
     def acquire(self, project_code: str, container_name: str) -> _ContainerReservation:
-        limit, excluded, wait_seconds = self._settings()
-        if self._container_is_excluded(container_name, project_code, excluded):
-            return _ContainerReservation(None)
         self.reservations.mkdir(parents=True, exist_ok=True)
-        deadline = time.monotonic() + wait_seconds
+        started_at = time.monotonic()
+        next_settings_refresh = 0.0
+        limit = DEFAULT_MAX_CONTAINERS
+        excluded: set[str] = set()
+        wait_seconds = 14400.0
+
         while True:
+            now = time.monotonic()
+            if now >= next_settings_refresh:
+                limit, excluded, wait_seconds = self._settings()
+                next_settings_refresh = now + max(0.0, CONTAINER_SETTINGS_REFRESH_SECONDS)
+
+            if self._container_is_excluded(container_name, project_code, excluded):
+                return _ContainerReservation(None)
+
+            elapsed = now - started_at
+            if elapsed >= wait_seconds:
+                raise SologsbError(
+                    f"等待容器名额超时：非测试项目最多同时运行 {limit} 个容器，"
+                    f"已等待 {int(wait_seconds)} 秒"
+                )
+
             with self.lock_path.open("a+", encoding="utf-8") as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                 try:
@@ -578,7 +604,7 @@ class _ContainerLimiter:
                         name for name, label in running
                         if not self._container_is_excluded(name, label, excluded)
                     }
-                    reservations, dead = self._classify_markers(running_names)
+                    reservations, dead = self._classify_markers(running_names, excluded)
                     for marker in dead:
                         try:
                             marker.unlink()
@@ -598,13 +624,10 @@ class _ContainerLimiter:
                         return _ContainerReservation(marker_path)
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            if time.monotonic() >= deadline:
-                raise SologsbError(
-                    f"等待容器名额超时：非测试项目最多同时运行 {limit} 个容器，"
-                    f"已等待 {int(wait_seconds)} 秒"
-                )
+
             _emit_live(project_code or "container", f"容器名额已满，排队等待（上限 {limit}）")
-            time.sleep(5)
+            remaining = max(0.0, wait_seconds - (time.monotonic() - started_at))
+            time.sleep(min(CONTAINER_QUEUE_POLL_SECONDS, remaining))
 
 
 CANDIDATE_CONTAINER_RE = re.compile(r"^sologsb-.+-candidate-\d+-")

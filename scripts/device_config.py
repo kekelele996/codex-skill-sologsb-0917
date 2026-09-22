@@ -27,6 +27,7 @@ FIELDS: dict[str, tuple[str | None, str]] = {
     "claude.model": ("SOLOSB_MODEL", "auto_model/urm"),
     "claude.image": ("SOLOSB_DOCKER_IMAGE", "adminfather/benzhi-claude-code:20260916-toolchains-v2"),
     "claude.contextWindow": ("SOLOSB_CONTEXT_WINDOW", "1000000"),
+    # 容器上限由 side_runner 动态优先读取本字段；环境变量仅作为字段缺失时的回退。
     "claude.maxContainers": ("SOLOSB_MAX_CONTAINERS", "4"),
     # 默认值是 RFC 5737 文档用地址，真实地址必须在设备配置或环境变量里提供
     "manager.baseUrl": ("SOLO_MANAGER_BASE_URL", "http://192.0.2.10:8080"),

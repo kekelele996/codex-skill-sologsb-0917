@@ -9,7 +9,8 @@
    `source/candidates/candidate-1..N`；候选目录永不改名。
 3. `run --side both --candidates 2` 让 N 个候选在独立容器中并行无头执行；Base URL 取设备配置的 `claude.baseUrl`。
    每次启动容器都在主机级独占锁内预占名额，运行中容器与预占位合计不得超过设备配置
-   `claude.maxContainers`（默认 4，绝对上限 6）；超限时排队等待释放。
+   `claude.maxContainers`（默认 4，绝对上限 6）；该值每个任务动态读取，排队时每 180 秒重读，
+   超限时排队等待释放。
    前两个干净完成者按完成顺序映射为逻辑 A/B，其余候选立即停止。
 4. 每个候选最多六次实际尝试（含首次）。模型异常后从本地初始快照重新 clone，
    并创建新容器、新 Claude home、新 SessionID 从提示词重开；自动重连不算一次新尝试。
