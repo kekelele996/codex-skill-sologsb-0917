@@ -22,19 +22,19 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 发布标签：`v2026.09.22.1`
-- 精确提交号：运行 `git rev-parse v2026.09.22.1` 获取。
+- 发布标签：`v2026.09.22.2`
+- 精确提交号：运行 `git rev-parse v2026.09.22.2` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件。
 
 ## 实测固定顺序
 
 - 困难题默认单 attempt 超时使用 7200 秒；先区分“仍在推进”与“已失败”，不要因自动重连次数频繁重启。
-- 单 Key 并发安全：`run` 默认全局最多同时 4 个 Claude 容器，按“两个任务、每个任务两个候选”共享名额。进门判定只看**正在运行的候选任务容器数**：运行数 `>=` 上限才禁止进入，不再按“当前数量加本批候选数”预判。候选可以分批逐个进入，每个容器启动前单独取一个名额，不需要一次性预留整批槽位。数据库、验证 clone、监控台辅助容器等非任务容器一律不占名额。只有确认 Key 容量后才允许显式提高上限。
-- 上限不是写死的 4：优先级为 `SOLOSB_MAX_CONTAINERS` > 容器上限配置文件的 `maxContainers` > 默认 4，并受绝对硬顶 6 约束。实际生效值用 `python3 scripts/side_runner.py` 内部的 `_CONTAINER_LIMITER.status()` 读取，它返回 `limit / runningContainers / reservedSlots / advisoryReservedSlots / used / available / runningNames`。其中 `used / available` 只按 `runningContainers` 计算，`reservedSlots` 是给监控台看的预占位提示，不再参与进门判定；预占位标记文件仍与监控台共用同一批。
+- 单 Key 并发安全：`run` 默认全局最多同时 4 个 Claude 容器，按“两个任务、每个任务两个候选”共享名额。每次 `docker run` 前都必须调用 `_CONTAINER_LIMITER.acquire`；它在同一个主机级独占锁内完成“统计运行中容器 + 统计存活预占位 + 写入预占位”。运行中容器与预占位合计达到上限时，当前候选不启动并等待已有名额释放。数据库、验证 clone、监控台辅助容器等非任务容器一律不占名额。
+- 上限不是写死的 4：优先级为 `SOLOSB_MAX_CONTAINERS` > 设备配置 `claude.maxContainers` > 兼容配置 `container-limit.json.maxContainers` > 默认 4，并受绝对硬顶 6 约束。设备配置默认写入 4，普通配置向导也会要求确认这个值。实际生效值用 `python3 scripts/side_runner.py` 内部的 `_CONTAINER_LIMITER.status()` 读取，它返回 `limit / runningContainers / reservedSlots / advisoryReservedSlots / used / available / runningNames`；其中 `used = runningContainers + reservedSlots`，`available = limit - used`。
 - 调度模式由监控台 `automation.scheduleMode` 决定，执行器按提示词里的 `{{schedule_mode}}` 取值行动：
   - `容器优先`：保持运行中的候选容器数等于设定值，任务数可以少于上限；
   - `任务数量优先`：保持并行任务数等于设定值，容器数可以少于上限。
-  两种模式共用同一条进门规则：**正在运行的候选任务容器数 `>=` 上限**时才等待；运行数未到上限就继续逐个放行，不再按整批预判。
+  两种模式共用同一条进门规则：**运行中容器与预占位合计 `>=` 上限**时才等待；有容量时继续逐个放行。
 - Anthropic 兼容中转站地址取自设备配置 `claude.baseUrl`，可在 `run` 中传 `--base-url`，或通过 `SOLOSB_ANTHROPIC_BASE_URL` 覆盖；运行器会校验容器实际 Base URL。
 - 网关 429 `max_parallel_requests` 属于准入失败：正式候选运行前先等待最小 `/v1/messages` 探测成功；发生最终 429 后不要立即重启新容器，先等待 Key 恢复。恢复后仍按红线使用新容器、新 Claude home 和新 SessionID，实际尝试次数照记。
 - pnpm fresh clone 固定按“安装失败留证 → `pnpm approve-builds --all` → 再次安装 → 构建”顺序处理。
@@ -148,6 +148,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 设备专属凭据不在技能包内，统一放在 `~/.codex/sologsb/config.json`（明文，权限 0600）：
 
 - Claude API Key 与 LLM Base URL
+- 最大并发容器 `claude.maxContainers`（默认 4，绝对上限 6）
 - Solo Manager 地址、账号、密码
 - SOLO2 地址、账号、密码
 - GitHub Token 与 Loon 代理

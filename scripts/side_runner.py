@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import device_config
 from common import (
     AUTO_RUNNER,
     SIDES,
@@ -406,19 +407,38 @@ class _ContainerLimiter:
         self.reservations = self.root / "reservations"
         self.lock_path = self.root / "limit.lock"
 
+    @staticmethod
+    def _positive_int(value: Any, default: int = DEFAULT_MAX_CONTAINERS) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(1, parsed)
+
+    def _configured_limit(self, data: dict[str, Any]) -> int:
+        """按环境变量、设备配置、兼容配置、代码默认值的顺序解析上限。"""
+        env_value = str(os.environ.get("SOLOSB_MAX_CONTAINERS") or "").strip()
+        if env_value:
+            return self._positive_int(env_value)
+
+        device_value = ""
+        try:
+            device_data = device_config.load()
+            device_value = str(
+                device_config.get_path(device_data, "claude.maxContainers", "") or ""
+            ).strip()
+        except (device_config.ConfigError, OSError):
+            # 设备配置缺失或暂时不可读时继续使用兼容配置，不让容器执行因本地展示配置中断。
+            device_value = ""
+
+        legacy_value = str(data.get("maxContainers") or "").strip()
+        return self._positive_int(device_value or legacy_value or DEFAULT_MAX_CONTAINERS)
+
     def _settings(self) -> tuple[int, set[str], float]:
         data = read_json(self.config_path, {})
         if not isinstance(data, dict):
             data = {}
-        try:
-            configured_limit = int(data.get("maxContainers") or DEFAULT_MAX_CONTAINERS)
-        except (TypeError, ValueError):
-            configured_limit = DEFAULT_MAX_CONTAINERS
-        try:
-            env_limit = int(os.environ.get("SOLOSB_MAX_CONTAINERS") or configured_limit)
-        except (TypeError, ValueError):
-            env_limit = configured_limit
-        limit = min(ABSOLUTE_MAX_CONTAINERS, configured_limit, env_limit)
+        limit = min(ABSOLUTE_MAX_CONTAINERS, self._configured_limit(data))
         excluded = {
             str(value).strip().casefold()
             for value in (data.get("excludedProjectCodes") or [])
@@ -487,7 +507,7 @@ class _ContainerLimiter:
         Shared by :meth:`acquire` and :meth:`status` so the two can never
         disagree about what a marker means.
         """
-        limit, excluded, _wait = self._settings()
+        _limit, excluded, _wait = self._settings()
         reservations: set[str] = set()
         dead: list[Path] = []
         for marker in list(self.reservations.glob("*.json")):
@@ -526,8 +546,9 @@ class _ContainerLimiter:
         }
         self.reservations.mkdir(parents=True, exist_ok=True)
         reservations, dead = self._classify_markers(running_names)
-        # 进门判定只看正在运行的候选任务容器：运行数达到上限才禁止进入。
-        used = len(running_names)
+        # 运行中的容器与仍存活的预占位都占用名额，避免并发 docker run 突破上限。
+        active_names = running_names | reservations
+        used = len(active_names)
         return {
             "ok": True,
             "limit": limit,
@@ -563,10 +584,10 @@ class _ContainerLimiter:
                             marker.unlink()
                         except OSError:
                             pass
-                    # 判定口径：只按“正在运行的候选任务容器数”比较上限，
-                    # 运行数达到上限才禁止进入；预占位标记只给监控台看，不再占名额，
-                    # 因此候选可以分批逐个进入，不需要一次性预留整批槽位。
-                    if len(running_names) < limit:
+                    # 必须在同一把独占锁内完成“统计运行中容器 + 统计存活预占位 + 写预占位”。
+                    # 预约也占用名额，所以并发调用不会在容器尚未出现时同时越过上限。
+                    active_names = running_names | reservations
+                    if len(active_names) < limit:
                         marker_path = self.reservations / f"{uuid.uuid4().hex}.json"
                         write_json(marker_path, {
                             "container": container_name,

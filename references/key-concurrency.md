@@ -5,12 +5,14 @@
 ## 默认策略
 
 - 单 Key 默认每个任务运行 2 个候选。
-- 全局默认最多同时运行 4 个候选任务容器。
-- 多个任务共享这 4 个容器名额，推荐同时运行 2 个任务、每个任务 2 个候选。
-- 进门判定只看**正在运行的候选任务容器数**：运行数 `>=` 上限才禁止进入。
-  不再使用“当前数量加本批候选数超过上限”的整批预判，因此不会只差一个批次就提前停摆。
-- 候选分批逐个进入：每个容器在 `docker run` 前单独取一个名额，先到的先跑，
-  不需要一次性预留整批槽位。
+- 全局默认最多同时占用 4 个候选槽位；槽位包括已经运行的容器和已经预占但尚未启动的容器。
+- 多个任务共享这 4 个槽位，推荐同时运行 2 个任务、每个任务 2 个候选。
+- 每个容器在 `docker run` 前都必须调用 `_CONTAINER_LIMITER.acquire`。
+  `acquire` 使用主机级独占锁，在同一个临界区内重新统计运行中容器和存活预占位，
+  只有总数小于上限时才写入新的预占位；锁文件固定为
+  `~/.codex/sologsb-0917/container-slots/limit.lock`。
+- 总数达到上限时不启动当前容器，输出“容器名额已满，排队等待”提示，
+  等待其他候选释放槽位后重新检查；一直等到配置的等待时间耗尽才报错。
 - 只有 Key 独立分配且容量经实际探测确认后，才允许通过
   `SOLOSB_MAX_CONTAINERS` 提高本地上限。
 
@@ -29,22 +31,27 @@
 优先级从高到低，最后再受绝对硬顶 6 约束：
 
 1. 环境变量 `SOLOSB_MAX_CONTAINERS`
-2. 容器上限配置文件的 `maxContainers`
-3. 默认值 4
+2. 设备配置 `~/.codex/sologsb/config.json` 的 `claude.maxContainers`
+3. 兼容配置 `~/.codex/sologsb-0917/container-limit.json` 的 `maxContainers`
+4. 默认值 4
+
+普通设备配置向导也会写入 `claude.maxContainers`，默认值为 4；由于代码存在绝对硬顶，
+配置成 7 或更大时实际生效值仍然是 6。设备配置不存在或没有该字段时，默认 4 仍然生效。
 
 查询当前生效值和占用情况（只读，不加锁、不清理标记）：
 
 ```python
 from side_runner import _CONTAINER_LIMITER
 status = _CONTAINER_LIMITER.status()
-# {"limit": 4, "runningContainers": 2, "reservedSlots": 0, "used": 2,
-#  "available": 2, "reservations": [...], "runningNames": [...], "deadMarkers": [...]}
+# {"limit": 4, "runningContainers": 2, "reservedSlots": 1, "used": 3,
+#  "available": 1, "reservations": [...], "runningNames": [...], "deadMarkers": [...]}
 ```
 
-`reservedSlots` / `advisoryReservedSlots` 是“已占槽但容器还没出现”的预占位数量，
-只作为监控台可见的意图提示，**不参与进门判定**。`used` 与 `available` 只按
-`runningContainers` 计算，与进门规则一致。预占位标记文件与监控台写的是同一批文件
-（`~/.codex/sologsb-0917/container-slots/reservations/*.json`），因此两边看到的占用始终一致。
+`reservedSlots` 是“已占槽但容器还没出现”的预占位数量，`used` 是 `runningContainers + reservedSlots`，
+`available` 是 `limit - used`。`advisoryReservedSlots` 为兼容旧监控展示保留，值与
+`reservedSlots` 相同。预占位标记文件位于
+`~/.codex/sologsb-0917/container-slots/reservations/*.json`，所有执行器共用同一批文件，
+因此并发启动时不会各自看到一个过期的空余容量。
 
 ## 两种调度模式
 
@@ -56,18 +63,20 @@ status = _CONTAINER_LIMITER.status()
 | `容器优先`（默认） | 运行中的候选容器数 | 并行任务数 | Key 并发是瓶颈，想让容器始终跑满 |
 | `任务数量优先` | 并行任务数 | 运行中的候选容器数 | 想控制同时进行的题目数 |
 
-两种模式共用同一条进门规则：**正在运行的候选任务容器数 `>=` 硬上限**时才等待。
-早期实现用“当前数量加本批候选数”预判，会在距离硬上限还差一个批次时就停摆；
-更早的实现还会把预占位标记算进容量，导致运行中只有 2 个容器时也排队。
-现在两者都去掉了，只按实际运行数逐个放行。
+两种模式共用同一条进门规则：**运行中容器数与存活预占位数合计 `>=` 硬上限**时才等待。
+预占位必须计入上限，因为 `docker run` 从发起请求到容器出现在 `docker ps` 之间存在时间差；
+如果只看运行数，多个执行器会在这个时间差内同时越过上限。当前实现把计数和写预占位放在
+同一把主机级独占锁内，超出上限的调用不会启动容器，而是等待槽位释放后重试。
 
 ## 预占位与超时
 
-- 任务被领取的瞬间就写入一个容器槽位标记（`reservations/<uuid>.json`），作为监控台可见的意图提示。
-- 该标记不再压缩并发容量，因此不会出现“容器还没起来就把名额占死”的排队。
-- 若 `containerReserveSeconds`（默认 420 秒，可配 300–600）内 `docker ps` 里没出现
-  属于该任务的容器，监控台会终止执行器、释放槽位并重新入队。
-- 标记里的 `pid` 已死时，`acquire` 和监控台的纠错循环都会清掉它，不会永久占名额。
+- `docker run` 前，执行器在独占锁内写入一个容器槽位标记
+  （`reservations/<uuid>.json`）；该标记从写入时起就占用并发名额。
+- 当容器出现在 `docker ps` 后，同一个标记会从“预占位”转为“运行中”，不会重复计数。
+- `docker run` 失败或容器退出时，调用方立即删除标记；下次等待者获得锁后即可使用空出的槽位。
+- 标记里的 `pid` 已死时，`acquire` 会清掉它，不会因为进程崩溃永久占满名额。
+- `waitSeconds` 或 `SOLOSB_CONTAINER_WAIT_SECONDS` 控制排队等待时长，超时后抛出
+  “等待容器名额超时”错误；不会在超限时偷偷启动第 5 个容器。
 
 ## 重复启动保护
 

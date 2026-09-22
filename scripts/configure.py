@@ -618,13 +618,19 @@ def section_claude(cfg: dict, path: Path, *, advanced: bool = False) -> None:
     prompt_field(cfg, "claude.baseUrl", "LLM Base URL",
                  default=dc.FIELDS["claude.baseUrl"][1],
                  validate=lambda v: None if v.startswith(("http://", "https://")) else "必须 http:// 或 https:// 开头")
+    max_containers = dc.FIELDS["claude.maxContainers"][1]
+    prompt_field(
+        cfg,
+        "claude.maxContainers",
+        f"最大并发容器（默认 {max_containers}，绝对上限 6）",
+        default=max_containers,
+        validate=lambda v: None if v.isdigit() and 1 <= int(v) <= 6 else "必须是 1-6 的正整数",
+    )
     if advanced:
         prompt_field(cfg, "claude.model", "模型名", default=dc.FIELDS["claude.model"][1])
         prompt_field(cfg, "claude.image", "Docker 镜像", default=dc.FIELDS["claude.image"][1])
         prompt_field(cfg, "claude.contextWindow", "上下文窗口", default=dc.FIELDS["claude.contextWindow"][1],
                      validate=lambda v: None if v.isdigit() else "必须是数字")
-        prompt_field(cfg, "claude.maxContainers", "最大并发容器", default=dc.FIELDS["claude.maxContainers"][1],
-                     validate=lambda v: None if v.isdigit() and int(v) > 0 else "必须是正整数")
     dc.save(cfg, path)
 
 

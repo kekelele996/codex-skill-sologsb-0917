@@ -2016,6 +2016,78 @@ class SubmitApprovalTests(unittest.TestCase):
 
 
 class ContainerLimitTests(unittest.TestCase):
+    def test_device_config_limit_defaults_to_four(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "container-limit.json"
+            device_config = Path(temp) / "config.json"
+            write_json(device_config, {"configVersion": 1})
+            with mock.patch.dict(os.environ, {
+                "SOLOSB_CONFIG": str(device_config),
+                "SOLOSB_MAX_CONTAINERS": "",
+            }, clear=False):
+                limit, _, _ = side_runner._ContainerLimiter(config)._settings()
+            self.assertEqual(limit, 4)
+
+    def test_device_config_limit_overrides_legacy_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "container-limit.json"
+            device_config = Path(temp) / "config.json"
+            write_json(config, {"maxContainers": 2, "waitSeconds": 1})
+            write_json(device_config, {"claude": {"maxContainers": "3"}})
+            with mock.patch.dict(os.environ, {
+                "SOLOSB_CONFIG": str(device_config),
+                "SOLOSB_MAX_CONTAINERS": "",
+            }, clear=False):
+                limit, _, _ = side_runner._ContainerLimiter(config)._settings()
+            self.assertEqual(limit, 3)
+
+    def test_reservations_are_counted_and_wait_until_released(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "container-limit.json"
+            device_config = root / "config.json"
+            write_json(config, {"waitSeconds": 1})
+            write_json(device_config, {"claude": {"maxContainers": "1"}})
+            limiter = side_runner._ContainerLimiter(config)
+            first = None
+            second = None
+            try:
+                with mock.patch.dict(os.environ, {
+                    "SOLOSB_CONFIG": str(device_config),
+                    "SOLOSB_MAX_CONTAINERS": "",
+                }, clear=False), mock.patch.object(
+                    limiter, "_running_containers", return_value=[]
+                ):
+                    first = limiter.acquire(
+                        "project-1", "sologsb-project-1-candidate-1-1-a"
+                    )
+                    status = limiter.status()
+                    self.assertEqual(status["runningContainers"], 0)
+                    self.assertEqual(status["reservedSlots"], 1)
+                    self.assertEqual(status["used"], 1)
+                    self.assertEqual(status["available"], 0)
+
+                    sleeps: list[float] = []
+
+                    def release_first(seconds: float) -> None:
+                        sleeps.append(seconds)
+                        assert first is not None
+                        first.release()
+
+                    with mock.patch.object(
+                        side_runner.time, "sleep", side_effect=release_first
+                    ):
+                        second = limiter.acquire(
+                            "project-2", "sologsb-project-2-candidate-1-1-a"
+                        )
+                    self.assertEqual(len(sleeps), 1)
+                    self.assertIsNotNone(second.path)
+            finally:
+                if first is not None:
+                    first.release()
+                if second is not None:
+                    second.release()
+
     def test_absolute_cap_cannot_be_raised_by_env_or_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = Path(temp) / "container-limit.json"
