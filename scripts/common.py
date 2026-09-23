@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 HOME = Path.home()
@@ -593,3 +593,58 @@ def load_git_identity() -> dict[str, str]:
 
 def text_non_whitespace_len(value: str) -> int:
     return len(re.sub(r"\s+", "", value))
+
+
+# 锁文件与依赖清单的配对：模型改了清单，同目录（或其子目录下同类清单）的锁文件要一起发布，
+# 否则从 GitHub 干净检出后 `npm ci`、`go build` 等会因锁文件缺失或不同步失败，错算到模型头上。
+LOCKFILE_MANIFESTS: dict[str, tuple[str, ...]] = {
+    "package-lock.json": ("package.json",),
+    "npm-shrinkwrap.json": ("package.json",),
+    "pnpm-lock.yaml": ("package.json", "pnpm-workspace.yaml"),
+    "yarn.lock": ("package.json",),
+    "bun.lockb": ("package.json",),
+    "bun.lock": ("package.json",),
+    "go.sum": ("go.mod",),
+    "go.work.sum": ("go.work", "go.mod"),
+    "Cargo.lock": ("Cargo.toml",),
+    "poetry.lock": ("pyproject.toml",),
+    "uv.lock": ("pyproject.toml",),
+    "pdm.lock": ("pyproject.toml",),
+    "Pipfile.lock": ("Pipfile",),
+    "composer.lock": ("composer.json",),
+    "Gemfile.lock": ("Gemfile",),
+}
+LOCKFILE_NAMES = frozenset(LOCKFILE_MANIFESTS)
+# go.sum 只记录校验值，不决定依赖版本（版本由 go.mod 决定）。初始快照的 go.sum 不全时，
+# 模型补上的校验记录不发布，干净检出后 go build 会报 missing go.sum entry，所以改了就发布。
+ALWAYS_PUBLISHED_LOCKFILES = frozenset({"go.sum", "go.work.sum"})
+
+
+def is_lockfile(path: str) -> bool:
+    return PurePosixPath(path).name in LOCKFILE_NAMES
+
+
+def paired_lockfiles(changed: list[str] | set[str]) -> set[str]:
+    """Return the lockfiles in ``changed`` whose manifest also changed.
+
+    清单与锁文件在同一目录，或锁文件在工作区根目录、清单在其子目录（pnpm/yarn/Cargo workspace）时视为配对。
+    go.sum、go.work.sum 改了就发布，不要求 go.mod 同时改。
+    """
+    paths = [PurePosixPath(str(item)) for item in changed]
+    manifests = [path for path in paths if path.name not in LOCKFILE_NAMES]
+    allowed: set[str] = set()
+    for lock in paths:
+        if lock.name in ALWAYS_PUBLISHED_LOCKFILES:
+            allowed.add(str(lock))
+            continue
+        names = LOCKFILE_MANIFESTS.get(lock.name)
+        if not names:
+            continue
+        root = lock.parent
+        for manifest in manifests:
+            if manifest.name not in names:
+                continue
+            if manifest.parent == root or root in manifest.parents or str(root) == ".":
+                allowed.add(str(lock))
+                break
+    return allowed

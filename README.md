@@ -1,6 +1,6 @@
 # sologsb-0917
 
-全局版本号 `1.1.0`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
+全局版本号 `1.2.0`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
 
 0917 期 Pair-wise GSB 的可复用 Codex Skill。详见 `SKILL.md`。
 
@@ -17,7 +17,7 @@
 4. 每个候选最多六次实际尝试（含首次）。模型异常后从本地初始快照重新 clone，
    并创建新容器、新 Claude home、新 SessionID 从提示词重开；自动重连不算一次新尝试。
 5. 候选映射完成后才运行 `github-init`，以原始源码创建 `main/A/B`，再开始 A/B 语义审核。
-6. 只有两侧语义审核全部通过，Skill 才从映射候选目录生成本地产物 commit，并原子推送 A/B；依赖目录、构建产物、缓存和锁文件不进入 commit。
+6. 只有两侧语义审核全部通过，Skill 才从映射候选目录生成本地产物 commit，并原子推送 A/B；依赖目录、构建产物和缓存不进入 commit；锁文件随改动过的依赖清单一起进入 commit。
 7. 发布阶段生成 A/B 产物快照并按 G11 记录非测试业务代码改动量；任一侧少于 10 行写入 `lineGate=failed`，最终提交预检再阻断。建议至少 30 行并跨 3 个业务文件。
 8. 再执行真实产物验证、GSB、Excel 和录屏；GSB 理由必须分别写出 A/B 各自的过程事实与产物结果，过程 claim 要包含实际动作和定位点，产物 claim 要包含可观察结果；视频名为 `<项目编号-项目名>-验证A/B产物.mp4`。
 9. 平台选项目复用 `solo2-auto` 的共享项目锁：全局选择串行化，选中后立即占用项目；

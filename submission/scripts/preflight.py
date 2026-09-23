@@ -32,6 +32,7 @@ for _parent in Path(__file__).resolve().parents:
         sys.path.insert(0, str(_parent / "scripts"))
         break
 import device_config as _device_config  # noqa: E402
+from common import LOCKFILE_NAMES, paired_lockfiles  # noqa: E402
 
 _device_config.load_and_apply()
 
@@ -174,11 +175,6 @@ def github_env(extra: dict[str, str] | None = None, *, require_proxy: bool = Fal
     if extra:
         env.update({str(key): str(value) for key, value in extra.items()})
     return env
-LOCKFILE_NAMES = {
-    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
-    "composer.lock", "Gemfile.lock", "poetry.lock", "Pipfile.lock",
-    "Cargo.lock", "go.sum",
-}
 DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
 
 
@@ -308,7 +304,9 @@ def verify_code_change(state: dict, remote: dict, task_root: Path | None = None)
                 result["errors"].append(names.stderr.strip() or f"{side} 变更文件枚举失败")
                 continue
             changed = [line.strip() for line in names.stdout.splitlines() if line.strip()]
-            bad = [path for path in changed if _is_generated_or_lock_path(path)]
+            # 依赖清单改了时，配对的锁文件属于正常交付，不算脏仓库；锁文件仍不计入改动行数。
+            paired = paired_lockfiles(changed)
+            bad = [path for path in changed if _is_generated_or_lock_path(path) and path not in paired]
             bad_paths.update(bad)
             business = [
                 path for path in changed
@@ -336,6 +334,7 @@ def verify_code_change(state: dict, remote: dict, task_root: Path | None = None)
                 "hardOk": lines >= CODE_VOLUME_HARD_MIN,
                 "targetOk": lines >= CODE_VOLUME_TARGET and len(business) >= 3,
                 "generatedOrLockPaths": bad[:100],
+                "pairedLockfiles": sorted(paired),
             }
         result["badPaths"] = sorted(bad_paths)
         result["okHygiene"] = not result["badPaths"]

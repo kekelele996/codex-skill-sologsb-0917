@@ -2105,6 +2105,74 @@ class ChangeVolumeGateTests(unittest.TestCase):
             self.assertEqual(files, ["app.ts"])
             self.assertNotIn("node_modules/dep.js", self._git(repo, "diff", "--cached", "--name-only", initial))
 
+    def test_paired_lockfiles_follow_manifest_changes(self) -> None:
+        from common import paired_lockfiles
+        self.assertEqual(
+            paired_lockfiles(["frontend/package.json", "frontend/package-lock.json", "backend/yarn.lock"]),
+            {"frontend/package-lock.json"},
+        )
+        # workspace：锁文件在根目录，清单在子目录
+        self.assertEqual(paired_lockfiles(["pnpm-lock.yaml", "apps/web/package.json"]), {"pnpm-lock.yaml"})
+        self.assertEqual(paired_lockfiles(["backend/go.mod", "backend/go.sum"]), {"backend/go.sum"})
+        # go.sum 只补校验记录也要发布，否则干净检出后 go build 报 missing go.sum entry
+        self.assertEqual(paired_lockfiles(["backend/go.sum"]), {"backend/go.sum"})
+        # 清单在别的目录，不配对
+        self.assertEqual(paired_lockfiles(["backend/package.json", "frontend/package-lock.json"]), set())
+        self.assertEqual(paired_lockfiles(["package-lock.json"]), set())
+
+    def test_publish_keeps_lockfile_when_manifest_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            self._git(repo, "init", "-b", "main")
+            self._git(repo, "config", "user.name", "tester")
+            self._git(repo, "config", "user.email", "tester@example.com")
+            (repo / "frontend").mkdir()
+            (repo / "frontend" / "package.json").write_text('{"dependencies":{}}\n', encoding="utf-8")
+            (repo / "frontend" / "app.ts").write_text("export const a = 1;\n", encoding="utf-8")
+            self._git(repo, "add", "-A")
+            self._git(repo, "commit", "-m", "base")
+            initial = self._git(repo, "rev-parse", "HEAD")
+
+            (repo / "frontend" / "package.json").write_text('{"dependencies":{"dayjs":"1.11.0"}}\n', encoding="utf-8")
+            (repo / "frontend" / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+            (repo / "frontend" / "node_modules").mkdir()
+            (repo / "frontend" / "node_modules" / "dep.js").write_text("x\n", encoding="utf-8")
+            side_runner._install_generated_path_excludes(repo)
+            self._git(repo, "add", "-A")
+            removed = side_runner._unstage_generated_paths(repo, initial)
+            staged = self._git(repo, "diff", "--cached", "--name-only", initial).split()
+
+            self.assertEqual(removed, [])
+            self.assertIn("frontend/package-lock.json", staged)
+            self.assertIn("frontend/package.json", staged)
+            self.assertNotIn("frontend/node_modules/dep.js", staged)
+            lines, files = side_runner._staged_business_change_lines(repo, initial)
+            self.assertNotIn("frontend/package-lock.json", files)
+
+    def test_old_exclude_file_drops_lockfile_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            self._git(repo, "init", "-b", "main")
+            exclude = repo / ".git" / "info" / "exclude"
+            exclude.write_text(
+                "# sologsb-generated-artifacts\nnode_modules/\npackage-lock.json\ngo.sum\ndist/\n", encoding="utf-8"
+            )
+            side_runner._install_generated_path_excludes(repo)
+            text = exclude.read_text(encoding="utf-8")
+            self.assertIn("node_modules/", text)
+            self.assertIn("dist/", text)
+            self.assertNotIn("package-lock.json", text)
+            self.assertNotIn("go.sum", text)
+
+    def test_preflight_still_flags_unpaired_lockfile(self) -> None:
+        self.assertTrue(self.preflight._is_generated_or_lock_path("frontend/package-lock.json"))
+        self.assertTrue(self.preflight._is_generated_or_lock_path("frontend/node_modules/x.js"))
+        self.assertFalse(self.preflight._is_generated_or_lock_path("frontend/package.json"))
+        self.assertEqual(
+            self.preflight.paired_lockfiles(["frontend/package.json", "frontend/package-lock.json"]),
+            {"frontend/package-lock.json"},
+        )
+
     def test_submission_preflight_rejects_recording_runtime_factors(self) -> None:
         result = self.preflight.assess_reason_quality({
             "reason": (

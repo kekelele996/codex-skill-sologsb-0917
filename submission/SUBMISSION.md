@@ -83,7 +83,7 @@ $CODEX_HOME/cache/sologsb-0917/gsb-history-cache.json
 - 发布阶段仍生成 A/B 产物快照，并记录每侧业务代码行数；任一侧低于 `10` 行时 `lineGate=failed`。
 - 提交预检按远端 `main` 与 A/B commit 复算。低于 `10` 行且这是唯一阻断项时，只允许设备配置里的审批人批准 `change-volume-line-gate` 例外。
 - 例外审批绑定 payload 哈希、交付表哈希和 `change-volume-review.json` 的改动量复核哈希；任一变化都使审批失效。
-- 仓库存在依赖、构建、缓存、虚拟环境或锁文件，以及其他任何门禁失败时，都不能使用该例外。
+- 仓库存在依赖、构建、缓存、虚拟环境或未配对的锁文件，以及其他任何门禁失败时，都不能使用该例外。
 - 建议至少 `30` 行且跨 `3` 个业务文件；不足时警告并重新评估题目难度。
 - 本地门禁按远端 `main` 与 A/B commit 复算，平台 `G11` 判定为最终结果。
 - 详细口径见 `../references/change-volume-gate.md`。

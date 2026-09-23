@@ -30,8 +30,10 @@ from common import (
     atomic_copy,
     command_exists,
     commit_url,
+    is_lockfile,
     load_git_identity,
     mutate_state,
+    paired_lockfiles,
     read_json,
     run,
     safe_slug,
@@ -821,9 +823,9 @@ def _diff_snapshot(repo: Path, initial_sha: str) -> dict[str, Any]:
 GENERATED_PATH_EXCLUDES = (
     "node_modules/", "dist/", "build/", "coverage/", ".next/", ".nuxt/", ".vite/",
     "target/", "vendor/", "__pycache__/", ".venv/", "venv/", ".cache/",
-    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
-    "composer.lock", "Gemfile.lock", "poetry.lock", "Pipfile.lock", "Cargo.lock", "go.sum",
 )
+# 锁文件不写进 .git/info/exclude：模型改了依赖清单时要随清单一起发布，
+# 没改清单时才在 stage 后撤回（见 _unstage_generated_paths）。
 BUSINESS_SOURCE_EXTENSIONS = {
     ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".graphql", ".h", ".hpp", ".html",
     ".java", ".js", ".jsx", ".kt", ".kts", ".less", ".m", ".mm", ".mjs", ".cjs",
@@ -837,23 +839,29 @@ def _install_generated_path_excludes(repo: Path) -> None:
     exclude.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude.read_text(encoding="utf-8", errors="replace") if exclude.is_file() else ""
     marker = "# sologsb-generated-artifacts"
-    if marker not in existing:
-        text = existing.rstrip() + "\n\n" + marker + "\n" + "\n".join(GENERATED_PATH_EXCLUDES) + "\n"
-        exclude.write_text(text.lstrip("\n"), encoding="utf-8")
+    if marker in existing:
+        # 旧版本把锁文件也写进了排除清单；去掉这些行，锁文件改由 stage 后按配对规则处理。
+        kept = [line for line in existing.splitlines() if not is_lockfile(line.strip())]
+        text = "\n".join(kept) + "\n"
+        if text != existing:
+            exclude.write_text(text, encoding="utf-8")
+        return
+    text = existing.rstrip() + "\n\n" + marker + "\n" + "\n".join(GENERATED_PATH_EXCLUDES) + "\n"
+    exclude.write_text(text.lstrip("\n"), encoding="utf-8")
 
 
 def _is_generated_or_lock_path(path: str) -> bool:
     parts = [part for part in Path(path).parts if part not in {"", "."}]
-    name = parts[-1] if parts else ""
-    return any(part in {item.rstrip("/") for item in GENERATED_PATH_EXCLUDES if item.endswith("/")} for part in parts) or name in {
-        item for item in GENERATED_PATH_EXCLUDES if not item.endswith("/")
-    }
+    generated_dirs = {item.rstrip("/") for item in GENERATED_PATH_EXCLUDES}
+    return any(part in generated_dirs for part in parts) or is_lockfile(path)
 
 
 def _unstage_generated_paths(repo: Path, initial_sha: str) -> list[str]:
+    """撤回生成物；锁文件只在对应依赖清单没改时撤回，改了就随清单一起发布。"""
     proc = _git(repo, "diff", "--cached", "--name-only", initial_sha, check=False)
     paths = [line.strip() for line in proc.stdout.decode("utf-8", errors="replace").splitlines() if line.strip()]
-    generated = [path for path in paths if _is_generated_or_lock_path(path)]
+    keep = paired_lockfiles(paths)
+    generated = [path for path in paths if _is_generated_or_lock_path(path) and path not in keep]
     for offset in range(0, len(generated), 80):
         chunk = generated[offset : offset + 80]
         _git(repo, "reset", "-q", initial_sha, "--", *chunk, check=False)
