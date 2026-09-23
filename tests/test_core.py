@@ -38,9 +38,12 @@ from gsb_tools import (
     _validate_reason_layer_coverage,
     _validate_reason_markdown,
     evaluation_excluded_reason_errors,
+    build_values,
+    reason_flow_errors,
     reason_language_errors,
     reason_style_errors,
     reason_style_warnings,
+    validate_delivery,
     validate_draft,
     write_excel,
     write_field_guide,
@@ -221,7 +224,12 @@ class ExcelTests(unittest.TestCase):
             headers = [cell.value for cell in workbook["GSB提交"][1]]
             self.assertEqual(len(headers), len(schema["fields"]))
             self.assertEqual(headers[0], "User Prompt")
-            self.assertEqual(headers[-1], "备注")
+            self.assertEqual(headers[-1], "GSB 理由")
+            self.assertNotIn("备注", headers)
+            for label in ("A-交付完整性", "A-交付完整性描述", "B-交付完整性", "B-交付完整性描述"):
+                self.assertIn(label, headers)
+            self.assertLess(headers.index("A-运行录屏"), headers.index("A-交付完整性"))
+            self.assertLess(headers.index("B-交付完整性描述"), headers.index("GSB 结论"))
 
 
     def test_reason_length_is_150_to_240(self) -> None:
@@ -280,8 +288,9 @@ class ExcelTests(unittest.TestCase):
                 self.assertTrue(any("数字对比过多" in item for item in detailed_result["errors"]))
                 nonempty_remark = {**good, "remark": "环境差异已记录"}
                 remark_result = validate_draft(nonempty_remark, root, review_path=review)
-                self.assertEqual(nonempty_remark["remark"], "")
+                self.assertNotIn("remark", nonempty_remark)
                 self.assertFalse(any("备注" in item for item in remark_result["errors"]), remark_result)
+                self.assertTrue(any("draft.delivery" in item for item in good_result["errors"]), good_result)
 
     def test_gsb_reason_rejects_markdown(self) -> None:
         self.assertEqual(_validate_reason_markdown("接口返回 500，邀签接口无法使用。"), [])
@@ -615,6 +624,200 @@ def _api_fixture_server() -> http.server.ThreadingHTTPServer:
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
+
+
+class DeliveryFieldTests(unittest.TestCase):
+    """2026-09-23 新增的 A/B 交付完整性打分与描述。"""
+
+    EVIDENCE = {
+        "evidence": [
+            {"id": "A-artifact-check-01", "side": "A", "type": "artifact", "text": "frontend/src/api.ts 登录请求 404"},
+            {"id": "B-artifact-check-01", "side": "B", "type": "artifact", "text": "diary.service.ts 发布回读一致"},
+        ]
+    }
+    REASON = (
+        "A 侧方案在打开api.ts的请求定义时多拼了一层前缀，登录一直被挡在外面，页面进不去日记。"
+        "B 侧方案补跑了发布流程并回读快照，这题最要紧的是能完整走通，因此选择 B 侧方案。"
+    )
+    DESC_A = "登录请求在frontend/src/api.ts里多拼了一层前缀，接口返回404。用户进不了日记页，保存和发布需求都没法验证。"
+    DESC_B = "逐条核对了选择行程、存草稿、发起人发布和冻结标题四项需求，构建和启动都通过，刷新后版本与发布状态一致。"
+
+    def _draft(self, **delivery) -> dict:
+        base = {
+            "A": {"score": 2, "description": self.DESC_A, "evidenceIds": ["A-artifact-check-01"]},
+            "B": {"score": 5, "description": self.DESC_B, "evidenceIds": ["B-artifact-check-01"]},
+        }
+        for side, patch in delivery.items():
+            base[side] = {**base[side], **patch}
+        return {"verdict": "B 更好", "reason": self.REASON, "delivery": base}
+
+    def test_valid_delivery_passes(self) -> None:
+        result = validate_delivery(self._draft(), self.EVIDENCE, self.REASON)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["scores"], {"A": 2, "B": 5})
+
+    def test_missing_delivery_blocks(self) -> None:
+        result = validate_delivery({"verdict": "A 更好"}, self.EVIDENCE, self.REASON)
+        self.assertFalse(result["ok"])
+
+    def test_score_must_be_integer_1_to_5(self) -> None:
+        for bad in (0, 6, 3.5, "4", True):
+            result = validate_delivery(self._draft(A={"score": bad}), self.EVIDENCE, self.REASON)
+            self.assertTrue(any("1~5 的整数" in item for item in result["errors"]), (bad, result))
+
+    def test_full_score_needs_basis_and_no_open_problem(self) -> None:
+        vague = validate_delivery(
+            self._draft(B={"description": "整体做得很好，各项功能都符合题目描述的预期，没有看到明显的问题，可以直接交付给用户。"}),
+            self.EVIDENCE, self.REASON,
+        )
+        self.assertTrue(any("核对依据" in item for item in vague["errors"]), vague)
+        contradictory = validate_delivery(
+            self._draft(B={"description": "逐条核对了存草稿和发布两项需求，构建通过，但成员离队后的只读限制还没有实现，缺少对应校验。"}),
+            self.EVIDENCE, self.REASON,
+        )
+        self.assertTrue(any("分数与描述矛盾" in item for item in contradictory["errors"]), contradictory)
+
+    def test_low_score_needs_location_and_consequence(self) -> None:
+        result = validate_delivery(
+            self._draft(A={"description": "这一侧整体完成度一般，很多地方做得比较粗糙，和题目的要求相比还有不小的差距需要继续打磨。"}),
+            self.EVIDENCE, self.REASON,
+        )
+        self.assertTrue(any("客观后果" in item for item in result["errors"]), result)
+
+    def test_process_dimensions_are_rejected(self) -> None:
+        result = validate_delivery(
+            self._draft(A={"description": self.DESC_A + "任务规划也比较乱。"}), self.EVIDENCE, self.REASON
+        )
+        self.assertTrue(any("过程维度" in item for item in result["errors"]), result)
+
+    def test_copying_reason_is_rejected(self) -> None:
+        copied = "A 侧方案在打开api.ts的请求定义时多拼了一层前缀，登录一直被挡在外面，页面进不去日记。"
+        result = validate_delivery(
+            self._draft(A={"description": copied}),
+            {"evidence": self.EVIDENCE["evidence"] + [{"id": "A-x", "side": "A", "type": "artifact", "text": "api.ts"}]},
+            self.REASON,
+        )
+        self.assertTrue(any("照抄" in item or "过于相似" in item for item in result["errors"]), result)
+
+    def test_a_and_b_must_not_be_alike(self) -> None:
+        result = validate_delivery(
+            self._draft(A={"score": 5, "description": self.DESC_B}), self.EVIDENCE, self.REASON
+        )
+        self.assertTrue(any("雷同" in item for item in result["errors"]), result)
+
+    def test_file_anchor_must_exist_in_same_side_evidence(self) -> None:
+        result = validate_delivery(
+            self._draft(A={"description": "登录请求在frontend/src/login.ts里多拼了一层前缀，接口返回404。用户进不了日记页，保存和发布都没法验证。"}),
+            self.EVIDENCE, self.REASON,
+        )
+        self.assertTrue(any("login.ts" in item for item in result["errors"]), result)
+
+    def test_evidence_must_be_same_side(self) -> None:
+        result = validate_delivery(
+            self._draft(A={"evidenceIds": ["B-artifact-check-01"]}), self.EVIDENCE, self.REASON
+        )
+        self.assertTrue(any("另一侧" in item for item in result["errors"]), result)
+
+    def test_verdict_score_mismatch_is_warning(self) -> None:
+        draft = self._draft()
+        draft["verdict"] = "A 更好"
+        result = validate_delivery(draft, self.EVIDENCE, self.REASON)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["warnings"])
+
+    def test_build_values_maps_new_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "monitor").mkdir()
+            trace_a, trace_b, prompt = root / "a.jsonl", root / "b.jsonl", root / "p.md"
+            for path in (trace_a, trace_b, prompt):
+                path.write_text("x", encoding="utf-8")
+            write_json(root / "monitor" / "state.json", {
+                "promptPath": str(prompt), "taskType": "feature迭代", "difficulty": "困难",
+                "repoUrl": "https://github.com/o/r", "initialSnapshot": "a" * 40,
+                "sides": {
+                    "A": {"tracePath": str(trace_a), "sessionId": "s1", "harnessVersion": "2.1.197",
+                          "artifactSnapshotUrl": "https://github.com/o/r/commit/" + "b" * 40},
+                    "B": {"tracePath": str(trace_b), "sessionId": "s2",
+                          "artifactSnapshotUrl": "https://github.com/o/r/commit/" + "c" * 40},
+                },
+            })
+            schema = read_json(ROOT / "references" / "gsb-form-schema.json", {})
+            draft = {**self._draft(), "languages": "TypeScript", "repro_level": "无外部依赖"}
+            values = build_values(root, draft, schema)
+            self.assertEqual(values["a_score_delivery"], 2)
+            self.assertEqual(values["b_desc_delivery"], self.DESC_B)
+            self.assertNotIn("remark", values)
+            draft["delivery"]["A"]["score"] = "2"
+            with self.assertRaises(Exception):
+                build_values(root, draft, schema)
+
+
+class ReasonFlowTests(unittest.TestCase):
+    def test_consecutive_same_label_sentences_block(self) -> None:
+        reason = "A 侧方案验证并发保存只成功一次。A 侧方案发布时先锁行再生成快照。B 侧方案登录、存草稿和发布全部通过。"
+        self.assertTrue(any("起头" in item for item in reason_flow_errors(reason)))
+
+    def test_label_overuse_and_fragments_block(self) -> None:
+        reason = (
+            "A 侧方案先改了服务层。随后B 侧方案补了校验。A 侧方案又改了页面。"
+            "接着B 侧方案回读数据。A 侧方案重跑构建。最后B 侧方案通过。A 侧方案失败。B 侧方案更好。来自接口返回。"
+        )
+        errors = reason_flow_errors(reason)
+        self.assertTrue(any("超过 3 次" in item for item in errors), errors)
+        self.assertTrue(any("碎句" in item for item in errors), errors)
+
+    def test_natural_reason_passes(self) -> None:
+        reason = (
+            "A 侧方案在打开api.ts的请求定义时多拼了一层前缀，登录一直被挡在外面，页面进不去日记。"
+            "B 侧方案补跑了发布流程并回读快照，存草稿和发布都能走通。"
+            "这题最要紧的是能完整走通，因此选择 B 侧方案。"
+        )
+        self.assertEqual(reason_flow_errors(reason), [])
+
+
+class DeliverySubmissionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        for attr, name, path in (
+            ("preflight", "sologsb_submit_preflight_delivery", "preflight.py"),
+            ("submit_api", "sologsb_submit_api_delivery", "submit_api.py"),
+        ):
+            spec = importlib.util.spec_from_file_location(name, ROOT / "submission" / "scripts" / path)
+            module = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            setattr(cls, attr, module)
+
+    def test_delivery_dedup_against_history(self) -> None:
+        old = "已核对登录、选择行程、保存草稿、发起人发布和冻结回读，均正常完成；页面刷新后版本与发布状态一致。"
+        history = {"items": [{"id": 8224, "aDescDelivery": "", "bDescDelivery": old}]}
+        exact = self.preflight.assess_delivery_dedup({"A": "登录请求多拼了一层前缀，接口返回404，用户进不了页面。", "B": old}, history)
+        self.assertEqual(exact["decision"], "EXACT")
+        unique = self.preflight.assess_delivery_dedup(
+            {"A": "登录请求多拼了一层前缀，接口返回404，用户进不了页面。", "B": "逐条试过开单、改价和作废，库存扣减与回滚都对得上。"},
+            history,
+        )
+        self.assertIn(unique["decision"], {"UNIQUE", "REVIEW_REQUIRED"})
+
+    def test_page_schema_matches_official_snapshot(self) -> None:
+        page = self.preflight.page_schema()
+        official = read_json(ROOT / "references" / "gsb-form-schema.json", {})
+        self.assertEqual([f["key"] for f in page["fields"]], [f["field_key"] for f in official["fields"]])
+        self.assertEqual(page["form"]["fieldCount"], len(page["fields"]))
+
+    def test_number_fields_are_sent_as_int(self) -> None:
+        schema = read_json(ROOT / "references" / "gsb-form-schema.json", {})
+        labels = {f["field_key"]: f["label"] for f in schema["fields"]}
+        values = {label: "x" for label in labels.values()}
+        values[labels["a_score_delivery"]] = "2"
+        values[labels["b_score_delivery"]] = "5"
+        uploaded = {key: "u" for key in ("a_trace_file", "b_trace_file", "a_screencast", "b_screencast")}
+        data = self.submit_api.build_submission_data(schema, {"fields": values}, uploaded)
+        self.assertEqual((data["a_score_delivery"], data["b_score_delivery"]), (2, 5))
+        values[labels["a_score_delivery"]] = ""
+        with self.assertRaises(RuntimeError):
+            self.submit_api.build_submission_data(schema, {"fields": values}, uploaded)
 
 
 class VideoTests(unittest.TestCase):
@@ -2079,6 +2282,19 @@ class ContainerLimitTests(unittest.TestCase):
             }, clear=False):
                 limit, _, _ = side_runner._ContainerLimiter(config)._settings()
             self.assertEqual(limit, 3)
+
+    def test_monitor_managed_limit_overrides_device_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "container-limit.json"
+            device_config = Path(temp) / "config.json"
+            write_json(config, {"maxContainers": 5, "managedBy": "sologsb-monitor"})
+            write_json(device_config, {"claude": {"maxContainers": "3"}})
+            with mock.patch.dict(os.environ, {
+                "SOLOSB_CONFIG": str(device_config),
+                "SOLOSB_MAX_CONTAINERS": "1",
+            }, clear=False):
+                limit, _, _ = side_runner._ContainerLimiter(config)._settings()
+            self.assertEqual(limit, 5)
 
     def test_reservations_are_counted_and_wait_until_released(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

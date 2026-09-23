@@ -418,11 +418,16 @@ class _ContainerLimiter:
         return max(1, parsed)
 
     def _configured_limit(self, data: dict[str, Any]) -> int:
-        """按设备配置、环境变量、兼容配置、代码默认值的顺序解析上限。
+        """按监控台托管值、设备配置、环境变量、兼容配置、代码默认值的顺序解析上限。
 
-        设备配置优先是为了让运行中的任务在排队期间重新读取同一份配置；
+        监控台（sologsb-monitor）写入的 ``container-limit.json`` 带 ``managedBy``
+        标记时优先生效，这样容器上限只需在监控台设置一处，技能与调度器读同一个值。
+        设备配置优先于环境变量是为了让运行中的任务在排队期间重新读取同一份配置；
         否则进程启动时注入的 ``SOLOSB_MAX_CONTAINERS`` 会一直遮住后续修改。
         """
+        managed_value = str(data.get("maxContainers") or "").strip() if data.get("managedBy") else ""
+        if managed_value:
+            return self._positive_int(managed_value)
         device_value = ""
         try:
             device_data = device_config.load()

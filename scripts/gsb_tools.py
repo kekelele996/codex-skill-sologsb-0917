@@ -2,6 +2,7 @@
 """GSB validation, official schema handling, and local Excel export."""
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
@@ -39,7 +40,7 @@ def gsb_server() -> str:
         )
     return value
 AUDIT_HUMAN = SOLO_SCRIPTS / "audit-human-writing.py"
-EXPECTED_FINGERPRINT = "ae6d634837d23f58"
+EXPECTED_FINGERPRINT = "954e9db2d25afeb4"
 FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+\.(?:go|js|cjs|mjs|ts|tsx|jsx|py|java|kt|rs|vue|json|ya?ml|toml|md|sql|sh|css|html|xml)")
 ERROR_TOKEN = re.compile(r"(?:Error|ERROR|panic|PANIC|npm ERR!|failed|FAILED|报错|失败)[:：]?\s*[^\n，。；;]{1,120}")
 TEST_COUNT_PATTERN = re.compile(
@@ -99,6 +100,12 @@ REASON_MIN_SOFTENERS = 3
 REASON_MAX_SENTENCE_CHARS = 56
 REASON_MAX_SENTENCE_COMMAS = 5
 REASON_VAGUE_PATTERN = re.compile(r"(?:真实|真正|其实|本质上|实际上)")
+# 2026-09-23 起：平台“理由 AI 化打分”会扣句句同主语起头、碎句和“只罗列不交代判准”。
+REASON_MAX_LABEL_MENTIONS = 3
+REASON_MIN_SENTENCE_CHARS = 8
+REASON_CRITERION_PATTERN = re.compile(
+    r"(?:看重|要紧|关键|决定|差别在|差距在|分开|分出|拉开|主要看|更在意|优先|首先要|最重要)"
+)
 REASON_FLUENCY_PATTERNS = (
     ("重复标点", re.compile(r"[，。；：！？!?]{2,}")),
     ("重复虚词", re.compile(r"(?:的的|了了|是是|在在|和和|与与|就就|都都)")),
@@ -184,7 +191,42 @@ def reason_style_warnings(reason: str) -> list[str]:
             "GSB 理由出现“真实”“真正”“其实”等空泛表达；请改成能核对的动作、状态或结果: "
             + "、".join(dict.fromkeys(vague))
         )
+    if text_non_whitespace_len(reason) >= 150 and not REASON_CRITERION_PATTERN.search(reason):
+        warnings.append(
+            "GSB 理由只罗列事实，没有交代最看重哪一条；结尾前用一句话点明判断依据，"
+            "例如“这题最要紧的是并发保存不丢数据”"
+        )
     return warnings
+
+
+def reason_flow_errors(reason: str) -> list[str]:
+    """Block list-like reasons: 平台 AI 化打分会把“句句以 A 侧方案起头”的电报体判为 AI 文风。"""
+    errors: list[str] = []
+    sentences = [part.strip() for part in re.findall(r"[^。！？!?]+[。！？!?]?", reason) if part.strip()]
+    previous = ""
+    for index, sentence in enumerate(sentences, 1):
+        label = next((item for item in REASON_LABELS if sentence.startswith(item)), "")
+        if label and label == previous:
+            errors.append(
+                f"GSB 理由第 {index - 1}、{index} 句都以“{label}”起头，读起来像逐条清单；"
+                "后一句直接接着说，或用“随后”“这一改动”这类承接"
+            )
+            break
+        previous = label
+    for label in REASON_LABELS:
+        count = reason.count(label)
+        if count > REASON_MAX_LABEL_MENTIONS:
+            errors.append(
+                f"“{label}”出现 {count} 次，超过 {REASON_MAX_LABEL_MENTIONS} 次；"
+                "同一侧的事实连成一段写，不要每句重复主语"
+            )
+    for index, sentence in enumerate(_reason_sentences(reason), 1):
+        clean = re.sub(r"\s+", "", sentence)
+        if len(clean) < REASON_MIN_SENTENCE_CHARS:
+            errors.append(
+                f"GSB 理由第 {index} 句只有 {len(clean)} 字，像补在末尾的碎句：{clean}；并入前后句"
+            )
+    return errors
 
 
 def _reason_sentences(reason: str) -> list[str]:
@@ -328,6 +370,23 @@ ARTIFACT_OUTCOME_RE = re.compile(
     r"(?:返回|输出|缺少|缺失|未实现|没有|失败|报错|异常|保留|仍然|仍含|写入|生成|创建|"
     r"删除|更新|展示|完成|支持|正常|通过|可用|实现|拒绝|500|404)"
 )
+
+# 交付完整性描述（a/b_desc_delivery）的门禁口径，详见 references/delivery-scoring.md。
+DELIVERY_DESC_MIN = 40
+DELIVERY_DESC_MAX = 200
+DELIVERY_REASON_COPY_FRAGMENT = 20
+DELIVERY_REASON_COPY_RATIO = 0.6
+DELIVERY_SIDE_FRAGMENT = 12
+DELIVERY_SIDE_RATIO = 0.5
+DELIVERY_PROCESS_DIMENSION_RE = re.compile(
+    r"(?:任务规划|规划能力|推理|思考过程|工具调用|ToolCall|TodoWrite|指令遵循|边界感|执行能力)", re.I
+)
+DELIVERY_VERIFY_RE = re.compile(r"(?:核对|验证|复跑|跑通|构建|启动|回读|通过|正常|一致)")
+DELIVERY_UNRESOLVED_RE = re.compile(r"(?:未实现|没有实现|无法运行|无法启动|报错|缺少|缺失|遗漏|虚假成功)")
+# 口语化的客观后果：“进不了”“没法验证”“返回404”也算写出了后果。
+DELIVERY_CONSEQUENCE_RE = re.compile(r"(?:没法|进不了|打不开|用不了|跑不起来|不能|返回\s*[45]\d\d|读回为空|丢失)")
+DELIVERY_CLAIMED_RE = re.compile(r"(?:宣称|声称|称已|自称|回复说|总结里说|最终回复)")
+DELIVERY_ACTUAL_RE = re.compile(r"(?:实际|diff|提交里|代码里|改动里|并未|没有改)", re.I)
 
 
 def _keychain_secret(service: str) -> str:
@@ -738,6 +797,147 @@ def _validate_reason_markdown(reason: str) -> list[str]:
     return errors
 
 
+def longest_common_fragment(left: str, right: str) -> int:
+    """Length of the longest shared substring after whitespace normalization."""
+    a, b = _normalize(left), _normalize(right)
+    if not a or not b:
+        return 0
+    match = difflib.SequenceMatcher(None, a, b, autojunk=False).find_longest_match(0, len(a), 0, len(b))
+    return match.size
+
+
+def _delivery_label(side: str) -> str:
+    return f"{side}-交付完整性描述"
+
+
+def delivery_text_errors(side: str, description: str) -> list[str]:
+    """Plain-text, wording and fluency rules shared with GSB 理由, relabelled per side."""
+    label = _delivery_label(side)
+    raw: list[str] = []
+    raw.extend(_validate_reason_markdown(description))
+    raw.extend(reason_style_errors(description))
+    raw.extend(reason_language_errors(description))
+    errors = [item.replace("GSB 理由", label) for item in raw]
+    field = FIELD_FACTOR_RE.search(description)
+    if field:
+        errors.append(f"{label}不得引用录屏、截图、浏览器、运行环境等场外因素: {field.group(0)}")
+    acceptance = NON_CONTAINER_TEST_ARTIFACT_RE.search(description)
+    if acceptance:
+        errors.append(f"{label}不得引用容器外编写的测试或验收脚本: {acceptance.group(0)}")
+    return errors
+
+
+def validate_delivery(
+    draft: dict[str, Any],
+    evidence_doc: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """Validate A/B 交付完整性打分与描述（官方字段 a/b_score_delivery、a/b_desc_delivery）。
+
+    评分锚点见 references/delivery-scoring.md；描述只谈交付完整性，
+    允许与 GSB 理由有少量重合，但不得照抄理由，A/B 两段之间也不得雷同（平台规则 G12）。
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    delivery = draft.get("delivery")
+    if not isinstance(delivery, dict):
+        return {"ok": False, "errors": ["draft.delivery 必填：需要 A、B 两侧的 score 与 description"], "warnings": []}
+    evidence_by_id = {
+        str(item.get("id")): item
+        for item in evidence_doc.get("evidence") or []
+        if isinstance(item, dict) and item.get("id")
+    }
+    scores: dict[str, int] = {}
+    descriptions: dict[str, str] = {}
+    for side in ("A", "B"):
+        label = _delivery_label(side)
+        entry = delivery.get(side)
+        if not isinstance(entry, dict):
+            errors.append(f"draft.delivery.{side} 缺失")
+            continue
+        score = entry.get("score")
+        if isinstance(score, bool) or not isinstance(score, int) or not 1 <= score <= 5:
+            errors.append(f"{side}-交付完整性必须是 1~5 的整数，当前 {score!r}")
+            score = 0
+        description = str(entry.get("description") or "").strip()
+        length = text_non_whitespace_len(description)
+        if not DELIVERY_DESC_MIN <= length <= DELIVERY_DESC_MAX:
+            errors.append(
+                f"{label}必须为 {DELIVERY_DESC_MIN}–{DELIVERY_DESC_MAX} 个非空白字符，当前 {length}"
+            )
+        if not description:
+            continue
+        scores[side] = score
+        descriptions[side] = description
+        errors.extend(delivery_text_errors(side, description))
+        dimension = DELIVERY_PROCESS_DIMENSION_RE.search(description)
+        if dimension:
+            errors.append(
+                f"{label}只评价交付完整性，规划、推理、工具调用等过程维度写进 GSB 理由: {dimension.group(0)}"
+            )
+        if score == 5:
+            if not DELIVERY_VERIFY_RE.search(description):
+                errors.append(f"{label}给 5 分必须写出核对依据：逐条核对了哪些需求、跑过什么验证及结论")
+            unresolved = DELIVERY_UNRESOLVED_RE.search(description)
+            if unresolved:
+                errors.append(f"{label}给 5 分却写了未解决问题“{unresolved.group(0)}”，分数与描述矛盾")
+        elif score:
+            if not (OBJECTIVE_CONSEQUENCE_RE.search(description) or DELIVERY_CONSEQUENCE_RE.search(description)):
+                errors.append(f"{label}不给 5 分必须写出造成的客观后果，例如没有写入、返回404、无法启动")
+            if not (FILE_TOKEN.search(description) or PROCESS_LOCATOR_RE.search(description) or ERROR_TOKEN.search(description)):
+                errors.append(f"{label}不给 5 分必须写清问题出在哪：文件名、报错原文或未实现的需求点")
+        if "虚假成功" in description and not (
+            DELIVERY_CLAIMED_RE.search(description) and DELIVERY_ACTUAL_RE.search(description)
+        ):
+            errors.append(f"{label}判定虚假成功时，要写清模型宣称改了什么、实际改了什么")
+        ids = entry.get("evidenceIds") or []
+        if not isinstance(ids, list) or not ids:
+            errors.append(f"draft.delivery.{side}.evidenceIds 必填，描述要能对回本侧证据")
+            ids = []
+        for evidence_id in ids:
+            evidence = evidence_by_id.get(str(evidence_id))
+            if not evidence:
+                errors.append(f"draft.delivery.{side} 引用不存在的证据 {evidence_id}")
+            elif evidence.get("side") != side:
+                errors.append(f"draft.delivery.{side} 引用了另一侧的证据 {evidence_id}")
+            elif _evaluation_excluded(evidence):
+                errors.append(f"draft.delivery.{side} 不得引用 evaluationExcluded 证据 {evidence_id}")
+        side_evidence = [
+            item for item in evidence_by_id.values() if item.get("side") == side
+        ]
+        side_text = json.dumps(side_evidence, ensure_ascii=False)
+        for token in sorted(set(FILE_TOKEN.findall(description))):
+            if token not in side_text:
+                errors.append(f"{label}提到的文件 {token} 在本侧证据中找不到；平台会拿本侧轨迹核验锚点")
+        copied = longest_common_fragment(description, reason)
+        if copied >= DELIVERY_REASON_COPY_FRAGMENT:
+            errors.append(
+                f"{label}与 GSB 理由有 {copied} 字连续相同，属于照抄；只从完整性角度重新组织"
+            )
+        elif difflib.SequenceMatcher(None, _normalize(description), _normalize(reason)).ratio() >= DELIVERY_REASON_COPY_RATIO:
+            errors.append(f"{label}与 GSB 理由整体过于相似，只从完整性角度重新组织")
+    if len(descriptions) == 2:
+        shared = longest_common_fragment(descriptions["A"], descriptions["B"])
+        ratio = difflib.SequenceMatcher(
+            None, _normalize(descriptions["A"]), _normalize(descriptions["B"])
+        ).ratio()
+        if shared >= DELIVERY_SIDE_FRAGMENT or ratio >= DELIVERY_SIDE_RATIO:
+            errors.append(
+                f"A、B 两段交付完整性描述雷同（连续相同 {shared} 字，相似度 {ratio:.0%}）；"
+                "平台 G12 会拿两段互相比对，要按各自实际情况独立写"
+            )
+    verdict = str(draft.get("verdict") or "")
+    if len(scores) == 2 and all(scores.values()):
+        if verdict == "A 更好" and scores["A"] < scores["B"]:
+            warnings.append("GSB 结论为 A 更好，但 A 的交付完整性低于 B；确认理由里写清了过程上的决定性差异")
+        if verdict == "B 更好" and scores["B"] < scores["A"]:
+            warnings.append("GSB 结论为 B 更好，但 B 的交付完整性低于 A；确认理由里写清了过程上的决定性差异")
+        if verdict == "Same" and abs(scores["A"] - scores["B"]) >= 2:
+            warnings.append("GSB 结论为 Same，但两侧交付完整性相差 2 分以上")
+    errors = list(dict.fromkeys(errors))
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "scores": scores}
+
+
 def validate_draft(draft: dict[str, Any], task_root: Path, *, review_path: Path) -> dict[str, Any]:
     errors: list[str] = []
     evidence_doc = read_json(task_root / "monitor" / "evidence.json", {})
@@ -747,9 +947,8 @@ def validate_draft(draft: dict[str, Any], task_root: Path, *, review_path: Path)
     if verdict not in {"A 更好", "Same", "B 更好"}:
         errors.append("verdict 必须是 A 更好、Same、B 更好")
     reason = str(draft.get("reason") or "").strip()
-    # 备注字段必须留空；提交前审核发现非空时直接清空草稿值。
-    if str(draft.get("remark") or "").strip():
-        draft["remark"] = ""
+    # 2026-09-23 官方表单已删除“备注”字段；旧草稿残留的 remark 直接丢弃。
+    draft.pop("remark", None)
     length = text_non_whitespace_len(reason)
     if not 150 <= length <= 240:
         errors.append(f"GSB 理由必须为 150–240 个非空白字符，当前 {length}")
@@ -758,6 +957,8 @@ def validate_draft(draft: dict[str, Any], task_root: Path, *, review_path: Path)
     excluded_errors = evaluation_excluded_reason_errors(reason, draft, evidence_doc)
     errors.extend(markdown_errors)
     errors.extend(language_errors)
+    flow_errors = reason_flow_errors(reason)
+    errors.extend(flow_errors)
     errors.extend(_validate_artifact_description(reason))
     for side, full_label in (("A", "A 侧方案"), ("B", "B 侧方案")):
         if full_label not in reason:
@@ -796,6 +997,8 @@ def validate_draft(draft: dict[str, Any], task_root: Path, *, review_path: Path)
     if len(file_tokens) > 2:
         errors.append(f"GSB 理由代码细节过多，当前 {len(file_tokens)} 个文件/代码标记")
     errors.extend(_validate_reason_dedup(reason, task_root))
+    delivery = validate_delivery(draft, evidence_doc, reason)
+    errors.extend(delivery["errors"])
 
     review_errors: list[str] = []
     if not AUDIT_HUMAN.is_file():
@@ -839,6 +1042,9 @@ def validate_draft(draft: dict[str, Any], task_root: Path, *, review_path: Path)
         "markdownErrors": markdown_errors,
         "languageErrors": language_errors,
         "evaluationExcludedErrors": excluded_errors,
+        "flowErrors": flow_errors,
+        "styleWarnings": reason_style_warnings(reason),
+        "delivery": delivery,
         "errors": errors,
     }
 
@@ -869,9 +1075,21 @@ def sync_canonical_draft(task_root: Path, values: dict[str, Any]) -> Path:
             "reason": str(values.get("gsb_reason") or "").strip(),
             "languages": str(values.get("languages") or ""),
             "repro_level": str(values.get("repro_level") or ""),
-            "remark": str(values.get("remark") or "").strip(),
         }
     )
+    draft.pop("remark", None)
+    delivery = draft.get("delivery") if isinstance(draft.get("delivery"), dict) else {}
+    for side in ("A", "B"):
+        prefix = side.lower()
+        entry = dict(delivery.get(side) or {})
+        if str(values.get(f"{prefix}_score_delivery") or "").strip():
+            entry["score"] = int(values[f"{prefix}_score_delivery"])
+        if f"{prefix}_desc_delivery" in values:
+            entry["description"] = str(values[f"{prefix}_desc_delivery"] or "").strip()
+        if entry:
+            delivery[side] = entry
+    if delivery:
+        draft["delivery"] = delivery
     write_json(path, draft)
     return path
 
@@ -897,6 +1115,9 @@ def build_values(task_root: Path, draft: dict[str, Any], schema: dict[str, Any])
         raise SologsbError("draft.languages 必填")
     if "repro_level" not in draft or not str(draft.get("repro_level") or "").strip():
         raise SologsbError("draft.repro_level 必填")
+    delivery = draft.get("delivery") if isinstance(draft.get("delivery"), dict) else {}
+    delivery_a = delivery.get("A") or {}
+    delivery_b = delivery.get("B") or {}
     values = {
         "user_prompt": Path(str(state["promptPath"])).read_text(encoding="utf-8"),
         "question_type": state.get("taskType", ""),
@@ -911,13 +1132,16 @@ def build_values(task_root: Path, draft: dict[str, Any], schema: dict[str, Any])
         "a_trace_file": str(trace_a.resolve()),
         "a_artifact_snapshot": side_a.get("artifactSnapshotUrl", ""),
         "a_screencast": str(video_a.resolve()),
+        "a_score_delivery": delivery_a.get("score", ""),
+        "a_desc_delivery": str(delivery_a.get("description") or "").strip(),
         "b_session_id": side_b.get("sessionId", ""),
         "b_trace_file": str(trace_b.resolve()),
         "b_artifact_snapshot": side_b.get("artifactSnapshotUrl", ""),
         "b_screencast": str(video_b.resolve()),
+        "b_score_delivery": delivery_b.get("score", ""),
+        "b_desc_delivery": str(delivery_b.get("description") or "").strip(),
         "gsb_verdict": draft.get("verdict", ""),
         "gsb_reason": draft.get("reason", ""),
-        "remark": "",
     }
     allowed = {str(field.get("field_key")): field for field in schema.get("fields") or []}
     unknown = set(values) - set(allowed)
@@ -926,6 +1150,13 @@ def build_values(task_root: Path, draft: dict[str, Any], schema: dict[str, Any])
     for key, field in allowed.items():
         if field.get("is_required") and not str(values.get(key) or "").strip():
             raise SologsbError(f"必填字段为空: {key}")
+        rule = field.get("validation") or {}
+        if field.get("field_type") == "number" and key in values:
+            value = values[key]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise SologsbError(f"{key} 必须是整数，当前 {value!r}")
+            if not int(rule.get("min", value)) <= value <= int(rule.get("max", value)):
+                raise SologsbError(f"{key} 超出 {rule.get('min')}~{rule.get('max')}: {value}")
     return values
 
 
@@ -945,7 +1176,7 @@ def write_excel(task_root: Path, schema: dict[str, Any], values: dict[str, Any])
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="2F5597")
         cell.alignment = Alignment(vertical="center")
-    widths = [28, 28, 24, 24, 18, 24, 20, 30, 52, 42, 58, 52, 58, 42, 58, 52, 58, 16, 90, 22, 50]
+    widths = [28, 28, 24, 24, 18, 24, 20, 30, 52, 42, 58, 52, 58, 16, 60, 42, 58, 52, 58, 16, 60, 16, 90]
     for index, width in enumerate(widths[: len(headers)], 1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row in sheet.iter_rows(min_row=2):
@@ -1015,8 +1246,13 @@ def write_field_guide(task_root: Path, schema: dict[str, Any], values: dict[str,
             "- 每条负面 claim 必须提供 triggerKind/trigger；触发节点只允许步骤、文件、命令或需求，并原样写入 GSB 理由。",
             "- 轨迹超过 27MB 或视频超过 500MB 时，本地交付不得标记完成。",
             "- G10：理由与当前 GSB 数据精确重复或存在长连续片段复用时必须重写。",
-            "- 备注必须留空；导出或提交前审核发现非空时由工具自动置空。",
-            "- GSB 理由使用完整、质朴的中文描述，统一写“A 侧方案”“B 侧方案”，不使用省略式单字。",
+            "- A/B-交付完整性：1~5 的整数，按 references/delivery-scoring.md 的五档锚点打分，两侧各自独立评分。",
+            "- A/B-交付完整性描述：40–200 个非空白字符，只写需求是否做完、代码能否运行、有没有虚假成功；不写规划、推理、工具调用等过程维度。",
+            "- 给 5 分写核对依据（核对了哪些需求、跑过什么验证、结论如何）；不给 5 分写清问题出在哪、模型做了什么、造成了什么客观后果。",
+            "- 交付完整性描述允许与 GSB 理由有少量重合，但不得照抄（连续 20 字相同即阻断）；A、B 两段之间也不得雷同（G12）。",
+            "- 描述里提到的文件名、命令或报错必须能在本侧证据中找到，平台会拿本侧轨迹逐条核验锚点。",
+            "- GSB 理由使用完整、质朴的中文描述，统一写“A 侧方案”“B 侧方案”，不使用省略式单字；每侧称谓最多出现 3 次，相邻两句不要用同一称谓起头，不写 8 字以下的碎句。",
+            "- 结尾前用一句话交代这题最看重哪一条，再给结论；不要只罗列事实后直接宣布胜负。",
             "- 禁用“闭环”“根因”“落库”；数据写入统一写“入库”；常用命令“npm run build”统一写“build”，避免历史长片段去重；“真实”“真正”“其实”等空泛表达会给出警告。",
             "- 句子达到高中语文阅读水平，表达通顺；单句非空白字符不得超过 56 字，分句和标点异常会阻断。",
             "- 禁止使用“落在……”式收束句式；结论直接写“因此选择 B 侧方案”或“B 侧方案更好”。",

@@ -22,15 +22,15 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 发布标签：`v2026.09.22.4`
-- 精确提交号：运行 `git rev-parse v2026.09.22.4` 获取。
+- 发布标签：`v2026.09.23.1`
+- 精确提交号：运行 `git rev-parse v2026.09.23.1` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件。
 
 ## 实测固定顺序
 
 - 困难题默认单 attempt 超时使用 7200 秒；先区分“仍在推进”与“已失败”，不要因自动重连次数频繁重启。
 - 单 Key 并发安全：`run` 默认全局最多同时 4 个 Claude 容器，按“两个任务、每个任务两个候选”共享名额。每次 `docker run` 前都必须调用 `_CONTAINER_LIMITER.acquire`；它在同一个主机级独占锁内完成“统计运行中容器 + 统计存活预占位 + 写入预占位”。运行中容器与预占位合计达到上限时，当前候选不启动并等待已有名额释放。数据库、验证 clone、监控台辅助容器等非任务容器一律不占名额。
-- 上限不是写死的 4：优先动态读取设备配置 `~/.codex/sologsb/config.json` 的 `claude.maxContainers`，环境变量 `SOLOSB_MAX_CONTAINERS` 和兼容配置 `container-limit.json.maxContainers` 只作回退，默认 4，并受绝对硬顶 6 约束。每个任务启动容器前都会重新读取该文件；排队等待期间每 180 秒重新读取一次，配置调高或调低后最多 3 分钟生效。实际生效值用 `python3 scripts/side_runner.py` 内部的 `_CONTAINER_LIMITER.status()` 读取，它返回 `limit / runningContainers / reservedSlots / advisoryReservedSlots / used / available / runningNames`；其中 `used = runningContainers + reservedSlots`，`available = limit - used`。
+- 上限不是写死的 4：若 `~/.codex/sologsb-0917/container-limit.json` 带 `managedBy`（调度监控台托管），其 `maxContainers` 最优先；否则动态读取设备配置 `~/.codex/sologsb/config.json` 的 `claude.maxContainers`，环境变量 `SOLOSB_MAX_CONTAINERS` 和兼容配置 `container-limit.json.maxContainers` 只作回退，默认 4，并受绝对硬顶 6 约束。每个任务启动容器前都会重新读取该文件；排队等待期间每 180 秒重新读取一次，配置调高或调低后最多 3 分钟生效。实际生效值用 `python3 scripts/side_runner.py` 内部的 `_CONTAINER_LIMITER.status()` 读取，它返回 `limit / runningContainers / reservedSlots / advisoryReservedSlots / used / available / runningNames`；其中 `used = runningContainers + reservedSlots`，`available = limit - used`。
 - 调度模式由监控台 `automation.scheduleMode` 决定，执行器按提示词里的 `{{schedule_mode}}` 取值行动：
   - `容器优先`：保持运行中的候选容器数等于设定值，任务数可以少于上限；
   - `任务数量优先`：保持并行任务数等于设定值，容器数可以少于上限。
@@ -120,7 +120,8 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   进程退出或崩溃时由内核自动释放，不因残留锁文件阻断后续任务。
 - 运行器开放 `TodoWrite` 供容器内 Claude Code 记录执行待办；TodoWrite 只用于进度可视化，
   不能替代轨迹校验、语义完成审核或产物证据。
-- 交付表“备注”字段必须留空；提交前审核或其他导出步骤发现非空时，先置空再继续。
+- 2026-09-23 官方表单（fingerprint `954e9db2d25afeb4`，23 个字段全部必填）删除了“备注”，新增 `A/B-交付完整性`（1~5 整数）和 `A/B-交付完整性描述`。草稿必须提供 `delivery.A/B.score/description/evidenceIds`，打分与写法见 `references/delivery-scoring.md`：只写完整性，两侧独立撰写，允许与 GSB 理由少量重合但不得照抄，A、B 两段之间和与历史数据之间都按 G12 查重。
+- GSB 理由与题目提示词都要写得像人话：理由按“一侧一段话”组织，相邻句不用同一称谓起头、每侧称谓最多 3 次、结尾前交代判准；提示词像业务方交代需求，硬性措辞最多 3 处、分号最多 2 个，不用“刷新后……一致”式模板收尾。
 - 提交前必须逐份读取 A/B 轨迹 JSONL，确认内容实际包含 SessionID，且与状态、Excel 中的对应 SessionID 完全一致；缺失或不一致直接阻断。
 - 提交前必须从只读接口刷新历史 GSB 记录，将完整 `user_prompt` 与 `gsb_reason` 写入本地持久缓存 `$CODEX_HOME/cache/sologsb-0917/gsb-history-cache.json`，并按当前 A/B SessionID/已提交 ID 排除自身。历史文案缓存不可只保存在单个任务目录。
 - 当前 `GSB 理由` 必须与历史 `gsb_reason` 逐条执行 B-5 公共长片段、模板 n-gram 和相似度检测；低整句相似度但存在公共长片段同样阻断。任何 `EXACT`、`SIMILAR`、`REVIEW_REQUIRED` 或 `MISSING` 都不得上传或提交。
@@ -200,7 +201,8 @@ SOLO2 会话失效时，运行器会用配置里的账号密码自动重新登�
    过程 claim 必须包含轨迹可核对的实际动作与文件、命令、步骤或需求定位点，
    产物 claim 必须包含返回、缺少、未实现、失败、写入、生成或通过等可观察结果。
    每条判断引用证据 ID，并把每条负面 claim 的触发节点与客观后果写入
-   `triggerKind`/`trigger`/`objectiveConsequence`；运行 `gsb --draft ... --review ...`；
+   `triggerKind`/`trigger`/`objectiveConsequence`；同时按 `references/delivery-scoring.md` 填写
+   `delivery.A/B`（1~5 整数分、只谈完整性的独立描述、本侧 `evidenceIds`）；运行 `gsb --draft ... --review ...`；
    该命令会同时把草稿写到提交预检固定读取的 `monitor/gsb-draft.json`，录屏后刷新 Excel 也会保持同步。
 9. 为 A、B 分别生成录屏计划和 scenario，再运行 `record --side A/B --plan ...`。
    命令会在锁内执行预检/预构建、环境检查、真实录屏和收尾；另一项目持锁时当前任务等待而不是并发启动。
@@ -254,6 +256,7 @@ python3 scripts/sologsb.py cleanup --task-root ROOT  # 同时释放平台项目�
 - `references/gsb-evidence.md`：证据索引、结论和 GSB 文案。
 - `references/reason-writing-rules.md`：GSB 文案编写通则（用词、句式、排版、结构与交稿自检清单），所有题目共用同一口径。
 - `references/reason-word-replacements.json`：文案禁用词与推荐替换词表；新增词只改这一处，`gsb_tools.py` 与提交预检共用。
+- `references/delivery-scoring.md`：A/B 交付完整性五档评分锚点、描述写法、正反例与草稿 `delivery` 格式。
 - `references/recording.md`：成功、失败和不同题型录屏。
 - `references/gsb-form-schema.json`：官方只读 schema 快照。
 - `references/gsb-draft-template.json`：带证据 ID 的 GSB 草稿模板。
@@ -269,7 +272,7 @@ python3 scripts/sologsb.py cleanup --task-root ROOT  # 同时释放平台项目�
 ## 完成判定
 
 只有 `status` 同时确认提示词哈希、Git 三支、两份干净轨迹、两个产物快照、
-两侧真实验证、A/B `lineGate` 记录、G11 仓库洁净门禁、150–240 字 GSB 理由、官方 schema Excel、字段说明和两段
+两侧真实验证、A/B `lineGate` 记录、G11 仓库洁净门禁、150–240 字 GSB 理由、A/B 交付完整性打分与描述、官方 schema Excel、字段说明和两段
 1280x720、不超过 90 秒的视频，以及逐片段 `window-capture`、`cursor-guard` 报告、
 `frontmost-window-monitor.json`、`service-cleanup.json` 均存在且状态通过，
 并且 `recordingMetadata.activationPerformed=false`、`untouched=true`、焦点恢复有记录、服务无残留，

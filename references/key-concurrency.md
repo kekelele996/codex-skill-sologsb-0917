@@ -31,6 +31,7 @@
 
 优先级从高到低，最后再受绝对硬顶 6 约束：
 
+0. 监控台托管值：`~/.codex/sologsb-0917/container-limit.json` 带 `managedBy` 字段时，其 `maxContainers` 优先（由 sologsb 调度监控台写入，统一在监控台设置）
 1. 设备配置 `~/.codex/sologsb/config.json` 的 `claude.maxContainers`
 2. 环境变量 `SOLOSB_MAX_CONTAINERS`（仅在设备配置缺失或字段为空时回退）
 3. 兼容配置 `~/.codex/sologsb-0917/container-limit.json` 的 `maxContainers`

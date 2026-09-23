@@ -106,7 +106,7 @@ $CODEX_HOME/cache/sologsb-0917/gsb-history-cache.json
 - 提交前必须确认表单 schema fingerprint、字段顺序、必填项、文件大小和视频规格。
 - 视频预检必须确认 `state.recordings.<side>.ok=true`，且 `expectedAppFailure`、`observedAppFailure`、`appOutcome` 与真实浏览器退出码一致；非预期非零退出直接阻断。
 - 不重复提交已有 submission id；若平台返回已提交记录，保留响应并停止。确认必须重提时才使用 `--force`。
-- 备注字段绝不进入 API payload；只保留在本地 Excel/草稿中供审计。
+- 官方表单已删除备注字段（2026-09-23）；`A/B-交付完整性` 在 payload 中按整数提交，`A/B-交付完整性描述` 原样提交。
 - 提交后质检终态必须保留；不得把“已提交但待质检”写成通过。
 
 ## 最终汇报

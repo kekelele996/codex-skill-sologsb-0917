@@ -1,15 +1,30 @@
 {
   "verdict": "A 更好",
-  "reason": "A 侧方案在联调阶段读取database/init.sql时检查迁移脚本，数据库配置仍然保留旧约束；升级后索引列表没有使用新的版本字段，接口返回仍然缺少版本信息。B 侧方案在新增指标时同步了口径说明和默认单位，但新增、编辑和重命名流程仍未接入；提交后对应配置没有写入，页面上的编辑结果还是照旧读回旧值。A 侧方案的约束已经去掉，B 侧方案的流程接入不完整；两边都写清了过程与产物事实，因此 A 侧方案更好。",
+  "reason": "A 侧方案在联调阶段读取database/init.sql时检查了迁移脚本，但数据库配置仍然保留旧约束。升级后索引列表没有用上新的版本字段，接口返回里还是缺少版本信息。B 侧方案在新增指标时同步了口径说明和默认单位，新增、编辑和重命名流程却没有接入，提交后对应配置没有写入。这题最看重升级后数据能不能对上，A 侧方案只差版本字段，B 侧方案连配置都没有写入，因此选择 A 侧方案。",
   "languages": "Go, Gin, PostgreSQL",
   "repro_level": "已容器化，可一键起环境",
-  "remark": "",
+  "delivery": {
+    "A": {
+      "score": 3,
+      "description": "迁移脚本database/init.sql里的旧约束没有移除，升级后接口返回缺少版本信息。版本相关需求没有做完，指标读写本身可以正常运行。",
+      "evidenceIds": [
+        "A-artifact-check-01"
+      ]
+    },
+    "B": {
+      "score": 2,
+      "description": "新增、编辑和重命名三处入口都没有接入指标配置，保存后页面读回的仍是旧值，题目要求的主要功能没有达成。",
+      "evidenceIds": [
+        "B-artifact-check-01"
+      ]
+    }
+  },
   "claims": [
     {
       "side": "A",
       "type": "process",
       "polarity": "positive",
-      "text": "A 侧方案在联调阶段读取database/init.sql时检查迁移脚本",
+      "text": "A 侧方案在联调阶段读取database/init.sql时检查了迁移脚本",
       "evidenceIds": [
         "A-process-0001"
       ]
@@ -24,7 +39,7 @@
       "evidenceIds": [
         "A-artifact-check-01"
       ],
-      "objectiveConsequence": "升级后索引列表没有使用新的版本字段，接口返回仍然缺少版本信息"
+      "objectiveConsequence": "接口返回里还是缺少版本信息"
     },
     {
       "side": "B",
@@ -45,45 +60,32 @@
       "evidenceIds": [
         "B-artifact-check-01"
       ],
-      "objectiveConsequence": "提交后对应配置没有写入，页面上的编辑结果还是照旧读回旧值"
+      "objectiveConsequence": "提交后对应配置没有写入"
     }
   ],
   "sentenceEvidence": [
     {
-      "sentence": "A 侧方案在联调阶段读取database/init.sql时检查迁移脚本，数据库配置仍然保留旧约束；",
+      "sentence": "A 侧方案在联调阶段读取database/init.sql时检查了迁移脚本，但数据库配置仍然保留旧约束。",
       "evidenceIds": [
         "A-process-0001",
         "A-artifact-check-01"
       ]
     },
     {
-      "sentence": "升级后索引列表没有使用新的版本字段，接口返回仍然缺少版本信息。",
+      "sentence": "升级后索引列表没有用上新的版本字段，接口返回里还是缺少版本信息。",
       "evidenceIds": [
         "A-artifact-check-01"
       ]
     },
     {
-      "sentence": "B 侧方案在新增指标时同步了口径说明和默认单位，但新增、编辑和重命名流程仍未接入；",
+      "sentence": "B 侧方案在新增指标时同步了口径说明和默认单位，新增、编辑和重命名流程却没有接入，提交后对应配置没有写入。",
       "evidenceIds": [
         "B-process-0001",
         "B-artifact-check-01"
       ]
     },
     {
-      "sentence": "提交后对应配置没有写入，页面上的编辑结果还是照旧读回旧值。",
-      "evidenceIds": [
-        "B-artifact-check-01"
-      ]
-    },
-    {
-      "sentence": "A 侧方案的约束已经去掉，B 侧方案的流程接入不完整；",
-      "evidenceIds": [
-        "A-artifact-check-01",
-        "B-artifact-check-01"
-      ]
-    },
-    {
-      "sentence": "两边都写清了过程与产物事实，因此 A 侧方案更好。",
+      "sentence": "这题最看重升级后数据能不能对上，A 侧方案只差版本字段，B 侧方案连配置都没有写入，因此选择 A 侧方案。",
       "evidenceIds": [
         "A-artifact-check-01",
         "B-artifact-check-01"
@@ -108,6 +110,8 @@
       "其实",
       "本质上",
       "实际上"
-    ]
+    ],
+    "maxLabelMentionsPerSide": 3,
+    "minSentenceChars": 8
   }
 }

@@ -370,6 +370,12 @@ def build_submission_data(
             continue
         if key in uploaded:
             data[key] = uploaded[key]
+        elif str(field.get("field_type") or "") == "number":
+            raw = str(values.get(label, "")).strip()
+            try:
+                data[key] = int(raw)
+            except ValueError as exc:
+                raise RuntimeError(f"数字字段 {label} 不是整数: {raw!r}") from exc
         else:
             data[key] = values.get(label, "")
     for label, key in UPLOAD_LABELS.items():

@@ -106,6 +106,14 @@ def _otty_open_window(title: str, cwd: Path | None = None) -> tuple[str, str]:
         args.append(str(cwd))
     args.append("--json")
     try:
+        before = {
+            str(item.get("id") or "")
+            for item in (_otty_json(["window", "list"]) or [])
+            if str(item.get("id") or "")
+        }
+    except Exception:
+        before = set()
+    try:
         _otty_call(args)
     except Exception:
         # Otty can acknowledge open too late and still create the window after
@@ -117,15 +125,21 @@ def _otty_open_window(title: str, cwd: Path | None = None) -> tuple[str, str]:
             except Exception:
                 windows = []
             match = next((item for item in windows if item.get("title") == title), None)
+            if not match:
+                new_windows = [item for item in windows if str(item.get("id") or "") not in before]
+                match = new_windows[0] if len(new_windows) == 1 else None
             if match:
                 _otty_close_window(str(match.get("id") or ""))
                 break
             time.sleep(0.25)
         raise
     window_id = ""
-    for _ in range(40):
+    for _ in range(160):
         windows = _otty_json(["window", "list"]) or []
         match = next((item for item in windows if item.get("title") == title), None)
+        if not match:
+            new_windows = [item for item in windows if str(item.get("id") or "") not in before]
+            match = new_windows[0] if len(new_windows) == 1 else None
         if match:
             window_id = str(match.get("id") or "")
             if window_id:

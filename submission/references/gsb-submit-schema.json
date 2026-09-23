@@ -1,13 +1,11 @@
 {
   "schemaVersion": 1,
   "source": "/app/gsb/submit",
-  "inspectedAt": "2026-09-18T01:20:00+08:00",
+  "inspectedAt": "2026-09-23T20:00:00+08:00",
   "form": {
-    "fieldCount": 20,
-    "requiredCount": 19,
-    "optionalFields": [
-      "remark"
-    ],
+    "fieldCount": 23,
+    "requiredCount": 23,
+    "optionalFields": [],
     "submitButton": "提交并质检",
     "clearButton": "清空重填",
     "draftNotice": "填写内容会自动存为本地草稿。",
@@ -44,7 +42,8 @@
     "执行 G1：只能提交困难或地狱",
     "执行 G2/G3：远端只允许主分支 main/master 加 A、B，两个产物快照的父提交都必须是初始快照",
     "执行 G5/G6/G7：GSB 理由至少 60 字，分别覆盖 A、B 的过程与产物好坏",
-    "执行 A：Prompt 与本期已有数据雷同直接废弃"
+    "执行 A：Prompt 与本期已有数据雷同直接废弃",
+    "执行 G12：A/B 交付完整性描述与本期已有数据、以及两段之间互相比对，雷同即打回"
   ],
   "fields": [
     {
@@ -138,8 +137,7 @@
         "无外部依赖",
         "有外部依赖，未容器化",
         "已容器化，可一键起环境"
-      ],
-      "uiNote": "页面文案写“选填”，但官方 schema 为 required=true，按必填处理。"
+      ]
     },
     {
       "order": 90,
@@ -148,7 +146,11 @@
       "type": "url",
       "required": true,
       "maxLength": 512,
-      "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$"
+      "options": [],
+      "validation": {
+        "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$",
+        "pattern_message": "必须是 40 位完整 SHA 的 commit 永久链接，拒绝短 SHA、分支名与 tag"
+      }
     },
     {
       "order": 100,
@@ -156,14 +158,17 @@
       "label": "A-SessionID",
       "type": "text",
       "required": true,
-      "maxLength": 128
+      "maxLength": 128,
+      "options": []
     },
     {
       "order": 110,
       "key": "a_trace_file",
       "label": "A-轨迹文件",
       "type": "attachment",
-      "required": true
+      "required": true,
+      "maxLength": null,
+      "options": []
     },
     {
       "order": 120,
@@ -172,14 +177,43 @@
       "type": "url",
       "required": true,
       "maxLength": 512,
-      "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$"
+      "options": [],
+      "validation": {
+        "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$",
+        "pattern_message": "必须是 40 位完整 SHA 的 commit 永久链接，拒绝短 SHA、分支名与 tag"
+      }
     },
     {
       "order": 130,
       "key": "a_screencast",
       "label": "A-运行录屏",
       "type": "video",
-      "required": true
+      "required": true,
+      "maxLength": 512,
+      "options": []
+    },
+    {
+      "order": 134,
+      "key": "a_score_delivery",
+      "label": "A-交付完整性",
+      "type": "number",
+      "required": true,
+      "maxLength": null,
+      "options": [],
+      "validation": {
+        "min": 1,
+        "max": 5,
+        "integer": true
+      }
+    },
+    {
+      "order": 138,
+      "key": "a_desc_delivery",
+      "label": "A-交付完整性描述",
+      "type": "textarea",
+      "required": true,
+      "maxLength": null,
+      "options": []
     },
     {
       "order": 140,
@@ -187,14 +221,17 @@
       "label": "B-SessionID",
       "type": "text",
       "required": true,
-      "maxLength": 128
+      "maxLength": 128,
+      "options": []
     },
     {
       "order": 150,
       "key": "b_trace_file",
       "label": "B-轨迹文件",
       "type": "attachment",
-      "required": true
+      "required": true,
+      "maxLength": null,
+      "options": []
     },
     {
       "order": 160,
@@ -203,14 +240,43 @@
       "type": "url",
       "required": true,
       "maxLength": 512,
-      "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$"
+      "options": [],
+      "validation": {
+        "pattern": "^https://github\\.com/[^/\\s]+/[^/\\s]+/commit/[0-9a-fA-F]{40}/?$",
+        "pattern_message": "必须是 40 位完整 SHA 的 commit 永久链接，拒绝短 SHA、分支名与 tag"
+      }
     },
     {
       "order": 170,
       "key": "b_screencast",
       "label": "B-运行录屏",
       "type": "video",
-      "required": true
+      "required": true,
+      "maxLength": 512,
+      "options": []
+    },
+    {
+      "order": 174,
+      "key": "b_score_delivery",
+      "label": "B-交付完整性",
+      "type": "number",
+      "required": true,
+      "maxLength": null,
+      "options": [],
+      "validation": {
+        "min": 1,
+        "max": 5,
+        "integer": true
+      }
+    },
+    {
+      "order": 178,
+      "key": "b_desc_delivery",
+      "label": "B-交付完整性描述",
+      "type": "textarea",
+      "required": true,
+      "maxLength": null,
+      "options": []
     },
     {
       "order": 180,
@@ -231,15 +297,9 @@
       "label": "GSB 理由",
       "type": "textarea",
       "required": true,
-      "maxLength": null
-    },
-    {
-      "order": 210,
-      "key": "remark",
-      "label": "备注",
-      "type": "textarea",
-      "required": false,
-      "maxLength": null
+      "maxLength": null,
+      "options": []
     }
-  ]
+  ],
+  "fingerprint": "954e9db2d25afeb4"
 }

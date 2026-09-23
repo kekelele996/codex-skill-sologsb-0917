@@ -31,6 +31,13 @@ PATH_OR_CODE = re.compile(
 )
 GUIDED_FIX = re.compile(r"(?:改成|改为|修改为|换成|替换为|加上|加入|删除|删掉|加锁|改返回|使用.+修复)")
 ROUND_REFERENCE = re.compile(r"(第[一二三四五六七八九十百0-9]+轮|本轮|上一轮|下一轮|首轮|轮次)")
+# 2026-09-23 起：提示词要像业务方口头交代需求，不写成条款清单。
+# 历史 119 条里约一半以“刷新后……一致”收尾，四分之一带“整次”，既像模板也容易撞查重。
+PROMPT_RIGID_RE = re.compile(r"(?:只能|仅能|仅|必须|不得|不能|一律|禁止|严禁|务必|只允许)")
+PROMPT_MAX_RIGID = 3
+PROMPT_MAX_SEMICOLONS = 2
+PROMPT_TEMPLATE_TAIL_RE = re.compile(r"(?:刷新|并发|重复)[^。！？]{0,24}(?:一致|不乱|只生效一次|仍能读回)[。！？]?$")
+PROMPT_TEMPLATE_WORD_RE = re.compile(r"(?:整次|任一步失败全部回滚|保持不动)")
 
 
 def _normalize(text: str) -> str:
@@ -112,6 +119,21 @@ def validate_candidate(
         errors.append("包含引导性修复措辞")
     if ROUND_REFERENCE.search(clean):
         errors.append("包含轮次表述")
+    warnings: list[str] = []
+    rigid = PROMPT_RIGID_RE.findall(clean)
+    if len(rigid) > PROMPT_MAX_RIGID:
+        errors.append(
+            f"“只能/必须/不得”这类硬性措辞出现 {len(rigid)} 次，读起来像条款；"
+            f"最多 {PROMPT_MAX_RIGID} 处，其余改成业务后果，例如“过期了就提示对方先刷新”"
+        )
+    semicolons = clean.count("；")
+    if semicolons > PROMPT_MAX_SEMICOLONS:
+        errors.append(f"分号 {semicolons} 个，规则被逐条罗列；拆成几句连贯的话，最多 {PROMPT_MAX_SEMICOLONS} 个")
+    if PROMPT_TEMPLATE_TAIL_RE.search(clean):
+        errors.append("结尾是“刷新后/并发后……一致”式模板收尾；改成本题特有的可观察结果，或并进前文")
+    template_words = sorted(set(PROMPT_TEMPLATE_WORD_RE.findall(clean)))
+    if template_words:
+        warnings.append("出现历史提示词里反复使用的套话：" + "、".join(template_words) + "；建议换成本题自己的说法")
     errors.extend(check_history(clean, history_path))
 
     if VALIDATE_PROMPT.is_file():
@@ -152,6 +174,7 @@ def validate_candidate(
         "charCount": len(clean),
         "textSha256": sha256_bytes(text.encode("utf-8")),
         "errors": errors,
+        "warnings": warnings,
     }
 
 

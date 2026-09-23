@@ -497,6 +497,8 @@ def _normalize_history_item(item: dict) -> dict | None:
         "repoId": str(item.get("repoId") or item.get("repo_id") or ""),
         "aSessionId": str(item.get("aSessionId") or item.get("a_session_id") or ""),
         "bSessionId": str(item.get("bSessionId") or item.get("b_session_id") or ""),
+        "aDescDelivery": str(item.get("aDescDelivery") or item.get("a_desc_delivery") or ""),
+        "bDescDelivery": str(item.get("bDescDelivery") or item.get("b_desc_delivery") or ""),
         "source": "manual",
         "unresolved": not prompt and not reason,
     }
@@ -631,6 +633,8 @@ def _fetch_live_gsb_history() -> dict:
             "repoId": str(detail.get("repo_id") or ""),
             "aSessionId": str(detail.get("a_session_id") or ""),
             "bSessionId": str(detail.get("b_session_id") or ""),
+            "aDescDelivery": str(detail.get("a_desc_delivery") or "").strip(),
+            "bDescDelivery": str(detail.get("b_desc_delivery") or "").strip(),
         })
     return {
         "source": gsb_server() + "/app/gsb/submissions",
@@ -866,6 +870,36 @@ def assess_gsb_reason_dedup(candidate: str, history: dict) -> dict:
         "matches": matches[:20],
     }
 
+def assess_delivery_dedup(descriptions: dict[str, str], history: dict) -> dict:
+    """G12：两段交付完整性描述分别与历史 A/B 两侧描述比对。
+
+    描述通常较短，公共短语多，REVIEW_REQUIRED 只作警告；EXACT/SIMILAR 阻断。
+    """
+    pool = []
+    for item in history.get("items") or []:
+        for key in ("aDescDelivery", "bDescDelivery"):
+            text = str(item.get(key) or "").strip()
+            if text:
+                pool.append({**item, "gsbReason": text, "matchedField": key})
+    sides = {}
+    for side, text in descriptions.items():
+        result = assess_gsb_reason_dedup(text, {"items": pool})
+        result["rewriteInstruction"] = (result.get("rewriteInstruction") or "").replace("GSB 理由", f"{side}-交付完整性描述")
+        sides[side] = result
+    decisions = [value.get("decision") for value in sides.values()]
+    if "MISSING" in decisions:
+        decision = "MISSING"
+    elif "EXACT" in decisions:
+        decision = "EXACT"
+    elif "SIMILAR" in decisions:
+        decision = "SIMILAR"
+    elif "REVIEW_REQUIRED" in decisions:
+        decision = "REVIEW_REQUIRED"
+    else:
+        decision = "UNIQUE"
+    return {"decision": decision, "historyCount": len(pool), "sides": sides}
+
+
 def expected_os() -> str:
     system = platform.system().lower()
     if system == "windows":
@@ -894,6 +928,9 @@ def derived_expected(state: dict, draft: dict) -> dict[str, str]:
     a = sides.get("A") or {}
     b = sides.get("B") or {}
     recordings = state.get("recordings") or {}
+    delivery = draft.get("delivery") if isinstance(draft.get("delivery"), dict) else {}
+    delivery_a = delivery.get("A") or {}
+    delivery_b = delivery.get("B") or {}
     return {
         "user_prompt": str(state.get("promptText") or "").strip(),
         "question_type": str(state.get("taskType") or ""),
@@ -908,13 +945,16 @@ def derived_expected(state: dict, draft: dict) -> dict[str, str]:
         "a_trace_file": str(a.get("tracePath") or ""),
         "a_artifact_snapshot": str(a.get("artifactSnapshotUrl") or ""),
         "a_screencast": str((recordings.get("A") or {}).get("videoPath") or ""),
+        "a_score_delivery": str(delivery_a.get("score") or ""),
+        "a_desc_delivery": str(delivery_a.get("description") or "").strip(),
         "b_session_id": str(b.get("sessionId") or ""),
         "b_trace_file": str(b.get("tracePath") or ""),
         "b_artifact_snapshot": str(b.get("artifactSnapshotUrl") or ""),
         "b_screencast": str((recordings.get("B") or {}).get("videoPath") or ""),
+        "b_score_delivery": str(delivery_b.get("score") or ""),
+        "b_desc_delivery": str(delivery_b.get("description") or "").strip(),
         "gsb_verdict": str(draft.get("verdict") or ""),
         "gsb_reason": str(draft.get("reason") or "").strip(),
-        "remark": str(draft.get("remark") or "").strip(),
     }
 
 
@@ -1123,8 +1163,6 @@ def compare_excel(excel: dict, expected: dict, schema: dict) -> list[str]:
             continue
         actual = str((excel.get("values") or {}).get(label) or "").strip()
         target = str(target or "").strip()
-        if not target and key == "remark":
-            continue
         if key in {"a_trace_file", "b_trace_file", "a_screencast", "b_screencast"}:
             actual_resolved = str(Path(actual).expanduser().resolve()) if actual else ""
             target_resolved = str(Path(target).expanduser().resolve()) if target else ""
@@ -1308,6 +1346,7 @@ def assess_reason_quality(draft: dict, evidence_doc: dict | None = None) -> dict
     style_helpers = _load_reason_style_helpers()
     if style_helpers is not None:
         errors.extend(style_helpers.reason_style_errors(reason))
+        errors.extend(style_helpers.reason_flow_errors(reason))
         warnings.extend(style_helpers.reason_style_warnings(reason))
         markdown_errors = style_helpers._validate_reason_markdown(reason)
         language_errors = style_helpers.reason_language_errors(reason)
@@ -1530,6 +1569,36 @@ def main() -> int:
     for warning in reason_quality.get("warnings") or []:
         add("reason-ai-style", False, warning, severity="warning", evidence=reason_quality)
 
+    style_helpers = _load_reason_style_helpers()
+    if style_helpers is not None:
+        delivery_quality = style_helpers.validate_delivery(draft, evidence_doc, reason_text)
+    else:
+        delivery_quality = {"ok": False, "errors": ["GSB 文案校验器 gsb_tools 不可用，无法审核交付完整性"], "warnings": []}
+    add(
+        "delivery-quality",
+        delivery_quality["ok"],
+        "A/B 交付完整性打分为 1~5 整数，描述只谈完整性、按实际情况独立撰写且未照抄 GSB 理由",
+        evidence=delivery_quality,
+    )
+    for warning in delivery_quality.get("warnings") or []:
+        add("delivery-verdict-consistency", False, warning, severity="warning", evidence=delivery_quality)
+    delivery_texts = {
+        side: str(((draft.get("delivery") or {}).get(side) or {}).get("description") or "").strip()
+        for side in ("A", "B")
+    } if isinstance(draft.get("delivery"), dict) else {"A": "", "B": ""}
+    delivery_dedup = assess_delivery_dedup(delivery_texts, prompt_history) if prompt_history else {"decision": "BLOCKED"}
+    delivery_dedup_path = task_root / "monitor" / "gsb-delivery-dedup-review.json"
+    delivery_dedup_path.write_text(json.dumps(delivery_dedup, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    delivery_decision = str(delivery_dedup.get("decision") or "BLOCKED")
+    add(
+        "delivery-dedup",
+        delivery_decision in {"UNIQUE", "REVIEW_REQUIRED"},
+        f"G12 交付完整性描述历史去重: {delivery_decision}",
+        evidence={"path": str(delivery_dedup_path), "decision": delivery_decision},
+    )
+    if delivery_decision == "REVIEW_REQUIRED":
+        add("delivery-dedup-review", False, "交付完整性描述与历史描述有 8 字以上公共片段，建议换一种说法", severity="warning", evidence={"path": str(delivery_dedup_path)})
+
     excel = read_excel(excel_path, schema)
     add("excel", excel.get("ok"), "Excel 字段存在且必填项完整", evidence=excel)
     if excel.get("missingRequired"):
@@ -1620,7 +1689,13 @@ def main() -> int:
             add("code-volume", False, "远端 Git 不可用，无法检查 G11 改动量", evidence=remote)
 
     required = [field for field in schema.get("fields") or [] if field.get("required")]
-    add("schema-page", len(schema.get("fields") or []) == 20 and len(required) == 19, "页面字段快照为 20 字段/19 必填")
+    form = schema.get("form") or {}
+    add(
+        "schema-page",
+        len(schema.get("fields") or []) == int(form.get("fieldCount") or 0)
+        and len(required) == int(form.get("requiredCount") or 0),
+        f"页面字段快照为 {form.get('fieldCount')} 字段/{form.get('requiredCount')} 必填",
+    )
     reason = str(draft.get("reason") or "")
     reason_nonwhite = len(re.sub(r"\s+", "", reason))
     state_versions = {side: str(((state.get("sides") or {}).get(side) or {}).get("harnessVersion") or "") for side in ("A", "B")}
@@ -1794,6 +1869,9 @@ def main() -> int:
         "promptDedup": prompt_dedup,
         "reasonHistory": reason_history,
         "reasonDedup": reason_dedup,
+        "deliveryDedupPath": str(delivery_dedup_path),
+        "deliveryDedup": delivery_dedup,
+        "deliveryQuality": delivery_quality,
         "codeChange": code_change,
         "changeVolumeLineGate": line_gate_review,
         "submissionPayloadPath": str(payload_path),
