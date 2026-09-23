@@ -32,6 +32,8 @@ from common import (
     safe_slug,
     save_state,
     sha256_file,
+    skill_version,
+    skill_version_info,
     task_root_from_arg,
     utc_now,
     write_json,
@@ -479,9 +481,29 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_version(args: argparse.Namespace) -> int:
+    info = skill_version_info()
+    print(json.dumps({
+        "name": "sologsb-0917",
+        "version": skill_version(),
+        "releaseTag": info.get("release_tag", ""),
+        "branch": info.get("branch", ""),
+        "repository": info.get("repository", ""),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"sologsb-0917 {skill_version()}",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    version = sub.add_parser("version", help="打印统一全局版本号")
+    version.set_defaults(func=cmd_version)
 
     init = sub.add_parser("init", help="接入源码并创建任务目录")
     init.add_argument("--workdir", type=Path, default=Path.cwd())

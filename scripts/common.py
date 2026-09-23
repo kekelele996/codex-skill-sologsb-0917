@@ -26,6 +26,7 @@ AUTO_DIR = CODEX_HOME / "skills" / "solo2-auto"
 AUTO_RUNNER = AUTO_DIR / "scripts" / "auto_runner.py"
 RECORDER_DIR = CODEX_HOME / "skills" / "desktop-demo-recorder"
 SCHEMA_FALLBACK = SKILL_ROOT / "references" / "gsb-form-schema.json"
+VERSION_FILE = SKILL_ROOT / "VERSION"
 STATE_ORDER = [
     "prepared",
     "prompt_ready",
@@ -54,6 +55,32 @@ class SologsbError(RuntimeError):
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def skill_version_info() -> dict[str, str]:
+    """读取技能根目录的 VERSION 文件，它是全局版本号的唯一来源。"""
+    info: dict[str, str] = {}
+    try:
+        text = VERSION_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return info
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        info[key.strip()] = value.strip()
+    return info
+
+
+def skill_version() -> str:
+    """统一全局版本号，例如 1.0.0。"""
+    return skill_version_info().get("version", "unknown")
+
+
+def skill_release_tag() -> str:
+    """与全局版本号对应的发布标签，例如 v1.0.0。"""
+    return skill_version_info().get("release_tag", "")
 
 def _proxy_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
     try:

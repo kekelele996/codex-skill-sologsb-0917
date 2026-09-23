@@ -22,9 +22,13 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 发布标签：`v2026.09.23.1`
-- 精确提交号：运行 `git rev-parse v2026.09.23.1` 获取。
-- 机器可读版本：技能根目录的 `VERSION` 文件。
+- 全局版本号：`1.0.0`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.0.0`
+- 精确提交号：运行 `git rev-parse v1.0.0` 获取。
+- 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
+  命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
+- 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
+  CLI、`version` 子命令和自测都会跟着变，不要再在其它文件里散写版本号。
 
 ## 实测固定顺序
 
@@ -244,6 +248,8 @@ python3 scripts/sologsb.py submit --task-root ROOT --execute              # 完�
 python3 scripts/sologsb.py approve-line-gate --task-root ROOT            # 仅改动量单项失败时，由设备配置里的审批人在 TTY 中批准
 python3 scripts/sologsb.py submit --task-root ROOT --approval APPROVAL --execute
 python3 scripts/sologsb.py cleanup --task-root ROOT  # 同时释放平台项目占用锁
+python3 scripts/sologsb.py --version                                    # 打印统一全局版本号
+python3 scripts/sologsb.py version                                       # 打印版本 JSON
 ```
 
 ## 参考资料

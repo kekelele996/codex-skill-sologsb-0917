@@ -28,6 +28,8 @@ from common import (  # noqa: E402
     read_json,
     safe_slug,
     sha256_file,
+    skill_version,
+    skill_version_info,
     write_json,
 )
 from gsb_tools import (
@@ -2425,6 +2427,44 @@ class ContainerLimitTests(unittest.TestCase):
                 reservation.release()
                 excluded = limiter.acquire("gb-501", "sologsb-gb-501-20260919-000000-candidate-1-1-a")
                 self.assertIsNone(excluded.path)
+
+
+class VersionTests(unittest.TestCase):
+    """全局版本号只有一个来源：根目录 VERSION。"""
+
+    def test_version_file_is_the_single_source(self) -> None:
+        info = skill_version_info()
+        self.assertEqual(info.get("version"), "1.0.0")
+        self.assertRegex(info.get("version", ""), r"^\d+\.\d+\.\d+$")
+        self.assertEqual(info.get("release_tag"), f"v{info.get('version')}")
+        self.assertEqual(info.get("branch"), "main")
+        self.assertIn("codex-skill-sologsb-0917", info.get("repository", ""))
+
+    def test_skill_md_agrees_with_version_file(self) -> None:
+        info = skill_version_info()
+        text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn(f"全局版本号：`{info['version']}`", text)
+        self.assertIn(f"发布标签：`{info['release_tag']}`", text)
+
+    def test_skill_version_helper_matches(self) -> None:
+        self.assertEqual(skill_version(), skill_version_info().get("version"))
+
+    def test_cli_reports_the_same_version(self) -> None:
+        cli = ROOT / "scripts" / "sologsb.py"
+        flag = subprocess.run(
+            [sys.executable, str(cli), "--version"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(flag.returncode, 0, flag.stderr)
+        self.assertEqual(flag.stdout.strip(), f"sologsb-0917 {skill_version()}")
+        command = subprocess.run(
+            [sys.executable, str(cli), "version"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(command.returncode, 0, command.stderr)
+        payload = json.loads(command.stdout)
+        self.assertEqual(payload["version"], skill_version())
+        self.assertEqual(payload["releaseTag"], skill_version_info().get("release_tag"))
 
 
 if __name__ == "__main__":
