@@ -629,14 +629,8 @@ def _api_fixture_server() -> http.server.ThreadingHTTPServer:
 
 
 class DeliveryFieldTests(unittest.TestCase):
-    """2026-09-23 新增的 A/B 交付完整性打分与描述。"""
+    """2026-09-23 新增的 A/B 交付完整性打分与描述，含“与轨迹一致”红线。"""
 
-    EVIDENCE = {
-        "evidence": [
-            {"id": "A-artifact-check-01", "side": "A", "type": "artifact", "text": "frontend/src/api.ts 登录请求 404"},
-            {"id": "B-artifact-check-01", "side": "B", "type": "artifact", "text": "diary.service.ts 发布回读一致"},
-        ]
-    }
     REASON = (
         "A 侧方案在打开api.ts的请求定义时多拼了一层前缀，登录一直被挡在外面，页面进不去日记。"
         "B 侧方案补跑了发布流程并回读快照，这题最要紧的是能完整走通，因此选择 B 侧方案。"
@@ -644,88 +638,269 @@ class DeliveryFieldTests(unittest.TestCase):
     DESC_A = "登录请求在frontend/src/api.ts里多拼了一层前缀，接口返回404。用户进不了日记页，保存和发布需求都没法验证。"
     DESC_B = "逐条核对了选择行程、存草稿、发起人发布和冻结标题四项需求，构建和启动都通过，刷新后版本与发布状态一致。"
 
-    def _draft(self, **delivery) -> dict:
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        root = Path(self._temp.name)
+        self.trace_a = root / "a.jsonl"
+        self.trace_b = root / "b.jsonl"
+        self.trace_a.write_text(self._edit_event("/workspace/frontend/src/api.ts"), encoding="utf-8")
+        self.trace_b.write_text(self._edit_event("/workspace/src/diary.service.ts"), encoding="utf-8")
+
+    @staticmethod
+    def _edit_event(path: str, tool: str = "Edit") -> str:
+        block = {"type": "tool_use", "name": tool, "input": {"file_path": path} if tool != "Bash" else {"command": path}}
+        return json.dumps({"type": "assistant", "message": {"content": [block]}}, ensure_ascii=False) + "\n"
+
+    def tearDown(self) -> None:
+        self._temp.cleanup()
+
+    @staticmethod
+    def _check(id_: str, side: str, name: str, command: str, ok: bool, output: str = "", **extra) -> dict:
+        return {
+            "id": id_, "side": side, "type": "artifact",
+            "polarity": "positive" if ok else "negative", "text": f"真实复核 {name}",
+            "artifact": {"command": command, "ok": ok, "observedFailure": False, "output": output, **extra},
+        }
+
+    def _evidence(self, *, a_build_ok: bool = True, extra: list | None = None) -> dict:
+        items = [
+            self._check("A-artifact-check-01", "A", "登录接口", "curl -i localhost:3000/api/api/users/login", False, "HTTP/1.1 404"),
+            self._check("A-artifact-check-02", "A", "npm-build", "npm run build", a_build_ok),
+            self._check("B-artifact-check-01", "B", "npm-build", "npm run build", True),
+            self._check("B-artifact-check-02", "B", "发布回读", "curl localhost:3000/api/diary", True),
+            {"id": "A-process-final", "side": "A", "type": "process", "text": "模型最终回复",
+             "trace": {"tracePath": str(self.trace_a), "quote": "登录和发布功能已全部完成"}},
+        ]
+        return {
+            "evidence": items + (extra or []),
+            "process": {"A": {"tracePath": str(self.trace_a)}, "B": {"tracePath": str(self.trace_b)}},
+        }
+
+    def _draft(self, verdict: str = "B 更好", **delivery) -> dict:
         base = {
             "A": {"score": 2, "description": self.DESC_A, "evidenceIds": ["A-artifact-check-01"]},
-            "B": {"score": 5, "description": self.DESC_B, "evidenceIds": ["B-artifact-check-01"]},
+            "B": {"score": 5, "description": self.DESC_B, "evidenceIds": ["B-artifact-check-02"]},
         }
         for side, patch in delivery.items():
             base[side] = {**base[side], **patch}
-        return {"verdict": "B 更好", "reason": self.REASON, "delivery": base}
+        return {"verdict": verdict, "reason": self.REASON, "delivery": base}
+
+    def _errors(self, draft: dict, evidence: dict | None = None) -> list[str]:
+        return validate_delivery(draft, evidence or self._evidence(), self.REASON)["errors"]
 
     def test_valid_delivery_passes(self) -> None:
-        result = validate_delivery(self._draft(), self.EVIDENCE, self.REASON)
+        result = validate_delivery(self._draft(), self._evidence(), self.REASON)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["scores"], {"A": 2, "B": 5})
 
     def test_missing_delivery_blocks(self) -> None:
-        result = validate_delivery({"verdict": "A 更好"}, self.EVIDENCE, self.REASON)
-        self.assertFalse(result["ok"])
+        self.assertFalse(validate_delivery({"verdict": "A 更好"}, self._evidence(), self.REASON)["ok"])
 
     def test_score_must_be_integer_1_to_5(self) -> None:
         for bad in (0, 6, 3.5, "4", True):
-            result = validate_delivery(self._draft(A={"score": bad}), self.EVIDENCE, self.REASON)
-            self.assertTrue(any("1~5 的整数" in item for item in result["errors"]), (bad, result))
+            errors = self._errors(self._draft(A={"score": bad}))
+            self.assertTrue(any("1~5 的整数" in item for item in errors), (bad, errors))
 
     def test_full_score_needs_basis_and_no_open_problem(self) -> None:
-        vague = validate_delivery(
-            self._draft(B={"description": "整体做得很好，各项功能都符合题目描述的预期，没有看到明显的问题，可以直接交付给用户。"}),
-            self.EVIDENCE, self.REASON,
-        )
-        self.assertTrue(any("核对依据" in item for item in vague["errors"]), vague)
-        contradictory = validate_delivery(
-            self._draft(B={"description": "逐条核对了存草稿和发布两项需求，构建通过，但成员离队后的只读限制还没有实现，缺少对应校验。"}),
-            self.EVIDENCE, self.REASON,
-        )
-        self.assertTrue(any("分数与描述矛盾" in item for item in contradictory["errors"]), contradictory)
+        vague = self._errors(self._draft(B={"description": "整体做得很好，各项功能都符合题目描述的预期，没有看到明显的问题，可以直接交付给用户。"}))
+        self.assertTrue(any("核对依据" in item for item in vague), vague)
+        contradictory = self._errors(self._draft(B={"description": "逐条核对了存草稿和发布两项需求，构建通过，但成员离队后的只读限制还没有实现，缺少对应校验。"}))
+        self.assertTrue(any("分数与描述矛盾" in item for item in contradictory), contradictory)
 
     def test_low_score_needs_location_and_consequence(self) -> None:
-        result = validate_delivery(
-            self._draft(A={"description": "这一侧整体完成度一般，很多地方做得比较粗糙，和题目的要求相比还有不小的差距需要继续打磨。"}),
-            self.EVIDENCE, self.REASON,
-        )
-        self.assertTrue(any("客观后果" in item for item in result["errors"]), result)
+        errors = self._errors(self._draft(A={"description": "这一侧整体完成度一般，很多地方做得比较粗糙，和题目的要求相比还有不小的差距需要继续打磨。"}))
+        self.assertTrue(any("客观后果" in item for item in errors), errors)
 
     def test_process_dimensions_are_rejected(self) -> None:
-        result = validate_delivery(
-            self._draft(A={"description": self.DESC_A + "任务规划也比较乱。"}), self.EVIDENCE, self.REASON
-        )
-        self.assertTrue(any("过程维度" in item for item in result["errors"]), result)
+        errors = self._errors(self._draft(A={"description": self.DESC_A + "任务规划也比较乱。"}))
+        self.assertTrue(any("过程维度" in item for item in errors), errors)
 
     def test_copying_reason_is_rejected(self) -> None:
         copied = "A 侧方案在打开api.ts的请求定义时多拼了一层前缀，登录一直被挡在外面，页面进不去日记。"
-        result = validate_delivery(
-            self._draft(A={"description": copied}),
-            {"evidence": self.EVIDENCE["evidence"] + [{"id": "A-x", "side": "A", "type": "artifact", "text": "api.ts"}]},
-            self.REASON,
-        )
-        self.assertTrue(any("照抄" in item or "过于相似" in item for item in result["errors"]), result)
+        errors = self._errors(self._draft(A={"description": copied}))
+        self.assertTrue(any("照抄" in item or "过于相似" in item for item in errors), errors)
 
     def test_a_and_b_must_not_be_alike(self) -> None:
-        result = validate_delivery(
-            self._draft(A={"score": 5, "description": self.DESC_B}), self.EVIDENCE, self.REASON
-        )
-        self.assertTrue(any("雷同" in item for item in result["errors"]), result)
-
-    def test_file_anchor_must_exist_in_same_side_evidence(self) -> None:
-        result = validate_delivery(
-            self._draft(A={"description": "登录请求在frontend/src/login.ts里多拼了一层前缀，接口返回404。用户进不了日记页，保存和发布都没法验证。"}),
-            self.EVIDENCE, self.REASON,
-        )
-        self.assertTrue(any("login.ts" in item for item in result["errors"]), result)
+        errors = self._errors(self._draft(A={"score": 5, "description": self.DESC_B, "evidenceIds": ["A-artifact-check-02"]}))
+        self.assertTrue(any("雷同" in item for item in errors), errors)
 
     def test_evidence_must_be_same_side(self) -> None:
-        result = validate_delivery(
-            self._draft(A={"evidenceIds": ["B-artifact-check-01"]}), self.EVIDENCE, self.REASON
-        )
-        self.assertTrue(any("另一侧" in item for item in result["errors"]), result)
+        errors = self._errors(self._draft(A={"evidenceIds": ["B-artifact-check-01"]}))
+        self.assertTrue(any("另一侧" in item for item in errors), errors)
 
-    def test_verdict_score_mismatch_is_warning(self) -> None:
+    # ---- 红线：描述必须与本侧轨迹对应，不得出现对立意见 ----
+
+    def test_file_anchor_must_exist_in_own_trace(self) -> None:
+        other_side_file = "登录请求在src/diary.service.ts里多拼了一层前缀，接口返回404。用户进不了日记页，保存和发布都没法验证。"
+        errors = self._errors(self._draft(A={"description": other_side_file}))
+        self.assertTrue(any("diary.service.ts 在本侧轨迹中不存在" in item for item in errors), errors)
+
+    def test_literal_error_anchor_must_exist_in_trace(self) -> None:
+        desc = "迁移时报SQLSTATE23505，唯一索引建不起来，服务启动时就退出了，段位登记需求没有做完。"
+        errors = self._errors(self._draft(A={"description": desc}))
+        self.assertTrue(any("SQLSTATE23505" in item for item in errors), errors)
+
+    def test_status_code_must_be_observed(self) -> None:
+        desc = "登录请求在frontend/src/api.ts里多拼了一层前缀，接口返回500。用户进不了日记页，保存和发布都没法验证。"
+        errors = self._errors(self._draft(A={"description": desc}))
+        self.assertTrue(any("500" in item for item in errors), errors)
+
+    def test_build_failure_caps_score_and_blocks_success_wording(self) -> None:
+        evidence = self._evidence(a_build_ok=False)
+        errors = self._errors(self._draft(A={"score": 3}), evidence)
+        self.assertTrue(any("无法运行最高 2 分" in item for item in errors), errors)
+        desc = "登录请求在frontend/src/api.ts里多拼了一层前缀，接口返回404。不过构建和启动都通过，其余需求可用。"
+        errors = self._errors(self._draft(A={"description": desc}), evidence)
+        self.assertTrue(any("描述与复核结果对立" in item for item in errors), errors)
+
+    def test_all_checks_passing_contradicts_cannot_run(self) -> None:
+        desc = "发布入口在src/diary.service.ts里没有接好，页面无法启动，存草稿和发布两项需求都没有完成。"
+        errors = self._errors(self._draft(B={"score": 2, "description": desc, "evidenceIds": ["B-artifact-check-02"]}))
+        self.assertTrue(any("无法启动" in item and "对立" in item for item in errors), errors)
+        self.assertTrue(any("没有任何可引用的失败证据" in item and "probe" in item for item in errors), errors)
+
+    def test_full_score_cannot_cite_failure_or_have_failed_checks(self) -> None:
+        desc = "逐条核对了登录、选择行程和发布三项需求，页面操作都能完成，刷新后状态保持一致，结果符合预期。"
+        errors = self._errors(self._draft("A 更好", A={"score": 5, "description": desc}, B={"score": 4}))
+        self.assertTrue(any("失败项" in item for item in errors), errors)
+        self.assertTrue(any("引用了本侧失败证据" in item for item in errors), errors)
+
+    def test_full_score_conflicts_with_negative_reason_claim(self) -> None:
         draft = self._draft()
-        draft["verdict"] = "A 更好"
-        result = validate_delivery(draft, self.EVIDENCE, self.REASON)
+        draft["claims"] = [{"side": "B", "type": "artifact", "polarity": "negative", "text": "发布后标题没有冻结"}]
+        errors = self._errors(draft)
+        self.assertTrue(any("两处意见对立" in item for item in errors), errors)
+
+    def test_verdict_against_scores_blocks(self) -> None:
+        errors = self._errors(self._draft("A 更好"))
+        self.assertTrue(any("结论与打分对立" in item for item in errors), errors)
+        errors = self._errors(self._draft("Same"))
+        self.assertTrue(any("结论与打分对立" in item for item in errors), errors)
+
+    def test_false_success_needs_completion_claim_in_trace(self) -> None:
+        desc = "模型最终回复宣称登录已修好，实际frontend/src/api.ts仍多拼前缀，接口返回404，属于虚假成功。"
+        self.assertEqual([e for e in self._errors(self._draft(A={"description": desc})) if "虚假成功" in e], [])
+        evidence = self._evidence()
+        evidence["evidence"][-1]["trace"]["quote"] = "我还没来得及处理登录问题"
+        errors = self._errors(self._draft(A={"description": desc}), evidence)
+        self.assertTrue(any("没有宣称完成" in item for item in errors), errors)
+
+    def test_source_attribution_wording_is_rejected(self) -> None:
+        for phrase in ("从录屏来看", "编写的测试", "复核结果显示", "根据测试"):
+            desc = f"{phrase}，登录请求在frontend/src/api.ts里多拼了一层前缀，接口返回404，保存和发布需求都没法验证。"
+            errors = self._errors(self._draft(A={"description": desc}))
+            self.assertTrue(any("不要交代信息来源" in item for item in errors), (phrase, errors))
+        reason = self.REASON.replace("B 侧方案补跑了", "从测试结果看B 侧方案补跑了")
+        self.assertTrue(any("不要交代信息来源" in item for item in _validate_artifact_description(reason)))
+
+    def test_edit_claims_must_match_trace(self) -> None:
+        not_changed = "frontend/src/api.ts没有修改，登录请求还是多拼一层前缀，接口返回404，保存和发布需求都没法验证。"
+        errors = self._errors(self._draft(A={"description": not_changed}))
+        self.assertTrue(any("没有改" in item and "完全对立" in item for item in errors), errors)
+        self.trace_a.write_text(
+            self._edit_event("/workspace/frontend/src/api.ts", "Read") + self._edit_event("cat frontend/src/login.ts", "Bash"),
+            encoding="utf-8",
+        )
+        changed = "模型修改了frontend/src/api.ts的登录请求，但前缀还是多拼一层，接口返回404，发布需求没法验证。"
+        errors = self._errors(self._draft(A={"description": changed}))
+        self.assertTrue(any("没有任何对它的编辑" in item for item in errors), errors)
+        self.trace_a.write_text(self._edit_event("sed -i s/a/b/ frontend/src/api.ts", "Bash"), encoding="utf-8")
+        errors = self._errors(self._draft(A={"description": changed}))
+        self.assertFalse(any("完全对立" in item for item in errors), errors)
+
+    def test_probe_failure_is_admissible_evidence(self) -> None:
+        probe = self._check(
+            "A-artifact-check-03", "A", "登录接口探活", "npm run dev", False,
+            "[probe] POST /api/users/login -> 404",
+            probe={"method": "POST", "path": "/api/users/login", "status": 404},
+        )
+        desc = "请求了/api/users/login登录接口，返回404。用户进不了日记页，保存和发布需求都没法走到。"
+        result = validate_delivery(
+            self._draft(A={"description": desc, "evidenceIds": ["A-artifact-check-03"]}),
+            self._evidence(extra=[probe]), self.REASON,
+        )
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["warnings"])
+
+    def test_web_recording_is_usable_like_before(self) -> None:
+        web = {"id": "A-recording", "side": "A", "type": "artifact", "polarity": "negative",
+               "artifact": {"ok": True, "observedFailure": True, "recordingMode": "web", "output": "登录后停在空白页"}}
+        desc = "打开日记页点登录后停在空白页，用户进不了日记页，保存和发布这两项需求都没法走到。"
+        result = validate_delivery(
+            self._draft(A={"description": desc, "evidenceIds": ["A-recording"]}),
+            self._evidence(extra=[web]), self.REASON,
+        )
+        self.assertTrue(result["ok"], result)
+
+    def test_probe_not_used_for_projects_with_pages(self) -> None:
+        web = {"id": "A-recording", "side": "A", "type": "artifact", "polarity": "negative",
+               "artifact": {"ok": True, "observedFailure": True, "recordingMode": "web"}}
+        probe = self._check("A-artifact-check-03", "A", "登录接口探活", "npm run dev", False,
+                            "[probe] POST /api/users/login -> 404", probe={"status": 404})
+        errors = self._errors(
+            self._draft(A={"evidenceIds": ["A-artifact-check-03"]}), self._evidence(extra=[web, probe])
+        )
+        self.assertTrue(any("不做接口探活" in item for item in errors), errors)
+
+    # ---- 本地编写的测试与自动化脚本不参与交付完整性描述 ----
+
+    def test_local_scripts_cannot_be_cited_or_mentioned(self) -> None:
+        local = self._check("A-artifact-check-03", "A", "验收", "node /tmp/accept.mjs", False, "404", localScript=True)
+        evidence = self._evidence(extra=[local])
+        errors = self._errors(self._draft(A={"evidenceIds": ["A-artifact-check-03"]}), evidence)
+        self.assertTrue(any("本地编写的测试" in item for item in errors), errors)
+        recording = {"id": "A-recording", "side": "A", "type": "artifact", "polarity": "positive",
+                     "artifact": {"ok": True, "observedFailure": False, "recordingMode": "terminal"}}
+        errors = self._errors(self._draft(A={"evidenceIds": ["A-recording"]}), self._evidence(extra=[recording]))
+        self.assertTrue(any("本地编写的测试" in item for item in errors), errors)
+        desc = "登录请求在frontend/src/api.ts里多拼了一层前缀，验收脚本跑出接口返回404，保存和发布需求都没法验证。"
+        errors = self._errors(self._draft(A={"description": desc}))
+        self.assertTrue(any("自动化脚本" in item for item in errors), errors)
+
+    def test_local_script_failures_do_not_drive_consistency(self) -> None:
+        local_build = self._check("B-artifact-check-03", "B", "启动冒烟", "bash /tmp/smoke-start.sh", False, localScript=True)
+        result = validate_delivery(self._draft(), self._evidence(extra=[local_build]), self.REASON)
+        self.assertTrue(result["ok"], result)
+
+    def test_verifier_flags_untracked_scripts(self) -> None:
+        import artifact_verifier
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / "scripts").mkdir()
+            (repo / "scripts" / "check.sh").write_text("exit 0\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            (repo / "accept.sh").write_text("exit 0\n", encoding="utf-8")
+            flag = artifact_verifier.is_local_script_check
+            self.assertFalse(flag({"command": "bash scripts/check.sh"}, repo))
+            self.assertFalse(flag({"command": "npm run build"}, repo))
+            self.assertTrue(flag({"command": "bash accept.sh"}, repo))
+            self.assertTrue(flag({"command": "node /tmp/e2e.mjs"}, repo))
+            self.assertTrue(flag({"command": "npx playwright test"}, repo))
+            self.assertTrue(flag({"command": "npm test", "localScript": True}, repo))
+
+    def test_verifier_probe_records_status(self) -> None:
+        import artifact_verifier
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"not found")
+
+            def log_message(self, *args) -> None:
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            result = artifact_verifier.run_probe(base, {"method": "POST", "path": "/api/users/login", "expectStatus": 200})
+        finally:
+            server.shutdown()
+        self.assertEqual(result["status"], 404)
+        self.assertFalse(result["ok"])
+        self.assertIn("返回 404", result["error"])
 
     def test_build_values_maps_new_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2434,7 +2609,6 @@ class VersionTests(unittest.TestCase):
 
     def test_version_file_is_the_single_source(self) -> None:
         info = skill_version_info()
-        self.assertEqual(info.get("version"), "1.0.0")
         self.assertRegex(info.get("version", ""), r"^\d+\.\d+\.\d+$")
         self.assertEqual(info.get("release_tag"), f"v{info.get('version')}")
         self.assertEqual(info.get("branch"), "main")

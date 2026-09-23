@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.0.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.0.0`
-- 精确提交号：运行 `git rev-parse v1.0.0` 获取。
+- 全局版本号：`1.1.0`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.1.0`
+- 精确提交号：运行 `git rev-parse v1.1.0` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -125,6 +125,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 运行器开放 `TodoWrite` 供容器内 Claude Code 记录执行待办；TodoWrite 只用于进度可视化，
   不能替代轨迹校验、语义完成审核或产物证据。
 - 2026-09-23 官方表单（fingerprint `954e9db2d25afeb4`，23 个字段全部必填）删除了“备注”，新增 `A/B-交付完整性`（1~5 整数）和 `A/B-交付完整性描述`。草稿必须提供 `delivery.A/B.score/description/evidenceIds`，打分与写法见 `references/delivery-scoring.md`：只写完整性，两侧独立撰写，允许与 GSB 理由少量重合但不得照抄，A、B 两段之间和与历史数据之间都按 G12 查重。
+- 红线：A/B 交付完整性描述必须与本侧轨迹对应，不得出现对立意见。锚点必须在本侧原始轨迹中存在，分数和描述不得与本侧真实复核结果、引用证据、GSB 理由或 GSB 结论相反（详见 `references/delivery-scoring.md` 红线一）。本地（容器外）编写的任何测试和自动化脚本，包括验收、冒烟、Playwright、录制场景，都不参与交付完整性描述：不写进描述，不引用其证据，也不作为分数依据（红线二）。有页面的项目和之前一样引用录屏证据；纯后端 API 项目的录屏排除，改用验证计划的 `probe` 接口探活作为证据。描述和理由都直接写“请求了登录接口，返回404”这种主观直述，不写“从录屏来看”“根据编写的测试”。
 - GSB 理由与题目提示词都要写得像人话：理由按“一侧一段话”组织，相邻句不用同一称谓起头、每侧称谓最多 3 次、结尾前交代判准；提示词像业务方交代需求，硬性措辞最多 3 处、分号最多 2 个，不用“刷新后……一致”式模板收尾。
 - 提交前必须逐份读取 A/B 轨迹 JSONL，确认内容实际包含 SessionID，且与状态、Excel 中的对应 SessionID 完全一致；缺失或不一致直接阻断。
 - 提交前必须从只读接口刷新历史 GSB 记录，将完整 `user_prompt` 与 `gsb_reason` 写入本地持久缓存 `$CODEX_HOME/cache/sologsb-0917/gsb-history-cache.json`，并按当前 A/B SessionID/已提交 ID 排除自身。历史文案缓存不可只保存在单个任务目录。

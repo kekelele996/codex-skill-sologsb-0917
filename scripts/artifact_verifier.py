@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -97,6 +99,72 @@ def _ready(url: str, timeout: float) -> bool:
     return False
 
 
+LOCAL_SCRIPT_PATH_RE = re.compile(r"(?:^|\s)(?:/tmp/|/private/|/Users/|/home/|~/|\$HOME|\$TASK_ROOT)|monitor/|workspace/|评审文件")
+LOCAL_AUTOMATION_RE = re.compile(r"(?:playwright|puppeteer|selenium|scenario|browser-result|recorder\.py)", re.I)
+SCRIPT_TOKEN_RE = re.compile(r"(?<![\w/.-])((?:\.{0,2}/)?[\w./-]+\.(?:sh|py|js|mjs|cjs|ts|rb|ps1))(?![\w.])")
+
+
+def run_probe(base_url: str, probe: dict[str, Any]) -> dict[str, Any]:
+    """对产物自己的接口发一次请求，只记录方法、路径、状态码和响应开头。
+
+    这不是本地编写的测试脚本，结果可以作为交付完整性描述的产物证据。
+    """
+    method = str(probe.get("method") or "GET").upper()
+    path = str(probe.get("path") or "/")
+    url = base_url.rstrip("/") + (path if path.startswith("/") else "/" + path)
+    body = probe.get("body")
+    data = None
+    headers = {"Accept": "application/json, text/plain, */*"}
+    if body is not None:
+        data = (body if isinstance(body, str) else __import__("json").dumps(body, ensure_ascii=False)).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    headers.update({str(k): str(v) for k, v in (probe.get("headers") or {}).items()})
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    status: int | None = None
+    text = ""
+    error = ""
+    try:
+        with urllib.request.urlopen(request, timeout=float(probe.get("timeout") or 15)) as response:
+            status = response.status
+            text = response.read(2000).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        text = exc.read(2000).decode("utf-8", errors="replace")
+    except Exception as exc:  # 连接失败也如实记录
+        error = f"请求失败: {exc}"
+    expected = probe.get("expectStatus")
+    ok = not error and (expected is None or status == int(expected))
+    return {
+        "method": method,
+        "path": path,
+        "status": status,
+        "expectStatus": expected,
+        "ok": ok,
+        "error": error or ("" if ok else f"{method} {path} 返回 {status}，期望 {expected}"),
+        "responsePreview": text[:500],
+    }
+
+
+def is_local_script_check(check: dict[str, Any], cwd: Path) -> bool:
+    """本地（容器外）编写的测试和自动化脚本不参与交付完整性描述。
+
+    显式标记 localScript，或命令调用了产物仓库未跟踪的脚本、仓库外路径、浏览器自动化时视为本地脚本。
+    """
+    if check.get("localScript"):
+        return True
+    command = str(check.get("command") or "")
+    if LOCAL_SCRIPT_PATH_RE.search(command) or LOCAL_AUTOMATION_RE.search(command):
+        return True
+    for token in SCRIPT_TOKEN_RE.findall(command):
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", token],
+            cwd=cwd, capture_output=True, text=True, check=False,
+        )
+        if tracked.returncode != 0:
+            return True
+    return False
+
+
 def execute_check(check: dict[str, Any], *, cwd: Path, log_dir: Path, index: int) -> dict[str, Any]:
     name = str(check.get("name") or f"check-{index}")
     command = str(check.get("command") or "").strip()
@@ -111,6 +179,7 @@ def execute_check(check: dict[str, Any], *, cwd: Path, log_dir: Path, index: int
     exit_code = -1
     output = ""
     background = bool(check.get("background"))
+    probe_result: dict[str, Any] | None = None
     if background:
         env = os.environ.copy()
         proc = subprocess.Popen(
@@ -127,6 +196,10 @@ def execute_check(check: dict[str, Any], *, cwd: Path, log_dir: Path, index: int
         else:
             hold = float(check.get("holdSeconds") or 3)
             time.sleep(hold)
+            if isinstance(check.get("probe"), dict):
+                probe_result = run_probe(str(check.get("probeBaseUrl") or ready_url), check["probe"])
+                if not probe_result["ok"]:
+                    error = probe_result["error"]
         try:
             out, _ = proc.communicate(timeout=3)
             output = out.decode("utf-8", errors="replace") if out else ""
@@ -156,6 +229,11 @@ def execute_check(check: dict[str, Any], *, cwd: Path, log_dir: Path, index: int
             output = (exc.stdout or b"").decode("utf-8", errors="replace")
             error = f"执行超过 {timeout:.0f} 秒"
             exit_code = 124
+    if probe_result is not None:
+        output += (
+            f"\n[probe] {probe_result['method']} {probe_result['path']} -> {probe_result['status']}\n"
+            f"{probe_result['responsePreview']}\n"
+        )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(output, encoding="utf-8")
     missing = [needle for needle in expected_contains if needle not in output]
@@ -173,6 +251,8 @@ def execute_check(check: dict[str, Any], *, cwd: Path, log_dir: Path, index: int
         "logPath": str(log_path.resolve()),
         "ok": not error,
         "observedFailure": bool(check.get("observedFailure")),
+        "localScript": is_local_script_check(check, cwd),
+        "probe": probe_result,
         "error": error,
     }
 

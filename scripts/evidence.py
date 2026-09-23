@@ -207,6 +207,8 @@ def artifact_evidence(side: str, side_state: dict[str, Any], verification: dict[
                     "logPath": check.get("logPath", ""),
                     "ok": bool(check.get("ok")),
                     "observedFailure": bool(check.get("observedFailure")),
+                    "localScript": bool(check.get("localScript")),
+                    "probe": check.get("probe"),
                     "error": check.get("error", ""),
                 },
             }
@@ -273,6 +275,7 @@ def recording_evidence(side: str, side_state: dict[str, Any]) -> dict[str, Any] 
             "captureMethod": recording.get("captureMethod"),
             "windowCaptures": recording.get("windowCaptures") or [],
             "durationSeconds": recording.get("durationSeconds"),
+            "recordingMode": str(recording.get("mode") or ""),
             "width": recording.get("width"),
             "height": recording.get("height"),
             "ok": bool(recording.get("ok")),

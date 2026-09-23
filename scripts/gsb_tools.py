@@ -385,6 +385,40 @@ DELIVERY_VERIFY_RE = re.compile(r"(?:核对|验证|复跑|跑通|构建|启动|�
 DELIVERY_UNRESOLVED_RE = re.compile(r"(?:未实现|没有实现|无法运行|无法启动|报错|缺少|缺失|遗漏|虚假成功)")
 # 口语化的客观后果：“进不了”“没法验证”“返回404”也算写出了后果。
 DELIVERY_CONSEQUENCE_RE = re.compile(r"(?:没法|进不了|打不开|用不了|跑不起来|不能|返回\s*[45]\d\d|读回为空|丢失)")
+# 描述与轨迹一致性（红线）。
+DELIVERY_RUNNABILITY_RE = re.compile(
+    r"(?:build|构建|编译|compile|tsc|start|启动|serve|dev|up|install|安装|启动验证|探活|录制)", re.I
+)
+DELIVERY_RUN_OK_RE = re.compile(r"(?:构建(?:和启动)?(?:都)?通过|启动(?:都)?(?:正常|成功|通过)|一次性?跑通|均正常|都能走通|全部通过)")
+DELIVERY_RUN_FAIL_RE = re.compile(r"(?:无法运行|无法启动|启动失败|构建失败|编译失败|跑不起来|起不来)")
+# Python 的 \b 把中文也当单词字符，锚点紧贴中文时要用 ASCII 边界。
+DELIVERY_LITERAL_ANCHOR_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Z][A-Z0-9]*_[A-Z0-9_]{2,}|SQLSTATE\s*\d{5}|[A-Za-z]+(?:Error|Exception)|"
+    r"(?:npm|pnpm|yarn|go|pytest|mvn|gradle|docker|cargo|make)\s+[a-z][A-Za-z0-9_:-]*)(?![A-Za-z0-9_])"
+)
+DELIVERY_OBSERVED_ANCHOR_RE = re.compile(r"(?:(?<![\d.])[45]\d\d(?![\d.])|/api(?:/[A-Za-z0-9_{}:.-]+)+)")
+DELIVERY_COMPLETION_CLAIM_RE = re.compile(
+    r"(?:完成|已实现|已修复|全部通过|均已|都已|done|implemented|all tests pass|successfully)", re.I
+)
+# 本地编写的测试与自动化脚本不参与交付完整性描述（2026-09-23 红线）。
+DELIVERY_LOCAL_AUTOMATION_RE = re.compile(
+    r"(?:自动化脚本|自动化测试|验收脚本|自测脚本|冒烟脚本|录制脚本|场景脚本|本地脚本|本地测试|"
+    r"playwright|puppeteer|selenium|scenario|apiRequests)",
+    re.I,
+)
+# 描述与理由都用主观直述（“请求了登录接口，返回404”），不交代信息从哪来。
+SOURCE_ATTRIBUTION_RE = re.compile(
+    r"(?:从(?:录屏|视频|截图|画面|测试|复核|验证|日志|结果)[^。；，]{0,8}(?:来看|看|可见|可知|得知)|"
+    r"(?:录屏|视频|截图|画面)(?:里|中|上)?(?:显示|可见|看到|能看到|可以看到)|"
+    r"(?:编写|写好|补写|新增|准备)的(?:测试|用例|脚本)|"
+    r"(?:测试|复核|验证|探活|自测)(?:结果)?(?:显示|表明|证明|说明|可见)|"
+    r"根据(?:测试|复核|验证|录屏|日志)|验证计划|探活|probe)",
+    re.I,
+)
+# 轨迹里的改动记录：描述说“没改/未修改 X”却有编辑，或说“修改了 X”却从没碰过，都是完全对立。
+DELIVERY_NOT_CHANGED_RE = re.compile(r"(?:没有|没|未|并未)(?:修改|改动|改过|动过|改)")
+DELIVERY_CHANGED_RE = re.compile(r"(?:修改了|改了|改动了|重写了|新增了|补上了|加上了|接入了)")
+EDIT_TOOL_NAMES = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 DELIVERY_CLAIMED_RE = re.compile(r"(?:宣称|声称|称已|自称|回复说|总结里说|最终回复)")
 DELIVERY_ACTUAL_RE = re.compile(r"(?:实际|diff|提交里|代码里|改动里|并未|没有改)", re.I)
 
@@ -472,6 +506,12 @@ def _normalize(value: str) -> str:
 def _validate_artifact_description(reason: str) -> list[str]:
     """Keep GSB comparison focused on delivered product facts and natural wording."""
     errors: list[str] = []
+    attribution = SOURCE_ATTRIBUTION_RE.search(reason)
+    if attribution:
+        errors.append(
+            "GSB 理由不要交代信息来源，直接写做了什么、看到什么，例如“请求了登录接口，返回404”: "
+            f"{attribution.group(0)}"
+        )
     match = FIELD_FACTOR_RE.search(reason)
     if match:
         errors.append(
@@ -821,9 +861,201 @@ def delivery_text_errors(side: str, description: str) -> list[str]:
     field = FIELD_FACTOR_RE.search(description)
     if field:
         errors.append(f"{label}不得引用录屏、截图、浏览器、运行环境等场外因素: {field.group(0)}")
-    acceptance = NON_CONTAINER_TEST_ARTIFACT_RE.search(description)
+    attribution = SOURCE_ATTRIBUTION_RE.search(description)
+    if attribution:
+        errors.append(
+            f"{label}不要交代信息来源，直接写做了什么、看到什么，例如“请求了登录接口，返回404”: {attribution.group(0)}"
+        )
+    acceptance = NON_CONTAINER_TEST_ARTIFACT_RE.search(description) or DELIVERY_LOCAL_AUTOMATION_RE.search(description)
     if acceptance:
-        errors.append(f"{label}不得引用容器外编写的测试或验收脚本: {acceptance.group(0)}")
+        errors.append(
+            f"{label}不得引用本地（容器外）编写的测试或自动化脚本，这些不参与交付完整性描述: {acceptance.group(0)}"
+        )
+    return errors
+
+
+def _side_trace_text(evidence_doc: dict[str, Any], side: str) -> str:
+    """Raw JSONL of this side's trace; 平台拿本侧轨迹核验描述锚点。"""
+    trace_path = str(((evidence_doc.get("process") or {}).get(side) or {}).get("tracePath") or "")
+    if not trace_path:
+        for item in evidence_doc.get("evidence") or []:
+            if isinstance(item, dict) and item.get("side") == side and isinstance(item.get("trace"), dict):
+                trace_path = str(item["trace"].get("tracePath") or "")
+                if trace_path:
+                    break
+    path = Path(trace_path) if trace_path else None
+    if path is None or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _is_recording(item: dict[str, Any]) -> bool:
+    return str(item.get("id") or "").endswith("-recording")
+
+
+def _recording_mode(item: dict[str, Any]) -> str:
+    artifact = item.get("artifact") if isinstance(item.get("artifact"), dict) else {}
+    return str(artifact.get("recordingMode") or "")
+
+
+def delivery_excluded(item: dict[str, Any]) -> bool:
+    """交付完整性描述不参考的证据：环境噪声、本地编写的测试/自动化脚本。
+
+    有页面的项目（录屏 mode=web）和之前一样，录屏证据照常参与；
+    纯后端 API 项目的录屏由本地 apiRequests 驱动，排除，改用验证计划里的 probe 接口探活。
+    """
+    artifact = item.get("artifact") if isinstance(item.get("artifact"), dict) else {}
+    return (
+        _evaluation_excluded(item)
+        or bool(item.get("localScript") or artifact.get("localScript"))
+        or (_is_recording(item) and _recording_mode(item) != "web")
+    )
+
+
+def _trace_file_activity(trace_text: str) -> tuple[set[str], str]:
+    """Return (edited file paths via edit tools, all Bash command text) from raw Claude JSONL."""
+    edited: set[str] = set()
+    bash: list[str] = []
+    for line in trace_text.splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        content = ((event.get("message") or {}).get("content") if isinstance(event, dict) else None) or []
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            tool_input = block.get("input") or {}
+            if block.get("name") in EDIT_TOOL_NAMES:
+                path = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+                if path:
+                    edited.add(path)
+            elif block.get("name") == "Bash":
+                bash.append(str(tool_input.get("command") or ""))
+    return edited, "\n".join(bash)
+
+
+def _edit_contradiction_errors(label: str, description: str, trace_text: str) -> list[str]:
+    edited, bash = _trace_file_activity(trace_text)
+    errors: list[str] = []
+    for sentence in _reason_sentences(description):
+        for clause in re.split(r"[，,；;]", sentence):
+            for token in set(FILE_TOKEN.findall(clause)):
+                name = Path(token).name
+                touched = any(path.endswith(token) or Path(path).name == name for path in edited)
+                if DELIVERY_NOT_CHANGED_RE.search(clause) and touched:
+                    errors.append(f"{label}说 {token} 没有改，但本侧轨迹里有对它的编辑，与轨迹完全对立")
+                elif DELIVERY_CHANGED_RE.search(clause) and not touched and name not in bash:
+                    errors.append(f"{label}说改了 {token}，但本侧轨迹里没有任何对它的编辑，与轨迹完全对立")
+    return errors
+
+
+def _is_runnability_check(item: dict[str, Any]) -> bool:
+    artifact = item.get("artifact") or {}
+    text = " ".join(str(value or "") for value in (item.get("text"), artifact.get("command")))
+    return bool(DELIVERY_RUNNABILITY_RE.search(text))
+
+
+def _evidence_failed(item: dict[str, Any]) -> bool:
+    artifact = item.get("artifact") or {}
+    if isinstance(artifact, dict) and ("ok" in artifact or "observedFailure" in artifact):
+        return bool(artifact.get("observedFailure")) or not bool(artifact.get("ok", True))
+    return item.get("polarity") == "negative"
+
+
+def delivery_trace_consistency_errors(
+    side: str,
+    score: int,
+    description: str,
+    cited_ids: list[Any],
+    draft: dict[str, Any],
+    evidence_doc: dict[str, Any],
+) -> list[str]:
+    """红线：交付完整性描述必须与本侧轨迹、真实复核和 GSB 理由一致，不得出现对立意见。"""
+    label = _delivery_label(side)
+    errors: list[str] = []
+    evidence = [
+        item for item in evidence_doc.get("evidence") or []
+        if isinstance(item, dict) and item.get("side") == side and not delivery_excluded(item)
+    ]
+    by_id = {str(item.get("id")): item for item in evidence}
+
+    # 锚点：文件、命令、报错必须出现在本侧原始轨迹；状态码与接口路径可来自本侧真实复核输出。
+    trace_text = _side_trace_text(evidence_doc, side)
+    if not trace_text:
+        errors.append(f"{label}无法读取本侧轨迹文件，不能核对描述与轨迹是否一致")
+    else:
+        artifact_text = json.dumps(
+            [item for item in evidence if item.get("type") == "artifact"], ensure_ascii=False
+        )
+        for token in sorted(set(FILE_TOKEN.findall(description))):
+            if token not in trace_text and Path(token).name not in trace_text:
+                errors.append(f"{label}提到的文件 {token} 在本侧轨迹中不存在")
+        for token in sorted(set(DELIVERY_LITERAL_ANCHOR_RE.findall(description))):
+            if token not in trace_text:
+                errors.append(f"{label}提到的命令或报错 {token} 在本侧轨迹中不存在")
+        for token in sorted(set(DELIVERY_OBSERVED_ANCHOR_RE.findall(description))):
+            if token not in trace_text and token not in artifact_text:
+                errors.append(f"{label}提到的 {token} 在本侧轨迹和真实复核输出中都找不到")
+        errors.extend(_edit_contradiction_errors(label, description, trace_text))
+
+    # 与真实复核结果对立。
+    checks = [item for item in evidence if item.get("type") == "artifact" and item.get("artifact")]
+    failed = [item for item in checks if _evidence_failed(item)]
+    run_failed = [item for item in failed if _is_runnability_check(item)]
+    if run_failed and score >= 3:
+        errors.append(
+            f"{label}给 {score} 分，但本侧构建或启动复核失败（{run_failed[0].get('id')}）；"
+            "无法运行最高 2 分"
+        )
+    if failed and score == 5:
+        errors.append(f"{label}给 5 分，但本侧复核存在失败项（{failed[0].get('id')}），与“一次性完整跑通”对立")
+    if run_failed:
+        claim = DELIVERY_RUN_OK_RE.search(description)
+        if claim:
+            errors.append(f"{label}写了“{claim.group(0)}”，但本侧构建或启动复核失败，描述与复核结果对立")
+    if checks and not failed:
+        if score == 1:
+            errors.append(f"{label}给 1 分，但本侧复核全部通过，与“完全失败”对立")
+        claim = DELIVERY_RUN_FAIL_RE.search(description)
+        if claim:
+            errors.append(f"{label}写了“{claim.group(0)}”，但本侧构建、启动与复核全部通过，描述与复核结果对立")
+
+    # 引用证据的正负方向必须与分数一致。
+    cited = [by_id[str(item)] for item in cited_ids if str(item) in by_id]
+    has_pages = any(_is_recording(item) and _recording_mode(item) == "web" for item in evidence)
+    if has_pages and any(((item.get("artifact") or {}).get("probe")) for item in cited):
+        errors.append(f"{label}所在项目有页面，不做接口探活；按页面操作结果引用本侧录屏证据")
+    if score and score < 5 and not any(_evidence_failed(item) for item in cited):
+        if failed:
+            errors.append(f"{label}不给 5 分，但引用的本侧证据全是正面结果；至少引用一条能证明问题的失败证据")
+        else:
+            errors.append(
+                f"{label}不给 5 分，但本侧没有任何可引用的失败证据；纯后端 API 项目在验证计划里"
+                "给这一侧补一条启动加 probe 接口探活后重新 verify，有页面的项目引用本侧录屏证据"
+            )
+    if score == 5 and any(_evidence_failed(item) for item in cited):
+        errors.append(f"{label}给 5 分却引用了本侧失败证据，分数与证据对立")
+
+    # 与 GSB 理由里本侧的产物结论对立。
+    negative_artifact = [
+        claim for claim in draft.get("claims") or []
+        if isinstance(claim, dict) and claim.get("side") == side
+        and claim.get("type") == "artifact" and claim.get("polarity") == "negative"
+    ]
+    if score == 5 and negative_artifact:
+        errors.append(
+            f"{label}给 5 分，但 GSB 理由里本侧有产物负面结论“{str(negative_artifact[0].get('text') or '')[:40]}”，两处意见对立"
+        )
+
+    # 虚假成功必须以轨迹里模型的最终宣称为依据。
+    if "虚假成功" in description:
+        final = next((item for item in evidence if item.get("id") == f"{side}-process-final"), None)
+        quote = str(((final or {}).get("trace") or {}).get("quote") or "")
+        if not DELIVERY_COMPLETION_CLAIM_RE.search(quote):
+            errors.append(f"{label}判定虚假成功，但本侧轨迹的最终回复里没有宣称完成，缺少依据")
     return errors
 
 
@@ -902,13 +1134,13 @@ def validate_delivery(
                 errors.append(f"draft.delivery.{side} 引用了另一侧的证据 {evidence_id}")
             elif _evaluation_excluded(evidence):
                 errors.append(f"draft.delivery.{side} 不得引用 evaluationExcluded 证据 {evidence_id}")
-        side_evidence = [
-            item for item in evidence_by_id.values() if item.get("side") == side
-        ]
-        side_text = json.dumps(side_evidence, ensure_ascii=False)
-        for token in sorted(set(FILE_TOKEN.findall(description))):
-            if token not in side_text:
-                errors.append(f"{label}提到的文件 {token} 在本侧证据中找不到；平台会拿本侧轨迹核验锚点")
+            elif delivery_excluded(evidence):
+                errors.append(
+                    f"draft.delivery.{side} 不得引用本地编写的测试、自动化脚本或录制脚本产生的证据 {evidence_id}"
+                )
+        errors.extend(
+            delivery_trace_consistency_errors(side, score, description, ids, draft, evidence_doc)
+        )
         copied = longest_common_fragment(description, reason)
         if copied >= DELIVERY_REASON_COPY_FRAGMENT:
             errors.append(
@@ -928,12 +1160,13 @@ def validate_delivery(
             )
     verdict = str(draft.get("verdict") or "")
     if len(scores) == 2 and all(scores.values()):
+        # 红线：结论与分数方向不得对立。
         if verdict == "A 更好" and scores["A"] < scores["B"]:
-            warnings.append("GSB 结论为 A 更好，但 A 的交付完整性低于 B；确认理由里写清了过程上的决定性差异")
+            errors.append("GSB 结论为 A 更好，但 A 的交付完整性低于 B，结论与打分对立")
         if verdict == "B 更好" and scores["B"] < scores["A"]:
-            warnings.append("GSB 结论为 B 更好，但 B 的交付完整性低于 A；确认理由里写清了过程上的决定性差异")
+            errors.append("GSB 结论为 B 更好，但 B 的交付完整性低于 A，结论与打分对立")
         if verdict == "Same" and abs(scores["A"] - scores["B"]) >= 2:
-            warnings.append("GSB 结论为 Same，但两侧交付完整性相差 2 分以上")
+            errors.append("GSB 结论为 Same，但两侧交付完整性相差 2 分以上，结论与打分对立")
     errors = list(dict.fromkeys(errors))
     return {"ok": not errors, "errors": errors, "warnings": warnings, "scores": scores}
 
@@ -1250,7 +1483,10 @@ def write_field_guide(task_root: Path, schema: dict[str, Any], values: dict[str,
             "- A/B-交付完整性描述：40–200 个非空白字符，只写需求是否做完、代码能否运行、有没有虚假成功；不写规划、推理、工具调用等过程维度。",
             "- 给 5 分写核对依据（核对了哪些需求、跑过什么验证、结论如何）；不给 5 分写清问题出在哪、模型做了什么、造成了什么客观后果。",
             "- 交付完整性描述允许与 GSB 理由有少量重合，但不得照抄（连续 20 字相同即阻断）；A、B 两段之间也不得雷同（G12）。",
-            "- 描述里提到的文件名、命令或报错必须能在本侧证据中找到，平台会拿本侧轨迹逐条核验锚点。",
+            "- 红线：描述里提到的文件名、命令或报错必须在本侧原始轨迹中存在；分数与描述不得与本侧真实复核、引用证据、GSB 理由或 GSB 结论对立。",
+            "- 本地（容器外）编写的任何测试和自动化脚本（验收、冒烟、Playwright、录制场景）不参与交付完整性描述，不写入正文、不作为引用证据。",
+            "- 有页面的项目和之前一样引用录屏证据；纯后端 API 项目录屏不引用，用验证计划的 probe 接口探活证明问题。",
+            "- 描述与理由都直接写“请求了登录接口，返回404”，不写“从录屏来看”“根据编写的测试”“复核结果显示”。",
             "- GSB 理由使用完整、质朴的中文描述，统一写“A 侧方案”“B 侧方案”，不使用省略式单字；每侧称谓最多出现 3 次，相邻两句不要用同一称谓起头，不写 8 字以下的碎句。",
             "- 结尾前用一句话交代这题最看重哪一条，再给结论；不要只罗列事实后直接宣布胜负。",
             "- 禁用“闭环”“根因”“落库”；数据写入统一写“入库”；常用命令“npm run build”统一写“build”，避免历史长片段去重；“真实”“真正”“其实”等空泛表达会给出警告。",

@@ -1347,6 +1347,12 @@ def assess_reason_quality(draft: dict, evidence_doc: dict | None = None) -> dict
     if style_helpers is not None:
         errors.extend(style_helpers.reason_style_errors(reason))
         errors.extend(style_helpers.reason_flow_errors(reason))
+        attribution = style_helpers.SOURCE_ATTRIBUTION_RE.search(reason)
+        if attribution:
+            errors.append(
+                "GSB 理由不要交代信息来源，直接写做了什么、看到什么，例如“请求了登录接口，返回404”: "
+                f"{attribution.group(0)}"
+            )
         warnings.extend(style_helpers.reason_style_warnings(reason))
         markdown_errors = style_helpers._validate_reason_markdown(reason)
         language_errors = style_helpers.reason_language_errors(reason)

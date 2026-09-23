@@ -7,6 +7,23 @@
       "expectedExit": 0,
       "expectedContains": [],
       "observedFailure": false
+    },
+    {
+      "name": "接口探活",
+      "command": "npm run dev -- --host 127.0.0.1 --port 3000",
+      "background": true,
+      "readyUrl": "http://127.0.0.1:3000",
+      "timeout": 180,
+      "probe": {
+        "method": "POST",
+        "path": "/api/users/login",
+        "body": {
+          "username": "demo",
+          "password": "demo"
+        },
+        "expectStatus": 200
+      },
+      "expectedExit": 0
     }
   ],
   "b": [
