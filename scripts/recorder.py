@@ -1125,9 +1125,22 @@ def _concat_segments(parts: list[Path], output: Path) -> None:
         raise SologsbError(proc.stderr.decode("utf-8", errors="replace") or "视频片段拼接失败")
 
 
-def _run_recording_preflight(task_root: Path, side: str, plan: dict[str, Any]) -> list[dict[str, Any]]:
-    """Run non-recorded preparation commands so the recorded segment starts fast."""
-    commands = plan.get("preflightCommands") or []
+def _run_recording_preflight(
+    task_root: Path,
+    side: str,
+    plan: dict[str, Any],
+    *,
+    key: str = "preflightCommands",
+    stage: str = "preflight",
+) -> list[dict[str, Any]]:
+    """Run non-recorded preparation commands so the recorded segment starts fast.
+
+    ``buildCommands`` (dependency install, compile, image build) touch only the
+    task's own directory and run before the host-wide recording lock, so other
+    tasks are not queued behind them.  ``preflightCommands`` may start services,
+    bind ports or reset shared data, and therefore run inside the lock.
+    """
+    commands = plan.get(key) or []
     if isinstance(commands, str):
         commands = [commands]
     commands = [str(command).strip() for command in commands if str(command).strip()]
@@ -1136,7 +1149,7 @@ def _run_recording_preflight(task_root: Path, side: str, plan: dict[str, Any]) -
     project_dir = Path(str(plan.get("projectDir") or "")).expanduser().resolve()
     if not project_dir.is_dir():
         raise SologsbError(f"录制项目目录不存在: {project_dir}")
-    output_dir = task_root / "monitor" / "recording" / side.lower() / "preflight"
+    output_dir = task_root / "monitor" / "recording" / side.lower() / stage
     output_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict[str, Any]] = []
     for index, command in enumerate(commands, 1):
@@ -1147,7 +1160,7 @@ def _run_recording_preflight(task_root: Path, side: str, plan: dict[str, Any]) -
         log_path = output_dir / f"{index:02d}.log"
         log_path.write_text(output, encoding="utf-8")
         result = {
-            "name": f"preflight-{index}",
+            "name": f"{stage}-{index}",
             "command": command,
             "exitCode": proc.returncode,
             "durationSeconds": round(time.monotonic() - started, 3),
@@ -1157,7 +1170,7 @@ def _run_recording_preflight(task_root: Path, side: str, plan: dict[str, Any]) -
         results.append(result)
         if proc.returncode != 0:
             raise SologsbError(
-                f"录制预检失败，退出码 {proc.returncode}: {command}\n{output[-3000:]}"
+                f"录制{'构建' if stage == 'build' else '预检'}失败，退出码 {proc.returncode}: {command}\n{output[-3000:]}"
             )
     write_json(output_dir / "result.json", {"side": side, "ok": True, "checks": results})
     return results
@@ -1441,7 +1454,8 @@ def default_plan(task_root: Path, side: str) -> dict[str, Any]:
             "targetApps": ["Otty", "Chrome"],
             "captureKind": "window-id",
             "pointerStrategy": "none",
-            "preflightCommands": preflight,
+            "buildCommands": preflight,
+            "preflightCommands": [],
             "outputName": recording_output_name(task_root, side),
         }
     if "start" in scripts and not backend_project:
@@ -1456,7 +1470,8 @@ def default_plan(task_root: Path, side: str) -> dict[str, Any]:
             "targetApps": ["Otty", "Chrome"],
             "captureKind": "window-id",
             "pointerStrategy": "none",
-            "preflightCommands": preflight,
+            "buildCommands": preflight,
+            "preflightCommands": [],
             "outputName": recording_output_name(task_root, side),
         }
     terminal_start = "<替换为真实启动或验证命令>"
@@ -2556,5 +2571,9 @@ def record_side(
     draft = read_json(plan_path, {})
     if "<" in str(draft.get("startCommand") or "") or "TODO" in str(draft.get("startCommand") or ""):
         raise SologsbError(f"请先完善录制脚本: {plan_path}")
+    _run_recording_preflight(task_root, side, draft, key="buildCommands", stage="build")
     with global_recording_lock(task_root, side=side, timeout=lock_timeout) as lock_metadata:
+        # The lock wait can be long; saving the pre-wait snapshot later would
+        # drop whatever other commands wrote to state.json meanwhile.
+        state = read_json(task_root / "monitor" / "state.json", {})
         return _record_side_locked(task_root, side, plan_path, draft, state, lock_metadata)

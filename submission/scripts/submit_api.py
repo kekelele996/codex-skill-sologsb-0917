@@ -395,8 +395,19 @@ def poll_submission(
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last: dict[str, Any] = {}
+    errors = 0
     while time.monotonic() < deadline:
-        last = request_json("GET", f"{server}/api/v1/gsb/submissions/{submission_id}", cookie, csrf)
+        try:
+            last = request_json("GET", f"{server}/api/v1/gsb/submissions/{submission_id}", cookie, csrf)
+            errors = 0
+        except Exception as exc:  # noqa: BLE001 - transient network/5xx while QC runs
+            errors += 1
+            if errors >= 5:
+                last = dict(last)
+                last["pollError"] = str(exc)
+                return last
+            time.sleep(min(30.0, 2.5 * (2 ** errors)))
+            continue
         status = str(last.get("status") or "")
         if status and status != "SUBMITTED":
             return last
@@ -430,6 +441,20 @@ def write_result(task_root: Path, result: dict[str, Any]) -> Path:
         else:
             path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return paths[0]
+
+
+def release_finished_claim(task_root: Path) -> dict[str, Any]:
+    """Free the platform project claim once the submission is recorded.
+
+    A failure here must not turn a successful submission into an error: the
+    claim holder re-checks the same condition and exits on its own.
+    """
+    try:
+        from project_claims import release_claim_if_finished
+
+        return release_claim_if_finished(task_root)
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "release_failed", "error": str(exc)}
 
 
 def run_preflight(task_root: Path, preflight_script: Path) -> dict[str, Any]:
@@ -578,6 +603,18 @@ def main() -> int:
         submission_id = str(create_result.get("id") or "")
     if not submission_id:
         raise RuntimeError("提交接口未返回 submission id: " + json.dumps(create_result, ensure_ascii=False))
+    # Record the submission before polling QC: if polling dies, a rerun must see
+    # it and refuse to POST a duplicate instead of finding no result file.
+    write_result(task_root, {
+        "schemaVersion": 1,
+        "status": "submitted_polling",
+        "ok": False,
+        "submittedAt": utc_now(),
+        "submissionId": submission_id,
+        "createResponse": create_result,
+        "payloadPath": str(payload_path),
+        "statusValue": "SUBMITTED",
+    })
     detail = poll_submission(args.server, cookie, csrf, submission_id, args.poll_timeout)
     status = str(detail.get("status") or "")
     result = {
@@ -596,7 +633,8 @@ def main() -> int:
         "statusValue": status,
     }
     output = write_result(task_root, result)
-    print(json.dumps({"status": result["status"], "ok": result["ok"], "submissionId": submission_id, "statusValue": status, "resultPath": str(output)}, ensure_ascii=False, indent=2))
+    claim_release = release_finished_claim(task_root)
+    print(json.dumps({"status": result["status"], "ok": result["ok"], "submissionId": submission_id, "statusValue": status, "resultPath": str(output), "projectClaim": claim_release}, ensure_ascii=False, indent=2))
     return 0 if result["ok"] else 1
 
 

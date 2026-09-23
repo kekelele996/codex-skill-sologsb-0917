@@ -26,6 +26,10 @@ CLAIM_ROOT_ENV = "SOLO2_PLATFORM_CLAIM_ROOT"
 SELECTION_TIMEOUT_ENV = "SOLOGBS_PLATFORM_SELECTION_TIMEOUT"
 CLAIM_TTL_ENV = "SOLOGBS_PROJECT_CLAIM_TTL_SECONDS"
 CONTAINER_TIMESTAMP_RE = re.compile(r"-\d{8,}$")
+HOLDER_SCRIPT = Path(__file__).resolve().parent / "claim_holder.py"
+# A submission in this state is sent back to the same task for rework, so the
+# project stays claimed; every other recorded submission frees the project.
+KEEP_CLAIM_SUBMISSION_STATUSES = {"PENDING_FIX"}
 _HOLDER_PROCESSES: dict[str, subprocess.Popen[Any]] = {}
 
 
@@ -139,17 +143,41 @@ def task_project_code(task_root: Path) -> str:
     ).strip()
 
 
-def _task_is_active(state: dict[str, Any]) -> bool:
-    status = str(state.get("status") or "").strip().casefold()
-    if status in {"running", "blocked"}:
+def _record_runner_alive(record: dict[str, Any]) -> bool:
+    try:
+        pid = int(record.get("runPid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        # Records written before runPid existed: keep the old conservative answer.
+        return "runPid" not in record
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
         return True
+    return True
+
+
+def _task_is_active(state: dict[str, Any], task_root: Path | None = None) -> bool:
+    """Whether the task is still executing on this host.
+
+    Only a live runner counts.  ``blocked``/``attempt_invalid`` are resting
+    states, and a ``running`` record whose runner died (crash, reboot, kill)
+    is stale; counting either used to hide the project from selection forever.
+    A task that may still be resumed keeps its project claim, which is what
+    guards it against being picked twice.
+    """
+    if task_root is not None and submission_record(task_root):
+        return False
     sides = state.get("sides") if isinstance(state.get("sides"), dict) else {}
     candidates = state.get("candidates") if isinstance(state.get("candidates"), dict) else {}
     for record in (*sides.values(), *candidates.values()):
         if not isinstance(record, dict):
             continue
         side_status = str(record.get("status") or "").strip().casefold()
-        if side_status in {"running", "blocked", "attempt_invalid"}:
+        if side_status == "running" and _record_runner_alive(record):
             return True
     return False
 
@@ -163,7 +191,7 @@ def _local_task_snapshot(workdir: Path | None) -> tuple[set[str], dict[str, str]
         task_root = state_path.parent.parent
         state = read_json(state_path, {}) or {}
         code = task_project_code(task_root)
-        if code and _task_is_active(state):
+        if code and _task_is_active(state, task_root):
             codes.add(code.casefold())
         sides = state.get("sides") if isinstance(state.get("sides"), dict) else {}
         candidates = state.get("candidates") if isinstance(state.get("candidates"), dict) else {}
@@ -189,6 +217,9 @@ def running_container_project_codes(
             text=True,
             capture_output=True,
             check=False,
+            # Runs inside the host-wide selection lock: a hung daemon must not
+            # stall every init on this machine.
+            timeout=15,
         )
     except (OSError, subprocess.SubprocessError):
         return codes, local_source or "本地状态兜底"
@@ -282,10 +313,10 @@ def start_project_claim(
         holder = subprocess.Popen(
             [
                 sys.executable,
-                "-c",
-                "import sys, time; time.sleep(float(sys.argv[1]))",
+                str(HOLDER_SCRIPT),
                 str(ttl_seconds),
                 str(lock_path),
+                str(task_root.resolve()),
             ],
             pass_fds=(handle.fileno(),),
             start_new_session=True,
@@ -319,10 +350,102 @@ def start_project_claim(
             _HOLDER_PROCESSES.pop(str(lock_path), None)
         if acquired:
             metadata_path.unlink(missing_ok=True)
-            lock_path.unlink(missing_ok=True)
         raise
     finally:
         handle.close()
+
+
+def submission_record(task_root: Path) -> dict[str, str]:
+    """Return ``{"submissionId", "status"}`` of the task's platform submission."""
+    api_result = read_json(task_root / "monitor" / "submission" / "api-result.json", {}) or {}
+    if isinstance(api_result, dict) and str(api_result.get("submissionId") or "").strip():
+        return {
+            "submissionId": str(api_result.get("submissionId") or "").strip(),
+            "status": str(api_result.get("statusValue") or "").strip(),
+        }
+    compat = read_json(
+        task_root / "workspace" / "评审文件" / "pre-submit" / "submission-result.json", {}
+    ) or {}
+    if isinstance(compat, dict):
+        submission_id = str(compat.get("submissionId") or compat.get("submissionNo") or "").strip()
+        if submission_id:
+            return {
+                "submissionId": submission_id,
+                "status": str(compat.get("status") or compat.get("qc") or "").strip(),
+            }
+    return {}
+
+
+def claim_release_reason(task_root: Path) -> str:
+    """Why the task no longer needs its project claim, or "" if it still does."""
+    if not (task_root / "monitor" / "platform-claim.json").is_file():
+        return "task_claim_missing"
+    record = submission_record(task_root)
+    if record and record["status"].upper() not in KEEP_CLAIM_SUBMISSION_STATUSES:
+        return f"submitted:{record['status'] or 'UNKNOWN'}"
+    return ""
+
+
+def _lock_is_held(lock_path: Path) -> bool:
+    if not lock_path.is_file():
+        return False
+    try:
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return False
+
+
+def mark_claim_self_released(task_root: Path, lock_path: Path, reason: str) -> None:
+    """Called by the holder (still owning the flock) right before it exits."""
+    metadata_path = lock_path.with_suffix(".json")
+    metadata = read_json(metadata_path, {}) or {}
+    if isinstance(metadata, dict) and int(metadata.get("holderPid") or 0) == os.getpid():
+        metadata_path.unlink(missing_ok=True)
+    claim_path = task_root / "monitor" / "platform-claim.json"
+    claim = read_json(claim_path, {}) or {}
+    if isinstance(claim, dict) and claim and int(claim.get("holderPid") or 0) == os.getpid():
+        claim.update({"releasedAt": utc_now(), "releaseReason": reason, "releasedBy": "holder"})
+        write_json(claim_path, claim)
+
+
+def release_claim_if_finished(task_root: Path) -> dict[str, Any]:
+    """Release the claim when the task's submission no longer needs it."""
+    reason = claim_release_reason(task_root)
+    if not reason or reason == "task_claim_missing":
+        return {"status": "kept" if not reason else "not_found", "reason": reason}
+    result = release_project_claim(task_root)
+    result["reason"] = reason
+    return result
+
+
+def sweep_finished_claims(base_url: str) -> list[dict[str, Any]]:
+    """Release every held claim whose task already has a final submission.
+
+    Safety net for holders started before they could self-release, and for
+    monitors (sg-auto) that list candidates without running the skill.
+    """
+    claim_dir = platform_claim_root() / platform_base_digest(base_url)
+    released: list[dict[str, Any]] = []
+    if not claim_dir.is_dir():
+        return released
+    for metadata_path in claim_dir.glob("*.json"):
+        metadata = read_json(metadata_path, {}) or {}
+        task_value = str(metadata.get("taskRoot") or "") if isinstance(metadata, dict) else ""
+        if not task_value:
+            continue
+        try:
+            result = release_claim_if_finished(Path(task_value))
+        except Exception as exc:  # noqa: BLE001 - one bad claim must not stop the sweep
+            result = {"status": "release_failed", "error": str(exc)}
+        if result.get("status") in {"released", "release_failed"}:
+            released.append({"projectCode": metadata.get("projectCode"), **result})
+    return released
 
 
 def release_project_claim(task_root: Path) -> dict[str, Any]:
@@ -351,10 +474,22 @@ def _release_project_claim_locked(
     except ValueError as exc:
         raise SologsbError(f"拒绝释放不属于共享锁目录的项目锁: {lock_path}") from exc
     stopped = False
-    holder = _HOLDER_PROCESSES.pop(str(lock_path), None)
-    if holder is not None:
-        holder_pid = holder.pid or holder_pid
-    if holder_pid and lock_path.is_file() and _process_alive(holder_pid):
+    holder = _HOLDER_PROCESSES.get(str(lock_path))
+    if holder is not None and holder.pid == holder_pid:
+        _HOLDER_PROCESSES.pop(str(lock_path), None)
+    else:
+        holder = None
+    metadata_path = lock_path.with_suffix(".json")
+    metadata = read_json(metadata_path, {}) or {}
+    # After TTL or self-release another task may re-claim the same project and
+    # reuse this lock path; only touch the shared lock while it is still ours.
+    owned = (
+        not claim.get("releasedAt")
+        and isinstance(metadata, dict)
+        and int(metadata.get("holderPid") or 0) == holder_pid
+        and str(metadata.get("taskRoot") or "") == str(claim.get("taskRoot") or "")
+    )
+    if owned and holder_pid and _lock_is_held(lock_path) and _process_alive(holder_pid):
         proc = subprocess.run(
             ["ps", "-p", str(holder_pid), "-o", "command="],
             text=True,
@@ -375,7 +510,9 @@ def _release_project_claim_locked(
             os.kill(holder_pid, signal.SIGKILL)
     if holder is not None:
         holder.wait(timeout=1)
-    lock_path.with_suffix(".json").unlink(missing_ok=True)
-    lock_path.unlink(missing_ok=True)
+    if owned:
+        metadata_path.unlink(missing_ok=True)
+    # The lock file itself is left in place: unlinking a path another process may
+    # already have opened lets two holders flock different inodes at once.
     claim_path.unlink(missing_ok=True)
     return {"status": "released", "holderPid": holder_pid, "stoppedHolder": stopped}

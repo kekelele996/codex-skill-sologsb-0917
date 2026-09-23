@@ -19,6 +19,9 @@ from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# Retry backoff is real wall-clock sleep; tests that simulate failing attempts
+# opt back in explicitly.
+os.environ.setdefault("SOLOGBS_ATTEMPT_BACKOFF_SECONDS", "0")
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from common import (  # noqa: E402
@@ -52,7 +55,9 @@ from gsb_tools import (
 )  # noqa: E402
 from prompt_tools import check_history  # noqa: E402
 from project_claims import (
+    claim_release_reason,
     claimed_project_codes,
+    release_claim_if_finished,
     release_project_claim,
     start_project_claim,
 )  # noqa: E402
@@ -1018,8 +1023,9 @@ class VideoTests(unittest.TestCase):
             self.assertEqual(plan["mode"], "web")
             self.assertEqual(plan["startCommand"], "pnpm dev")
             self.assertEqual(plan["appUrl"], "http://127.0.0.1:18415")
-            self.assertTrue(any("approve-builds --all" in item for item in plan["preflightCommands"]))
-            self.assertIn("pnpm build", plan["preflightCommands"])
+            self.assertTrue(any("approve-builds --all" in item for item in plan["buildCommands"]))
+            self.assertIn("pnpm build", plan["buildCommands"])
+            self.assertEqual(plan["preflightCommands"], [])
             self.assertEqual(plan["captureKind"], "window-id")
             self.assertEqual(plan["pointerStrategy"], "none")
             self.assertNotIn("countdownSeconds", plan)
@@ -1523,6 +1529,76 @@ class ProjectClaimTests(unittest.TestCase):
                 self.assertEqual(released["status"], "released")
                 self.assertEqual(claimed_project_codes("http://platform.test"), set())
 
+    def _write_submission(self, task_root: Path, status: str) -> None:
+        write_json(
+            task_root / "monitor" / "submission" / "api-result.json",
+            {"submissionId": "7356", "statusValue": status},
+        )
+
+    def test_project_claim_released_after_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            with mock.patch.dict(os.environ, {"SOLO2_PLATFORM_CLAIM_ROOT": str(base / "claims")}):
+                root = base / "task"
+                start_project_claim(root, "http://platform.test", "gb-14-1")
+                self.assertEqual(claim_release_reason(root), "")
+                self.assertEqual(release_claim_if_finished(root)["status"], "kept")
+                self._write_submission(root, "PENDING_FIX")
+                self.assertEqual(release_claim_if_finished(root)["status"], "kept")
+                self.assertEqual(claimed_project_codes("http://platform.test"), {"gb-14-1"})
+                self._write_submission(root, "QC_PASSED")
+                released = release_claim_if_finished(root)
+                self.assertEqual(released["status"], "released")
+                self.assertEqual(released["reason"], "submitted:QC_PASSED")
+                self.assertEqual(claimed_project_codes("http://platform.test"), set())
+                self.assertEqual(release_claim_if_finished(root)["status"], "not_found")
+
+    def test_claim_holder_exits_on_its_own_after_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            env = {
+                "SOLO2_PLATFORM_CLAIM_ROOT": str(base / "claims"),
+                "SOLOGBS_CLAIM_HOLDER_POLL_SECONDS": "0.2",
+            }
+            with mock.patch.dict(os.environ, env):
+                root = base / "task"
+                claim = start_project_claim(root, "http://platform.test", "gb-14-1")
+                self._write_submission(root, "QC_PASSED")
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and claimed_project_codes("http://platform.test"):
+                    time.sleep(0.1)
+                self.assertEqual(claimed_project_codes("http://platform.test"), set())
+                marker = read_json(root / "monitor" / "platform-claim.json", {})
+                self.assertEqual(marker.get("releaseReason"), "submitted:QC_PASSED")
+                self.assertEqual(marker.get("holderPid"), claim["holderPid"])
+                # A second task can take the project right away.
+                second = base / "task-2"
+                start_project_claim(second, "http://platform.test", "gb-14-1")
+                # Late cleanup of the first task must not drop the second task's claim.
+                self.assertEqual(release_project_claim(root)["stoppedHolder"], False)
+                self.assertEqual(claimed_project_codes("http://platform.test"), {"gb-14-1"})
+                release_project_claim(second)
+                self.assertEqual(claimed_project_codes("http://platform.test"), set())
+
+    def test_only_live_runners_make_a_task_active(self) -> None:
+        from project_claims import _task_is_active
+
+        dead = {"status": "running", "runPid": 999_999}
+        live = {"status": "running", "runPid": os.getpid()}
+        with mock.patch("project_claims.os.kill",
+                        side_effect=lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError())
+                        if pid == 999_999 else None):
+            self.assertFalse(_task_is_active({"status": "blocked", "candidates": {
+                "candidate-1": {"status": "blocked"}, "candidate-2": {"status": "attempt_invalid"}}}))
+            self.assertFalse(_task_is_active({"status": "candidates_running",
+                                              "candidates": {"candidate-1": dead}}))
+            self.assertTrue(_task_is_active({"status": "candidates_running",
+                                             "candidates": {"candidate-1": live}}))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._write_submission(root, "QC_PASSED")
+            self.assertFalse(_task_is_active({"candidates": {"candidate-1": live}}, root))
+
     def test_concurrent_platform_selection_uses_distinct_projects(self) -> None:
         projects = [
             {
@@ -1775,6 +1851,75 @@ class ParallelRunTests(unittest.TestCase):
                         attempts=6,
                     )
             self.assertEqual(attempt_mock.call_count, 6)
+
+    def test_attempt_backoff_grows_and_is_capped(self) -> None:
+        with mock.patch.dict(os.environ, {"SOLOGBS_ATTEMPT_BACKOFF_SECONDS": "30"}):
+            self.assertEqual(
+                [side_runner._attempt_backoff(n) for n in range(1, 7)],
+                [30, 60, 120, 240, 300, 300],
+            )
+        with mock.patch.dict(os.environ, {"SOLOGBS_ATTEMPT_BACKOFF_SECONDS": "0"}):
+            self.assertEqual(side_runner._attempt_backoff(3), 0.0)
+
+    def test_failed_attempts_back_off_and_stop_cuts_the_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "monitor").mkdir(parents=True)
+            write_json(root / "monitor" / "state.json", {
+                "status": "prompt_ready",
+                "initialSnapshot": "a" * 40,
+                "candidates": {"candidate-1": {"candidateId": "candidate-1", "status": "idle"}},
+            })
+            stop = threading.Event()
+            calls: list[float] = []
+
+            def invalid_then_stop(**kwargs):
+                calls.append(time.monotonic())
+                threading.Timer(0.3, stop.set).start()
+                return {"candidateId": "candidate-1", "attempt": kwargs["attempt"],
+                        "status": "attempt_invalid", "error": "API Error: 429"}
+
+            with mock.patch.dict(os.environ, {"SOLOGBS_ATTEMPT_BACKOFF_SECONDS": "60"}):
+                with mock.patch.object(side_runner, "_run_candidate_attempt", side_effect=invalid_then_stop):
+                    started = time.monotonic()
+                    result = side_runner._run_candidate_locked(
+                        root, "candidate-1", timeout=1, live=False, attempts=6, stop_event=stop,
+                    )
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(len(calls), 1)
+            self.assertLess(time.monotonic() - started, 10)
+
+    def test_slot_wait_is_cancelled_by_stop_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            limiter = side_runner._ContainerLimiter()
+            limiter.reservations = Path(temp) / "reservations"
+            limiter.lock_path = Path(temp) / "slots.lock"
+            stop = threading.Event()
+            stop.set()
+            with mock.patch.object(limiter, "_settings", return_value=(1, set(), 14400.0)):
+                with self.assertRaises(side_runner.CandidateCancelled):
+                    limiter.acquire("cy-1", "sologsb-x-candidate-3-1-abc", stop)
+
+    def test_orphan_containers_with_dead_runner_are_reaped(self) -> None:
+        dead_pid = 999_999
+        listing = (
+            f"sologsb-a-candidate-1-1-aaa\t{dead_pid}\n"
+            f"sologsb-b-candidate-1-1-bbb\t{os.getpid()}\n"
+            "sologsb-c-candidate-1-1-ccc\t\n"
+        ).encode()
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            stdout = listing if cmd[:2] == ["docker", "ps"] else b""
+            return subprocess.CompletedProcess(cmd, 0, stdout, b"")
+
+        with mock.patch.object(side_runner, "run", side_effect=fake_run), \
+                mock.patch.object(side_runner._ContainerLimiter, "_pid_alive",
+                                  side_effect=lambda pid: int(pid) != dead_pid):
+            removed = side_runner._ContainerLimiter._reap_orphan_containers()
+        self.assertEqual(removed, ["sologsb-a-candidate-1-1-aaa"])
+        self.assertIn(["docker", "rm", "-f", "sologsb-a-candidate-1-1-aaa"], calls)
 
     def test_github_init_is_forbidden_before_candidate_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -21,6 +21,7 @@ from project_claims import (
     release_project_claim,
     running_container_project_codes,
     start_project_claim,
+    sweep_finished_claims,
 )
 
 
@@ -177,6 +178,8 @@ def ingest_source(
     meta = {"baseUrl": base_url, "apiBaseUrl": base_url + "/api/v1"}
     token = pb.load_manager_token()
     root = (task_root or origin.parents[1]).expanduser().resolve()
+    # Must run before taking the selection lock: releasing re-enters it.
+    sweep_finished_claims(base_url)
     with platform_selection_lock(base_url):
         running_codes, running_source = running_container_project_codes(workdir)
         claim_codes = claimed_project_codes(base_url)

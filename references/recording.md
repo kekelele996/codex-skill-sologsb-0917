@@ -155,8 +155,12 @@
 
 ## 踩坑加固
 
-- 录制前先执行 `preflightCommands`：构建镜像、准备测试数据和检查入口，正式录屏只做快速启动，
-  不把 Docker 拉取、构建或数据初始化过程放进视频。
+- 录制前准备分两段，都不进视频：
+  - `buildCommands`：只动本任务目录的依赖安装、编译、`docker compose build`，在全局录屏锁**之外**执行，
+    不让其他任务排队等构建；
+  - `preflightCommands`：启动服务（`docker compose up`）、占用端口、重置数据库或 `/tmp` 数据、
+    `docker compose down` 等会碰共享资源的步骤，在录屏锁**之内**执行。
+  拿不准的命令放 `preflightCommands`。正式录屏只做快速启动，不把 Docker 拉取、构建或数据初始化过程放进视频。
 - 终端不得显示用户真实绝对路径。Otty 直接以项目目录启动，开录前执行
   `export PS1='sologsb %1~ %# '` 和 `clear`，只显示相对路径。
 - Chrome 必须关闭密码管理器、账号登录、同步、资料菜单推广和首启引导：使用临时 profile，并保留录制器内置的禁用参数。

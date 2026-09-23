@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.2.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.2.0`
-- 精确提交号：运行 `git rev-parse v1.2.0` 获取。
+- 全局版本号：`1.3.0`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.3.0`
+- 精确提交号：运行 `git rev-parse v1.3.0` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -116,11 +116,19 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   `solo2-auto` 的 `$CODEX_HOME/solo2-auto/locks/platform-claims/` 根目录，
   因此 `sologsb-0917` 与 `solo2-auto` 会互相跳过对方已占用的项目。自动选择会跳过项目锁
   已持有、容器正在运行或本地状态仍在执行的项目；显式指定 `--project-code` / `--project-id`
-  命中这些项目时直接拒绝，不得绕过。项目锁由独立持有进程维持到 `cleanup`，默认 TTL 24 小时，
-  进程崩溃时最长 24 小时后自动释放；`cleanup` 必须在容器清理完成后释放本项目锁。
+  命中这些项目时直接拒绝，不得绕过。“正在执行”只认执行进程仍存活的 `running` 记录；
+  `blocked`、`attempt_invalid` 和执行进程已退出的 `running` 不再让项目被跳过，可恢复任务由项目锁保护。
+  项目锁由独立持有进程维持，释放时机：
+  - `submit --execute` 在平台创建提交后立即释放（`PENDING_FIX` 返修状态除外，保留给返修）；
+  - 持有进程每 30 秒自检，发现任务已有非返修提交记录或任务目录已删除时自行退出；
+  - `init` 和监控台读取候选前会扫描并释放“已提交但仍持锁”的残留锁；
+  - 兜底：`release-claim` / `cleanup` 手动释放，或默认 TTL 24 小时到期。
+  释放只处理属于本任务的锁：锁已被其他任务重新占用时不会误删对方元数据。
 - 录制阶段必须获取主机级全局录屏锁，锁文件固定为
   `$CODEX_HOME/run/sologsb-0917/recording.lock`。锁以项目为持有单位，同一时刻只允许一个项目
   执行预检、环境检查、启动、录屏和收尾；后到任务默认最多等待 7200 秒，超时即失败，禁止绕过锁或并发录制。
+  录制计划的 `buildCommands`（只动本任务目录的依赖安装、编译、镜像构建）在拿锁前执行；启动服务、占端口、
+  重置共享数据的步骤必须放 `preflightCommands`，在锁内执行。
   进程退出或崩溃时由内核自动释放，不因残留锁文件阻断后续任务。
 - 运行器开放 `TodoWrite` 供容器内 Claude Code 记录执行待办；TodoWrite 只用于进度可视化，
   不能替代轨迹校验、语义完成审核或产物证据。
@@ -188,8 +196,9 @@ SOLO2 会话失效时，运行器会用配置里的账号密码自动重新登�
 3. 运行 `run --side both --candidates 2`（只有独立 Key 且容量确认时才显式提高 N）。困难题单 attempt 默认 7200 秒；
    运行器先建立本地初始快照并拉取 N 份隔离源码，再并行启动 N 个容器无头执行，每份分别写
    原生 JSONL。每个候选中断、异常或没有最终 `end_turn` 时，只销毁该候选现场并重新 clone，
-   最多六次实际尝试；自动重连不算新尝试。前两个 staged 候选按完成顺序映射 A/B，其余候选
-   立即停止。此步骤不创建 GitHub 仓库、不上传源码。
+   最多六次实际尝试，失败尝试之间指数退避（30 秒起、上限 300 秒）；自动重连不算新尝试。
+   竞速已有两名完成时，仍在排队等容器名额的候选立即取消；执行进程退出后遗留的候选容器会在下次申请名额时回收。
+   前两个 staged 候选按完成顺序映射 A/B，其余候选立即停止。此步骤不创建 GitHub 仓库、不上传源码。
 4. 运行 `github-init`。只有 `candidateMapping` 已包含 A/B 时才允许创建公开仓库，并以原始源码
    创建 `main/A/B` 三支；候选目录保持 `source/candidates/candidate-N` 原名，不复制、不改名为 A/B。
 5. 运行 `semantic --side A` 与 `semantic --side B`（或 `--side both`），读取映射后审核包并写
@@ -223,6 +232,9 @@ SOLO2 会话失效时，运行器会用配置里的账号密码自动重新登�
 12. 完整审核通过时，系统自动生成批准记录，`approvedBy` 为设备配置里的审批人，不使用人工审批文件；脚本通过 `/api/v1/submissions/upload` 上传四个文件，再调用 `/api/v1/gsb/submissions` 创建记录并轮询质检终态。
     - 如果预检状态为 `line_gate_approval_required`，确认低于 10 行是唯一阻断项后停止提交，等待设备配置里的审批人 在真实 TTY 中运行 `approve-line-gate --task-root ROOT`；审批后重新运行 `submit --task-root ROOT --execute`。
     - 如果存在其他任何阻断项，直接修复后重跑，不得使用例外审批。
+13. 确认提交输出里的 `projectClaim.status` 为 `released`（或 `kept`，仅限 `PENDING_FIX`）。若为
+    `release_failed`，运行 `release-claim --task-root ROOT --if-finished`；不要依赖 24 小时 TTL。
+    提交接口已创建记录后若质检轮询中断，结果文件会先记为 `submitted_polling`，重跑 `submit` 会拒绝重复提交。
 
 ## CLI
 
@@ -248,6 +260,7 @@ python3 scripts/sologsb.py submit --task-root ROOT                         # 可
 python3 scripts/sologsb.py submit --task-root ROOT --execute              # 完整审核通过后直接提交，自动记录设备配置里的审批人
 python3 scripts/sologsb.py approve-line-gate --task-root ROOT            # 仅改动量单项失败时，由设备配置里的审批人在 TTY 中批准
 python3 scripts/sologsb.py submit --task-root ROOT --approval APPROVAL --execute
+python3 scripts/sologsb.py release-claim --task-root ROOT [--if-finished]  # 只释放项目锁，不删容器和文件
 python3 scripts/sologsb.py cleanup --task-root ROOT  # 同时释放平台项目占用锁
 python3 scripts/sologsb.py --version                                    # 打印统一全局版本号
 python3 scripts/sologsb.py version                                       # 打印版本 JSON

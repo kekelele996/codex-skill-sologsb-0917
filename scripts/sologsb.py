@@ -42,7 +42,7 @@ from evidence import run_audit
 from github_repo import init_github_repo
 from gsb_tools import export_gsb
 from prompt_tools import install_prompt
-from project_claims import release_project_claim
+from project_claims import release_claim_if_finished, release_project_claim
 from recorder import prepare_recording, record_side, recording_isolation_ok, video_dimensions
 from semantic_review import ensure_packets
 from side_runner import DEFAULT_CANDIDATE_COUNT, MAX_ATTEMPTS, publish_sides, run_both, run_side
@@ -452,6 +452,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0 if result.get("ok") else 1
 
 
+def cmd_release_claim(args: argparse.Namespace) -> int:
+    """Release only the platform project claim; containers and files stay."""
+    root = task_root_from_arg(args.task_root)
+    if args.if_finished:
+        result = release_claim_if_finished(root)
+    else:
+        result = release_project_claim(root)
+    print(json.dumps({"projectClaim": result}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_cleanup(args: argparse.Namespace) -> int:
     root = task_root_from_arg(args.task_root)
     prefix = f"sologsb-{safe_slug(root.name)}-"
@@ -634,6 +645,11 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="检查最终本地交付")
     status.add_argument("--task-root", required=True)
     status.set_defaults(func=cmd_status)
+
+    release_claim = sub.add_parser("release-claim", help="只释放平台项目占用锁（幂等），不删容器和文件")
+    release_claim.add_argument("--task-root", required=True)
+    release_claim.add_argument("--if-finished", action="store_true", help="仅当已有非返修提交记录时释放")
+    release_claim.set_defaults(func=cmd_release_claim)
 
     cleanup = sub.add_parser("cleanup", help="清理临时容器和验证 clone")
     cleanup.add_argument("--task-root", required=True)

@@ -387,6 +387,26 @@ def _remove_container(name: str) -> None:
         run(["docker", "rm", "-f", name], check=False)
 
 
+class CandidateCancelled(SologsbError):
+    """The race no longer needs this candidate; not a failed attempt."""
+
+
+# Wait between failed attempts so a rate-limited key or a hiccuping Docker
+# daemon does not burn all attempts within seconds.
+ATTEMPT_BACKOFF_ENV = "SOLOGBS_ATTEMPT_BACKOFF_SECONDS"
+ATTEMPT_BACKOFF_MAX_SECONDS = 300.0
+
+
+def _attempt_backoff(attempt: int) -> float:
+    try:
+        base = float(os.environ.get(ATTEMPT_BACKOFF_ENV, "30") or 30)
+    except ValueError:
+        base = 30.0
+    if base <= 0:
+        return 0.0
+    return min(ATTEMPT_BACKOFF_MAX_SECONDS, base * (2 ** max(0, attempt - 1)))
+
+
 class _ContainerReservation:
     def __init__(self, path: Path | None):
         self.path = path
@@ -470,6 +490,38 @@ class _ContainerLimiter:
             return True
         container = str(name or "").casefold()
         return any(container.startswith(f"sologsb-{item}-") for item in excluded)
+
+    @staticmethod
+    def _reap_orphan_containers() -> list[str]:
+        """Remove candidate containers whose runner process is gone.
+
+        The container only idles (``sleep infinity``) while its runner drives
+        ``docker exec``; once the runner is SIGKILLed or the host rebooted, the
+        container can never produce a trace again but still holds a slot.
+        Containers without the run-pid label (older skill versions) are left
+        alone.
+        """
+        proc = run(
+            ["docker", "ps", "--filter", "label=sologsb-0917=true", "--format",
+             '{{.Names}}\t{{.Label "sologsb.run-pid"}}'],
+            check=False,
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            return []
+        removed: list[str] = []
+        for raw in proc.stdout.decode("utf-8", errors="replace").splitlines():
+            name, _, pid = raw.partition("\t")
+            name, pid = name.strip(), pid.strip()
+            if not name or not pid.isdigit() or int(pid) == os.getpid():
+                continue
+            if _ContainerLimiter._pid_alive(pid):
+                continue
+            rm = run(["docker", "rm", "-f", name], check=False, timeout=60)
+            if rm.returncode == 0:
+                removed.append(name)
+                _emit_live("container", f"回收执行进程已退出的孤儿容器 {name}（PID {pid}）")
+        return removed
 
     @staticmethod
     def _running_containers() -> list[tuple[str, str]]:
@@ -579,7 +631,12 @@ class _ContainerLimiter:
             "deadMarkers": [str(path) for path in dead],
         }
 
-    def acquire(self, project_code: str, container_name: str) -> _ContainerReservation:
+    def acquire(
+        self,
+        project_code: str,
+        container_name: str,
+        stop_event: Any = None,
+    ) -> _ContainerReservation:
         self.reservations.mkdir(parents=True, exist_ok=True)
         started_at = time.monotonic()
         next_settings_refresh = 0.0
@@ -596,6 +653,8 @@ class _ContainerLimiter:
             if self._container_is_excluded(container_name, project_code, excluded):
                 return _ContainerReservation(None)
 
+            if stop_event is not None and stop_event.is_set():
+                raise CandidateCancelled("已有两个候选先完成，放弃排队中的容器名额")
             elapsed = now - started_at
             if elapsed >= wait_seconds:
                 raise SologsbError(
@@ -606,6 +665,7 @@ class _ContainerLimiter:
             with self.lock_path.open("a+", encoding="utf-8") as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                 try:
+                    self._reap_orphan_containers()
                     running = self._running_containers()
                     running_names = {
                         name for name, label in running
@@ -664,6 +724,7 @@ def _start_container(
     workspace: Path,
     secret: str,
     base_url: str,
+    stop_event: Any = None,
 ) -> dict[str, Any]:
     claude_home = attempt_dir / "claude-home"
     (claude_home / "projects").mkdir(parents=True, exist_ok=True)
@@ -690,6 +751,7 @@ def _start_container(
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--name", container,
         "--label", "sologsb-0917=true",
+        "--label", f"sologsb.run-pid={os.getpid()}",
     ]
     if project_code:
         cmd += ["--label", f"sologsb.project-code={project_code}"]
@@ -701,7 +763,10 @@ def _start_container(
         "--entrypoint", "/bin/bash", DEFAULT_IMAGE,
         "-lc", setup,
     ]
-    slot = _CONTAINER_LIMITER.acquire(project_code, container)
+    slot = _CONTAINER_LIMITER.acquire(project_code, container, stop_event)
+    if stop_event is not None and stop_event.is_set():
+        slot.release()
+        raise CandidateCancelled("已有两个候选先完成，不再启动新容器")
     try:
         proc = run(cmd, env=env, check=False, timeout=180)
         if proc.returncode != 0:
@@ -1133,6 +1198,7 @@ def _run_candidate_attempt(
             workspace=repo,
             secret=secret,
             base_url=base_url,
+            stop_event=stop_event,
         )
         container_slot = container_info.pop("_slot", None)
         container = container_info["name"]
@@ -1215,14 +1281,16 @@ def _run_candidate_attempt(
                         raise subprocess.TimeoutExpired(docker_cmd, timeout)
                     try:
                         current_size = stdout_path.stat().st_size
-                        with stdout_path.open("rb") as stream:
-                            assistant_seen = any(
-                                b'"type":"assistant"' in line or b'"type": "assistant"' in line
-                                for line in stream
-                            )
+                        # Once seen it stays seen; rescanning a growing trace
+                        # every poll only burns IO on long attempts.
+                        if not assistant_seen and current_size != last_size:
+                            with stdout_path.open("rb") as stream:
+                                assistant_seen = any(
+                                    b'"type":"assistant"' in line or b'"type": "assistant"' in line
+                                    for line in stream
+                                )
                     except OSError:
                         current_size = -1
-                        assistant_seen = False
                     if current_size != last_size:
                         last_size = current_size
                         last_change = time.monotonic()
@@ -1535,6 +1603,15 @@ def _run_candidate_locked(
                 mapped_side=mapped_side,
                 stop_event=stop_event,
             )
+        except CandidateCancelled as exc:
+            result = {
+                "candidateId": candidate,
+                "mappedSide": mapped_side,
+                "attempt": attempt,
+                "status": "cancelled",
+                "error": str(exc),
+                "finishedAt": utc_now(),
+            }
         except Exception as exc:
             last_error = str(exc)
             result = {
@@ -1571,6 +1648,12 @@ def _run_candidate_locked(
         if workspace.exists():
             shutil.rmtree(workspace)
         _record_candidate_state(task_root, candidate, result)
+        if attempt < attempts:
+            delay = _attempt_backoff(attempt)
+            if stop_event is not None:
+                stop_event.wait(delay)
+            elif delay:
+                time.sleep(delay)
 
     blocked = {
         "candidateId": candidate,
@@ -1857,11 +1940,19 @@ def run_candidates(
                 completed=completed,
             )
         remaining = set(ids)
+        # Each worker only reports after all of its attempts, and may first
+        # queue for a container slot, so the race budget is the worst case of
+        # one worker, not a single attempt's timeout.
+        _limit, _excluded, slot_wait = _CONTAINER_LIMITER._settings()
+        race_budget = attempts * (float(timeout) + ATTEMPT_BACKOFF_MAX_SECONDS) + slot_wait
+        race_deadline = time.monotonic() + race_budget
         while remaining and len(winners) < 2:
             try:
-                candidate, result, finished_at = completed.get(timeout=max(1.0, timeout))
+                candidate, result, finished_at = completed.get(
+                    timeout=max(1.0, race_deadline - time.monotonic())
+                )
             except queue.Empty as exc:
-                raise SologsbError("候选竞速等待结果超时") from exc
+                raise SologsbError(f"候选竞速等待结果超时（总预算 {int(race_budget)} 秒）") from exc
             remaining.discard(candidate)
             if result.get("status") == "staged":
                 winners.append((finished_at, candidate, result))
