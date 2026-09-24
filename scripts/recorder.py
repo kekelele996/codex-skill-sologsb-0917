@@ -1909,6 +1909,17 @@ def _run_web_otty(
                 frontmost_monitor=frontmost_monitor,
                 focus_anchor=focus_anchor,
             )
+            if bool(plan.get("expectedBrowserFailure")):
+                browser_result_path = output_dir / "browser-result.json"
+                browser_text = (
+                    browser_result_path.read_text(encoding="utf-8", errors="replace")
+                    if browser_result_path.is_file() else ""
+                )
+                context_errors = failure_context_errors(plan, browser_text)
+                if context_errors:
+                    raise SologsbError(
+                        "Web失败录屏上下文门禁未通过:\n- " + "\n- ".join(context_errors)
+                    )
             combined = output_dir / "combined.mp4"
             _concat_segments([terminal_cropped, browser_cropped], combined)
         except BaseException as exc:
@@ -2155,6 +2166,55 @@ def _api_request_shell(item: dict[str, Any], timeout: float = 20.0) -> str:
     return " ".join(parts)
 
 
+FAILURE_CONTEXT_LABELS = ("场景", "触发", "后果")
+FAILURE_SIGNAL_RE = re.compile(
+    r"(?:失败|报错|错误|异常|退出码|不可用|拒绝|not\s+exist|SQLSTATE|error|exception|panic)",
+    re.I,
+)
+
+
+def failure_context_errors(plan: dict[str, Any], log_text: str | None = None) -> list[str]:
+    """Validate that an expected-failure recording explains scene, trigger and consequence."""
+    expected = (
+        bool(plan.get("expectedFailure"))
+        or bool(plan.get("expectedBrowserFailure"))
+        or str(plan.get("mode") or "") == "failed-start"
+    )
+    if not expected:
+        return []
+    errors: list[str] = []
+    context = plan.get("failureContext")
+    if not isinstance(context, dict):
+        return ["预期失败录屏必须提供 failureContext 对象"]
+    for key, label in (
+        ("scenario", "场景"),
+        ("trigger", "触发"),
+        ("consequence", "后果"),
+    ):
+        value = str(context.get(key) or "").strip()
+        if len(value) < 6:
+            errors.append(f"failureContext.{key} 缺失或过短，无法说明{label}")
+    required = context.get("requiredEvidence")
+    if not isinstance(required, list) or len(required) < 3:
+        errors.append("failureContext.requiredEvidence 至少要有 3 条")
+        required = []
+    normalized_required = [str(item).strip() for item in required if str(item).strip()]
+    for label in FAILURE_CONTEXT_LABELS:
+        if not any(label in item for item in normalized_required):
+            errors.append(f"failureContext.requiredEvidence 缺少“{label}”证据")
+    if not any(FAILURE_SIGNAL_RE.search(item) for item in normalized_required):
+        errors.append("failureContext.requiredEvidence 缺少失败、报错、退出码或不可用等失败信号")
+    mode = str(plan.get("mode") or "")
+    commands = [str(item).strip() for item in (plan.get("commands") or []) if str(item).strip()]
+    if mode in {"terminal", "failed-start"} and not commands:
+        errors.append("终端/失败录屏必须用 commands 展示退出码或后置影响")
+    if log_text is not None:
+        missing = [item for item in normalized_required if item not in log_text]
+        if missing:
+            errors.append("真实录制日志缺少 failureContext.requiredEvidence: " + "、".join(missing))
+    return errors
+
+
 def _terminal_command(plan: dict[str, Any], log_path: Path, script_path: Path, result_path: Path) -> str:
     start = str(plan.get("startCommand") or "").strip()
     if not start:
@@ -2216,6 +2276,11 @@ def _finalize_terminal_video(
         raise SologsbError("failed-start 录制要求真实启动失败，但命令退出码为 0")
     if plan.get("requireFailureExit") and exit_code is None:
         raise SologsbError("要求录制真实失败，但终端日志没有可验证退出码")
+    log_path = result_path.parent / "terminal.log"
+    log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+    context_errors = failure_context_errors(plan, log_text)
+    if context_errors:
+        raise SologsbError("失败录屏上下文门禁未通过:\n- " + "\n- ".join(context_errors))
     default_name = "failed-start.mp4" if plan.get("mode") == "failed-start" or (exit_code not in (None, 0)) else "demo.mp4"
     output_name = str(plan.get("outputName") or default_name)
     return _copy_final(cropped, task_root, side, output_name), exit_code
@@ -2230,6 +2295,9 @@ def _run_terminal_otty(
     focus_guard: _FocusRestoreGuard,
     frontmost_monitor: _FrontmostWindowMonitor,
 ) -> tuple[Path, int | None]:
+    context_errors = failure_context_errors(plan)
+    if context_errors:
+        raise SologsbError("失败录屏上下文门禁未通过:\n- " + "\n- ".join(context_errors))
     output_dir = task_root / "monitor" / "recording" / side.lower() / "terminal-otty"
     if output_dir.exists():
         shutil.rmtree(output_dir)
@@ -2353,6 +2421,9 @@ def _record_side_locked(
     capture_kind = str(draft.get("captureKind") or "window-id")
     pointer_strategy = normalize_pointer_strategy(draft.get("pointerStrategy"))
     draft["pointerStrategy"] = pointer_strategy
+    context_errors = failure_context_errors(draft)
+    if context_errors:
+        raise SologsbError("失败录屏上下文门禁未通过:\n- " + "\n- ".join(context_errors))
     if capture_kind != "window-id":
         raise SologsbError("录屏硬门禁要求 captureKind=window-id")
     if pointer_strategy not in POINTER_POLICIES:

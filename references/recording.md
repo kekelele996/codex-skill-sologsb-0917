@@ -24,6 +24,7 @@
 - Web 失败计划设置 `expectedBrowserFailure=true`。运行器允许浏览器场景以非零状态结束并保留视频，
   但若预期失败而应用实际成功，则录制失败；结果中的 `expectedAppFailure`、`observedAppFailure` 和
   `appOutcome` 必须与 GSB 结论一致。
+- 预期失败录屏必须在计划里写 `failureContext`，至少包含 `scenario`、`trigger`、`consequence` 和 3 条以上 `requiredEvidence`；`requiredEvidence` 必须分别标记场景、触发、后果，并含失败、报错、退出码或服务不可用信号。终端/失败模式还要用 `commands` 展示后置影响，录制器会对照真实 `terminal.log` 逐条验收。缺少上下文、缺少后置影响或证据未出现在日志中时直接阻断，禁止提交只有一段报错的视频。
 - 输出写 `workspace/视频信息/<side>/视频/demo.mp4` 或 `failed-start.mp4`，两者都必须为 720p。
 - 录制前临时开启并记录 `ipc-allow-send-keys`，结束后恢复原值并 reload；不得永久改写 Otty 配置。
 - 完成后必须停止开发服务、关闭独立 Chrome、关闭本次 Otty 窗口并生成哈希清单。

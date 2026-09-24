@@ -90,6 +90,7 @@ from recorder import (  # noqa: E402
     _terminal_command,
     _window_info_payload,
     recording_command_ok,
+    failure_context_errors,
     validate_api_requests,
     validate_recording_targets,
     video_dimensions,
@@ -1318,6 +1319,37 @@ class VideoTests(unittest.TestCase):
             commands = [item["command"] for item in plan["a"]]
             self.assertTrue(any("approve-builds --all" in command for command in commands))
             self.assertIn("pnpm build", commands)
+
+    def test_expected_failure_requires_scene_trigger_consequence(self) -> None:
+        plan = {
+            "mode": "failed-start",
+            "expectedFailure": True,
+            "commands": ["echo consequence"],
+        }
+        errors = failure_context_errors(plan)
+        self.assertTrue(any("failureContext" in item for item in errors), errors)
+        plan["failureContext"] = {
+            "scenario": "旧库升级场景",
+            "trigger": "执行自动迁移",
+            "consequence": "后端退出且服务不可用",
+            "requiredEvidence": ["[场景]旧库升级", "[触发]执行迁移", "[后果]服务不可用"],
+        }
+        self.assertEqual(failure_context_errors(plan), [])
+
+    def test_expected_failure_evidence_must_appear_in_real_log(self) -> None:
+        plan = {
+            "mode": "failed-start",
+            "expectedFailure": True,
+            "commands": ["echo consequence"],
+            "failureContext": {
+                "scenario": "旧库升级场景",
+                "trigger": "执行自动迁移",
+                "consequence": "后端退出且服务不可用",
+                "requiredEvidence": ["[场景]旧库升级", "[触发]执行迁移", "[后果]服务不可用"],
+            },
+        }
+        errors = failure_context_errors(plan, "[场景]旧库升级\n[触发]执行迁移\nERROR SQLSTATE 42703")
+        self.assertTrue(any("[后果]" in item for item in errors), errors)
 
     def test_unexpected_browser_failure_is_not_recording_success(self) -> None:
         self.assertTrue(recording_command_ok(0, False))
