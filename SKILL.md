@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.3.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.3.0`
-- 精确提交号：运行 `git rev-parse v1.3.0` 获取。
+- 全局版本号：`1.3.1`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.3.1`
+- 精确提交号：运行 `git rev-parse v1.3.1` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -74,6 +74,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 所有过程与产物结论必须绑定 `monitor/evidence.json`。文中的文件、报错和缺失判断
   找不到轨迹或命令证据时，停止生成 GSB。
 - GSB 不是只接收 100% 成功的任务。A/B 任一侧即使构建、启动或关键业务路径失败，失败本身也是有效评估结果；必须继续保留真实启动、报错和关键失败画面，不能因为失败而跳过该侧录屏。
+- 预期失败录屏不能只截一段报错。`record-plan.json` 必须写 `failureContext.scenario`、`failureContext.trigger`、`failureContext.consequence` 和至少 3 条 `requiredEvidence`，其中必须分别带“场景、触发、后果”标记及失败信号；终端/失败模式还必须用 `commands` 留下退出码、后置状态或不可用结果。录制器会在开录前和收尾后检查，任一字段缺失或 requiredEvidence 未出现在真实 `terminal.log`/浏览器结果中即阻断。
 - 负面评价硬门禁：每条 `polarity=negative` 的判断都必须在草稿 claim 中提供
   `triggerKind`、`trigger` 和 `objectiveConsequence`，并让触发节点与客观后果都原样出现在
   GSB 理由中。触发节点只能落到具体步骤/轮次、文件/路径、命令/工具调用或对应需求/操作；
