@@ -84,6 +84,24 @@ on run argv
 end run
 """
 
+# Terminal only exposes these title toggles through its prefs, not AppleScript.
+# Without them the title bar shows the foreground command line (e.g. `env ... npm run dev`).
+TERMINAL_PROFILE_TITLE_KEYS = {
+    "ShowActiveProcessInTitle": False,
+    "ShowActiveProcessArgumentsInTitle": False,
+    "ShowActiveProcessInTabTitle": False,
+    "ShowActiveProcessArgumentsInTabTitle": False,
+    "ShowCommandKeyInTitle": False,
+    "ShowComponentsWhenTabHasCustomTitle": False,
+    "ShowDimensionsInTitle": False,
+    "ShowRepresentedURLInTitle": False,
+    "ShowRepresentedURLPathInTitle": False,
+    "ShowShellCommandInTitle": False,
+    "ShowTTYNameInTabTitle": False,
+    "ShowTTYNameInTitle": False,
+    "ShowWindowSettingsNameInTitle": False,
+}
+
 TERMINAL_PROFILE_SCRIPT = """
 on run argv
   set profileName to item 1 of argv
@@ -238,6 +256,44 @@ def _terminal_ensure_profile() -> None:
     _osascript(TERMINAL_PROFILE_SCRIPT, TERMINAL_PROFILE_NAME)
 
 
+def _terminal_write_profile_prefs() -> None:
+    """Write the title toggles into the profile; Terminal only reads them at launch."""
+    from Foundation import NSUserDefaults  # type: ignore
+
+    defaults = NSUserDefaults.standardUserDefaults()
+    domain = dict(defaults.persistentDomainForName_(TERMINAL_BUNDLE_ID) or {})
+    settings = dict(domain.get("Window Settings") or {})
+    profile = dict(settings.get(TERMINAL_PROFILE_NAME) or {})
+    profile.setdefault("name", TERMINAL_PROFILE_NAME)
+    profile.setdefault("type", "Window Settings")
+    profile.setdefault("ProfileCurrentVersion", 2.09)
+    if all(profile.get(key) == value for key, value in TERMINAL_PROFILE_TITLE_KEYS.items()):
+        return
+    profile.update(TERMINAL_PROFILE_TITLE_KEYS)
+    settings[TERMINAL_PROFILE_NAME] = profile
+    domain["Window Settings"] = settings
+    defaults.setPersistentDomain_forName_(domain, TERMINAL_BUNDLE_ID)
+
+
+def _terminal_title_is_clean(title: str) -> bool:
+    parts = [part.strip() for part in str(title or "").split("\u2014")]
+    return bool(title) and all(part == TERMINAL_PROFILE_NAME for part in parts)
+
+
+def _terminal_assert_clean_title(window_id: int, *, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    title = ""
+    while time.monotonic() < deadline:
+        title = str(_window_info_by_id(window_id).get("windowName") or "")
+        if _terminal_title_is_clean(title):
+            return
+        time.sleep(0.2)
+    raise SologsbError(
+        f"Terminal 窗口标题会暴露进程/参数({title!r})：sologsb 描述文件的标题设置只在 Terminal 启动时读取，"
+        "请完全退出 Terminal.app 后重试"
+    )
+
+
 def _terminal_send(window_id: int, command: str) -> None:
     _osascript(
         'on run argv\ntell application "Terminal" to do script (item 2 of argv) in tab 1 of window id ((item 1 of argv) as integer)\nend run',
@@ -306,6 +362,7 @@ def _terminal_open_window(title: str, cwd: Path | None = None) -> tuple[int, str
         time.sleep(0.5)
         _terminal_send(window_id, _terminal_clean_shell_command(cwd))
         _terminal_wait_clean_prompt(window_id)
+        _terminal_assert_clean_title(window_id)
     except Exception:
         _terminal_close_window(window_id, tty)
         raise
@@ -524,7 +581,7 @@ class _FocusRestoreGuard:
             event["skipReason"] = "original-app-already-frontmost"
             self.events.append(event)
             return event
-        if frontmost is None or frontmost_owner_pid not in targets:
+        if frontmost is None or frontmost_owner_pid not in self.recording_pids:
             event["skipReason"] = "frontmost-not-recording-process"
             self.events.append(event)
             return event
@@ -541,7 +598,7 @@ class _FocusRestoreGuard:
                 restored = bool(
                     current is not None
                     and current_window_id not in self.target_window_ids
-                    and (current_owner_pid not in targets or current_owner_pid == original_pid)
+                    and (current_owner_pid not in self.recording_pids or current_owner_pid == original_pid)
                 )
                 if restored:
                     break
@@ -2635,6 +2692,7 @@ def _record_side_locked(
             focus_guard = _FocusRestoreGuard()
             frontmost_monitor.start()
             if mode in {"web", "terminal", "failed-start"}:
+                _terminal_write_profile_prefs()
                 terminal_launched = _terminal_ensure_ready()
                 _terminal_ensure_profile()
             if mode == "web":
@@ -2687,7 +2745,7 @@ def _record_side_locked(
     terminal_log_path = runtime_dir / "terminal.log"
     guard_reports = []
     window_capture_reports = []
-    for guard_path in sorted(recording_root.rglob("*-cursor-guard.json")):
+    for guard_path in sorted(runtime_dir.rglob("*-cursor-guard.json")):
         report = read_json(guard_path, {}) or {}
         guard_reports.append(
             {
@@ -2711,7 +2769,7 @@ def _record_side_locked(
                 "finalPointerInsideWindow": report.get("finalPointerInsideWindow"),
             }
         )
-    for capture_path in sorted(recording_root.rglob("*-window-capture.json")):
+    for capture_path in sorted(runtime_dir.rglob("*-window-capture.json")):
         report = read_json(capture_path, {}) or {}
         window_capture_reports.append(
             {

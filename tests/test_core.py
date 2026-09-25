@@ -76,6 +76,7 @@ from github_repo import (
 )  # noqa: E402
 from semantic_review import validate_review  # noqa: E402
 import side_runner  # noqa: E402
+import recorder  # noqa: E402
 from recorder import default_plan, prepare_recording, recording_output_name  # noqa: E402
 from recorder import (  # noqa: E402
     _canonical_owner,
@@ -89,6 +90,7 @@ from recorder import (  # noqa: E402
     _recording_service_ports,
     _terminal_close_window,
     _terminal_open_window,
+    _terminal_title_is_clean,
     normalize_terminal_app,
     _require_window_id,
     _validate_recording_window,
@@ -1203,6 +1205,30 @@ class VideoTests(unittest.TestCase):
             with self.assertRaisesRegex(SologsbError, "osascript 超时"):
                 _terminal_open_window("sologsb-late-window")
         close_window.assert_called_once_with(4242)
+
+    def test_focus_guard_restores_when_earlier_recording_app_is_frontmost(self) -> None:
+        user = {"status": "captured", "pid": 4260, "name": "微信", "bundleId": "com.tencent.xinWeChat"}
+        terminal = {"windowId": 50735, "ownerPid": 45600, "ownerName": "终端"}
+        user_window = {"windowId": 48558, "ownerPid": 4260, "ownerName": "微信"}
+        frontmost = [user_window, terminal, user_window, user_window]
+        with mock.patch.object(recorder._FocusRestoreGuard, "_capture_frontmost_app", return_value=user), \
+                mock.patch("recorder._frontmost_window_info", side_effect=lambda: frontmost.pop(0) if len(frontmost) > 1 else frontmost[0]):
+            guard = recorder._FocusRestoreGuard()
+            guard.restore_if_recording_frontmost({45600}, "terminal-open", {50735})
+            with mock.patch.object(guard, "_activate_original", return_value=True) as activate:
+                event = guard.restore_if_recording_frontmost({46373}, "chrome-open", {50739})
+        activate.assert_called_once()
+        self.assertEqual(event["action"], "restore-user-app")
+        self.assertTrue(event["restored"])
+
+    def test_terminal_title_gate_rejects_process_arguments(self) -> None:
+        self.assertTrue(_terminal_title_is_clean("sologsb \u2014 sologsb"))
+        self.assertTrue(_terminal_title_is_clean("sologsb"))
+        self.assertFalse(_terminal_title_is_clean(""))
+        self.assertFalse(_terminal_title_is_clean("sologsb \u2014 sologsb \u2014 zsh -f"))
+        self.assertFalse(_terminal_title_is_clean(
+            "sologsb \u2014 esbuild \u00b7 npm run dev --port 1 ANTHROPIC_API_KEY=x"
+        ))
 
     def test_terminal_app_normalization_maps_legacy_otty(self) -> None:
         self.assertEqual(normalize_terminal_app(""), "terminal")
