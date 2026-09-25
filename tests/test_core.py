@@ -372,6 +372,13 @@ class ExcelTests(unittest.TestCase):
         self.assertTrue(reason_style_errors("A 侧方案把根因写成配置缺失。"))
         self.assertTrue(reason_style_errors("A 侧方案把改动入库，计数 2 变 22。"))
         self.assertTrue(reason_style_errors("A 侧方案读取 Mock 服务配置。"))
+        legacy = reason_style_errors("A 侧方案实现验收，这题最要紧的是状态一致。")
+        self.assertTrue(any("这题" in item for item in legacy), legacy)
+        self.assertTrue(any("最要紧" in item for item in legacy), legacy)
+        self.assertEqual(
+            reason_style_errors("A 侧方案实现验收，这个任务最重要的是状态一致。"),
+            [],
+        )
         self.assertEqual(reason_style_warnings("A 侧方案建了独立表，读库时发现停用位被默认值覆盖掉了。"), [])
         self.assertTrue(any("空泛表达" in item for item in reason_style_warnings("A 侧方案真实完成入库。")))
         warnings = reason_style_warnings("A 侧方案建独立表。读库发现默认值盖掉停用位。保存后读回正常。")
@@ -638,7 +645,7 @@ class DeliveryFieldTests(unittest.TestCase):
 
     REASON = (
         "A 侧方案在打开api.ts的请求定义时多拼了一层前缀，登录一直被挡在外面，页面进不去日记。"
-        "B 侧方案补跑了发布流程并回读快照，这题最要紧的是能完整走通，因此选择 B 侧方案。"
+        "B 侧方案补跑了发布流程并回读快照，这个任务最重要的是能完整走通，因此选择 B 侧方案。"
     )
     DESC_A = "登录请求在frontend/src/api.ts里多拼了一层前缀，接口返回404。用户进不了日记页，保存和发布需求都没法验证。"
     DESC_B = "逐条核对了选择行程、存草稿、发起人发布和冻结标题四项需求，构建和启动都通过，刷新后版本与发布状态一致。"
@@ -951,11 +958,30 @@ class ReasonFlowTests(unittest.TestCase):
 
     def test_natural_reason_passes(self) -> None:
         reason = (
-            "A 侧方案在打开api.ts的请求定义时多拼了一层前缀，登录一直被挡在外面，页面进不去日记。"
-            "B 侧方案补跑了发布流程并回读快照，存草稿和发布都能走通。"
-            "这题最要紧的是能完整走通，因此选择 B 侧方案。"
+            "A 侧方案在打开api.ts的请求定义时多拼了一层前缀，结果登录一直被挡在外面，页面进不去日记。"
+            "B 侧方案补跑了发布流程并回读快照，存草稿和发布都能走通，但页面样式还比较简单。"
+            "这个任务最重要的是能完整走通，因此选择 B 侧方案。"
         )
         self.assertEqual(reason_flow_errors(reason), [])
+
+    def test_telegraphic_reason_blocks(self) -> None:
+        reason = (
+            "A 侧方案在服务层加了乐观锁。并发保存先提交标题未更新。B 侧方案补了版本号校验。随后回读了数据。"
+            "A 侧方案页面能打开。B 侧方案发布成功。两侧都跑了build。这个任务最重要的是并发保存不丢数据，因此选择 B 侧方案。"
+        )
+        errors = reason_flow_errors(reason)
+        self.assertTrue(any("电报体" in item for item in errors), errors)
+        self.assertTrue(any("衔接" in item for item in errors), errors)
+        self.assertTrue(any("先提交标题未更新" in item for item in errors), errors)
+
+    def test_missing_criterion_blocks(self) -> None:
+        reason = (
+            "A 侧方案在服务层给文章表加了乐观锁，但两个人同时保存时，先提交的一方写进去了，标题却没有跟着更新。"
+            "结果刷新页面后看到的还是旧标题，这次编辑等于没有保存。"
+            "B 侧方案在保存接口里补了版本号校验，后提交的一方会收到冲突提示，回读时标题和正文都是新值。"
+            "因此选择 B 侧方案，它保存后的标题和正文都可以放心交给编辑继续使用。"
+        )
+        self.assertTrue(any("扣分点" in item for item in reason_flow_errors(reason)))
 
 
 class DeliverySubmissionTests(unittest.TestCase):
@@ -2815,6 +2841,27 @@ class ContainerLimitTests(unittest.TestCase):
                 reservation.release()
                 excluded = limiter.acquire("gb-501", "sologsb-gb-501-20260919-000000-candidate-1-1-a")
                 self.assertIsNone(excluded.path)
+
+    def test_monitor_can_make_every_running_container_count(self) -> None:
+        docker_ps = "\n".join([
+            "sologsb-cy-1-20260919-000745-candidate-1-1-a\tcy-1\ttrue",
+            "cy180-web-1\t\t",
+            "friendly_keller\t\t",
+            "ld427-db\t\t",
+        ]).encode("utf-8")
+        ok = subprocess.CompletedProcess([], 0, stdout=docker_ps, stderr=b"")
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(side_runner, "run", return_value=ok):
+            config = Path(temp) / "container-limit.json"
+            write_json(config, {"maxContainers": 4, "excludedProjectCodes": ["ld427"],
+                                "managedBy": "sologsb-monitor"})
+            limiter = side_runner._ContainerLimiter(config)
+            self.assertEqual(limiter.status()["runningContainers"], 1)
+            write_json(config, {"maxContainers": 4, "excludedProjectCodes": ["ld427"],
+                                "managedBy": "sologsb-monitor", "countAllContainers": True})
+            status = limiter.status()
+            self.assertEqual(status["runningContainers"], 3)
+            self.assertNotIn("ld427-db", status["runningNames"])
 
 
 class VersionTests(unittest.TestCase):

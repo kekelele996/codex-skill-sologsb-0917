@@ -1,11 +1,13 @@
 {
-  "updatedAt": "2026-09-22",
+  "updatedAt": "2026-09-24",
   "note": "GSB 理由禁用词与推荐替换。新增词只改这里，gsb_tools.py 与 preflight.py 共用同一份。常用命令统一简写，避免历史长片段重复。",
   "replace": {
     "落库": "入库",
     "闭环": "完整覆盖",
     "根因": "原因",
-    "npm run build": "build"
+    "npm run build": "build",
+    "这题": "这个任务",
+    "最要紧": "最重要"
   },
   "warnings": {
     "真实": "改成能核对的动作、状态或结果",

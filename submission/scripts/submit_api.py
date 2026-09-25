@@ -554,27 +554,23 @@ def main() -> int:
             existing_id = candidate_id
 
     uploaded: dict[str, Any] = {}
-    if existing_id:
-        for key in sorted(TRACE_FIELDS | VIDEO_FIELDS):
-            value = existing_detail.get(key)
-            if value in (None, "", []):
-                raise RuntimeError(f"待返修记录 {existing_id} 缺少原附件字段: {key}")
-            uploaded[key] = value
-    else:
-        for label, info in (payload.get("uploads") or {}).items():
-            key = UPLOAD_LABELS.get(label)
-            if not key:
-                continue
-            path = Path(str(info.get("path") or "")).expanduser().resolve()
-            result = upload_file(args.server, cookie, csrf, path, video=(key in VIDEO_FIELDS))
-            if key in TRACE_FIELDS:
-                uploaded[key] = [{
-                    "name": result.get("name") or path.name,
-                    "path": result.get("path"),
-                    "size": result.get("size", path.stat().st_size),
-                }]
-            else:
-                uploaded[key] = result.get("url")
+    # Always upload the current local attachments.  On a PENDING_FIX update this
+    # is essential when only the recording was replaced: reusing remote URLs
+    # would silently keep the rejected video attached to the corrected record.
+    for label, info in (payload.get("uploads") or {}).items():
+        key = UPLOAD_LABELS.get(label)
+        if not key:
+            continue
+        path = Path(str(info.get("path") or "")).expanduser().resolve()
+        result = upload_file(args.server, cookie, csrf, path, video=(key in VIDEO_FIELDS))
+        if key in TRACE_FIELDS:
+            uploaded[key] = [{
+                "name": result.get("name") or path.name,
+                "path": result.get("path"),
+                "size": result.get("size", path.stat().st_size),
+            }]
+        else:
+            uploaded[key] = result.get("url")
 
     data = build_submission_data(schema, payload, uploaded)
     if existing_id:

@@ -262,6 +262,10 @@ def _parse_cookies(headers: dict, payload: dict | None = None) -> tuple[str, str
                 csrf = value
     if not csrf and isinstance(payload, dict):
         csrf = str(payload.get("csrf_token") or "").strip()
+    # 登录响应可能分多个 Set-Cookie 头返回 session 与 csrf；
+    # 某些 HTTP 客户端只保留最后一个头，因此用响应体里的 token 补齐 cookie。
+    if csrf and not any(pair.startswith("solo_qa_csrf=") for pair in pairs):
+        pairs.append(f"solo_qa_csrf={csrf}")
     return "; ".join(pairs), csrf
 
 

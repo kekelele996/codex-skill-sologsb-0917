@@ -106,6 +106,14 @@ REASON_MIN_SENTENCE_CHARS = 8
 REASON_CRITERION_PATTERN = re.compile(
     r"(?:看重|要紧|关键|决定|差别在|差距在|分开|分出|拉开|主要看|更在意|优先|首先要|最重要)"
 )
+# 2026-09-24 起：平台以“电报体”打回（八句一句一事实、句号密集、因果和扣分点靠读者自己排）。
+REASON_MAX_SENTENCES = 6
+REASON_MIN_LINK_WORDS = 2
+REASON_LINK_PATTERN = re.compile(
+    r"(?:因为|由于|所以|因而|于是|结果|导致|以致|使得|这样一来|这就|但是|但|不过|可是|却|而是|只要|一旦|否则|才)"
+)
+# “并发保存先提交标题未更新”一类：省掉主语和衔接，把两件事压成一个短语，要回读才懂。
+REASON_COMPRESSED_CLAUSE = re.compile(r"先[\u4e00-\u9fffA-Za-z0-9]{1,8}未[\u4e00-\u9fff]{1,6}")
 REASON_FLUENCY_PATTERNS = (
     ("重复标点", re.compile(r"[，。；：！？!?]{2,}")),
     ("重复虚词", re.compile(r"(?:的的|了了|是是|在在|和和|与与|就就|都都)")),
@@ -191,11 +199,6 @@ def reason_style_warnings(reason: str) -> list[str]:
             "GSB 理由出现“真实”“真正”“其实”等空泛表达；请改成能核对的动作、状态或结果: "
             + "、".join(dict.fromkeys(vague))
         )
-    if text_non_whitespace_len(reason) >= 150 and not REASON_CRITERION_PATTERN.search(reason):
-        warnings.append(
-            "GSB 理由只罗列事实，没有交代最看重哪一条；结尾前用一句话点明判断依据，"
-            "例如“这题最要紧的是并发保存不丢数据”"
-        )
     return warnings
 
 
@@ -226,6 +229,29 @@ def reason_flow_errors(reason: str) -> list[str]:
             errors.append(
                 f"GSB 理由第 {index} 句只有 {len(clean)} 字，像补在末尾的碎句：{clean}；并入前后句"
             )
+    if len(sentences) > REASON_MAX_SENTENCES:
+        errors.append(
+            f"GSB 理由共 {len(sentences)} 句，超过 {REASON_MAX_SENTENCES} 句，句号过密像电报体；"
+            "同一侧的动作和结果用逗号连成一句，交代清谁因谁果"
+        )
+    body = "".join(sentences[:-1]) if len(sentences) > 1 else reason
+    links = REASON_LINK_PATTERN.findall(body)
+    if len(links) < REASON_MIN_LINK_WORDS:
+        errors.append(
+            f"GSB 理由结论句之前只有 {len(links)} 处因果或转折衔接，读者要自己排谁因谁果；"
+            "负面事实用“结果”“导致”“所以”接上后果，两侧对照用“但”“不过”“却”"
+        )
+    compressed = REASON_COMPRESSED_CLAUSE.search(reason)
+    if compressed:
+        errors.append(
+            f"GSB 理由把两件事压成了一个短语：{compressed.group(0)}；补上主语和衔接，"
+            "例如“两个人同时保存时，先提交的一方写进去了，标题却没有更新”"
+        )
+    if text_non_whitespace_len(reason) >= 150 and not REASON_CRITERION_PATTERN.search(reason):
+        errors.append(
+            "GSB 理由只罗列事实，没有交代哪一条是扣分点、最看重什么；结论前用一句话点明，"
+            "例如“这个任务最重要的是并发保存不丢数据”"
+        )
     return errors
 
 
@@ -1488,8 +1514,10 @@ def write_field_guide(task_root: Path, schema: dict[str, Any], values: dict[str,
             "- 有页面的项目和之前一样引用录屏证据；纯后端 API 项目录屏不引用，用验证计划的 probe 接口探活证明问题。",
             "- 描述与理由都直接写“请求了登录接口，返回404”，不写“从录屏来看”“根据编写的测试”“复核结果显示”。",
             "- GSB 理由使用完整、质朴的中文描述，统一写“A 侧方案”“B 侧方案”，不使用省略式单字；每侧称谓最多出现 3 次，相邻两句不要用同一称谓起头，不写 8 字以下的碎句。",
-            "- 结尾前用一句话交代这题最看重哪一条，再给结论；不要只罗列事实后直接宣布胜负。",
-            "- 禁用“闭环”“根因”“落库”；数据写入统一写“入库”；常用命令“npm run build”统一写“build”，避免历史长片段去重；“真实”“真正”“其实”等空泛表达会给出警告。",
+            "- 不写电报体：全文最多 6 句，同一侧的动作和结果用逗号连成一句；结论句之前至少 2 处“结果”“导致”“但”“却”这类因果或转折衔接，让读者一眼看出谁因谁果、哪条是扣分点。",
+            "- 不把两件事压成“先提交标题未更新”这类短语，补上主语和衔接，写成“先提交的一方写进去了，标题却没有更新”。",
+            "- 结尾前用一句话交代这个任务最重要的是哪一条，再给结论；不要只罗列事实后直接宣布胜负。",
+            "- 禁用“闭环”“根因”“落库”，也禁用旧句式“这题”“最要紧”，统一写“这个任务最重要的是”；数据写入统一写“入库”；常用命令“npm run build”统一写“build”，避免历史长片段去重；“真实”“真正”“其实”等空泛表达会给出警告。",
             "- 句子达到高中语文阅读水平，表达通顺；单句非空白字符不得超过 56 字，分句和标点异常会阻断。",
             "- 禁止使用“落在……”式收束句式；结论直接写“因此选择 B 侧方案”或“B 侧方案更好”。",
         ]

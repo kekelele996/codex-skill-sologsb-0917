@@ -489,7 +489,15 @@ class _ContainerLimiter:
         if code and code in excluded:
             return True
         container = str(name or "").casefold()
-        return any(container.startswith(f"sologsb-{item}-") for item in excluded)
+        if container.startswith("sologsb-"):
+            return any(container.startswith(f"sologsb-{item}-") for item in excluded)
+        # 其他工具起的容器没有 sologsb- 前缀，按名字前缀匹配排除项。
+        return any(container == item or container.startswith(f"{item}-") for item in excluded)
+
+    def _count_all_containers(self) -> bool:
+        """监控台托管时可要求把本机所有运行中的容器都计入名额。"""
+        data = read_json(self.config_path, {})
+        return isinstance(data, dict) and bool(data.get("managedBy")) and bool(data.get("countAllContainers"))
 
     @staticmethod
     def _reap_orphan_containers() -> list[str]:
@@ -524,12 +532,15 @@ class _ContainerLimiter:
         return removed
 
     @staticmethod
-    def _running_containers() -> list[tuple[str, str]]:
+    def _running_containers(count_all: bool = False) -> list[tuple[str, str]]:
         """列出正在运行的候选任务容器。
 
-        只看本题型自己创建的候选容器：带 ``sologsb-0917=true`` 标签，或者名字符合
+        默认只看本题型自己创建的候选容器：带 ``sologsb-0917=true`` 标签，或者名字符合
         ``sologsb-<任务>-candidate-<N>-...`` 的历史容器。数据库、验证 clone、监控台
         辅助容器等 ``sologsb-`` 前缀容器都不算任务容器，不占用并发名额。
+
+        ``count_all`` 为真时（监控台 ``countAllContainers``），本机任何运行中的容器
+        都占名额，与其他工具共用同一个整机上限。
         """
         proc = run(
             ["docker", "ps", "--format",
@@ -545,10 +556,13 @@ class _ContainerLimiter:
             name = parts[0].strip() if parts else ""
             label = parts[1].strip() if len(parts) > 1 else ""
             marker = parts[2].strip() if len(parts) > 2 else ""
-            if not name.startswith("sologsb-"):
+            if not name:
                 continue
-            if marker != "true" and not CANDIDATE_CONTAINER_RE.match(name):
-                continue
+            if not count_all:
+                if not name.startswith("sologsb-"):
+                    continue
+                if marker != "true" and not CANDIDATE_CONTAINER_RE.match(name):
+                    continue
             records.append((name, label))
         return records
 
@@ -605,7 +619,7 @@ class _ContainerLimiter:
         """
         limit, excluded, _wait = self._settings()
         try:
-            running = self._running_containers()
+            running = self._running_containers(self._count_all_containers())
         except SologsbError as exc:
             return {"ok": False, "error": str(exc), "limit": limit}
         running_names = {
@@ -666,7 +680,7 @@ class _ContainerLimiter:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                 try:
                     self._reap_orphan_containers()
-                    running = self._running_containers()
+                    running = self._running_containers(self._count_all_containers())
                     running_names = {
                         name for name, label in running
                         if not self._container_is_excluded(name, label, excluded)

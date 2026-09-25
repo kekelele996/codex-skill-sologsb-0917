@@ -970,12 +970,82 @@ def _start_window_segment(
         raise
 
 
+TERMINAL_VISUAL_FRAME_WIDTH = 80
+TERMINAL_VISUAL_FRAME_HEIGHT = 52
+TERMINAL_VISUAL_CROP = "700:500:300:100"
+TERMINAL_VISUAL_MIN_MEAN_STD = 3.0
+
+
+def _terminal_visual_content_metrics(video: Path) -> dict[str, Any]:
+    """Reject blank/static terminal recordings before they can be delivered."""
+    width = TERMINAL_VISUAL_FRAME_WIDTH
+    height = TERMINAL_VISUAL_FRAME_HEIGHT
+    frame_size = width * height
+    command = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        str(video),
+        "-vf",
+        f"fps=4,crop={TERMINAL_VISUAL_CROP},scale={width}:{height}:flags=area,format=gray",
+        "-f",
+        "rawvideo",
+        "-",
+    ]
+    proc = run(command, check=False)
+    if proc.returncode != 0:
+        return {
+            "status": "failed",
+            "ok": False,
+            "error": proc.stderr.decode("utf-8", errors="replace").strip() or "ffmpeg 画面内容检测失败",
+            "minimumMeanStd": TERMINAL_VISUAL_MIN_MEAN_STD,
+        }
+    raw = proc.stdout
+    frame_count = len(raw) // frame_size
+    frames = [raw[i * frame_size:(i + 1) * frame_size] for i in range(frame_count)]
+    if len(frames) < 4:
+        return {
+            "status": "failed",
+            "ok": False,
+            "error": f"有效终端画面帧不足: {len(frames)}",
+            "frameCount": len(frames),
+            "minimumMeanStd": TERMINAL_VISUAL_MIN_MEAN_STD,
+        }
+    mean_stds: list[float] = []
+    frame_diffs: list[float] = []
+    for index, frame in enumerate(frames):
+        values = list(frame)
+        mean = sum(values) / len(values)
+        mean_stds.append((sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5)
+        if index:
+            previous = frames[index - 1]
+            frame_diffs.append(
+                sum(abs(a - b) for a, b in zip(frame, previous)) / frame_size
+            )
+    mean_std = sum(mean_stds) / len(mean_stds)
+    max_diff = max(frame_diffs) if frame_diffs else 0.0
+    ok = mean_std >= TERMINAL_VISUAL_MIN_MEAN_STD
+    return {
+        "status": "ok" if ok else "failed",
+        "ok": ok,
+        "frameCount": len(frames),
+        "meanStd": round(mean_std, 4),
+        "maxFrameDiff": round(max_diff, 4),
+        "minimumMeanStd": TERMINAL_VISUAL_MIN_MEAN_STD,
+        "crop": TERMINAL_VISUAL_CROP,
+        "scale": f"{width}x{height}",
+        "error": "" if ok else "终端录屏没有可辨识内容，疑似空白或未渲染画面",
+    }
+
+
 def _stop_window_segment(
     *,
     raw: Path,
     cropped: Path,
     window_info: dict[str, Any],
     pid_file: Path,
+    require_visible_content: bool = False,
 ) -> None:
     global _ACTIVE_WINDOW_CAPTURE, _ACTIVE_WINDOW_CAPTURE_LOG, _ACTIVE_WINDOW_CAPTURE_WATCHDOG, _ACTIVE_WINDOW_CAPTURE_STARTED
     proc = _ACTIVE_WINDOW_CAPTURE
@@ -1047,6 +1117,18 @@ def _stop_window_segment(
         raise SologsbError(
             transcode.stderr.decode("utf-8", errors="replace") or "窗口视频转码失败"
         )
+    visual_report: dict[str, Any] = {"required": require_visible_content, "status": "skipped", "ok": True}
+    if require_visible_content:
+        visual_report = _terminal_visual_content_metrics(cropped)
+        write_json(
+            cropped.with_name(f"{cropped.stem}-visual-content.json"),
+            visual_report,
+        )
+        if not visual_report.get("ok"):
+            raise SologsbError(
+                "终端录屏画面门禁未通过: "
+                + str(visual_report.get("error") or "没有可辨识内容")
+            )
     metadata_path = raw.with_name(f"{raw.stem}-window-capture.json")
     metadata = read_json(metadata_path, {}) or {}
     backend_ok = (
@@ -1061,6 +1143,7 @@ def _stop_window_segment(
             "finishedAt": utc_now(),
             "outputPath": str(cropped.resolve()),
             "pidFile": str(pid_file.resolve()),
+            "visualContent": visual_report,
         }
     )
     write_json(metadata_path, metadata)
@@ -1595,6 +1678,20 @@ def recording_isolation_ok(
     window_capture_ok = bool(window_capture_reports) and all(
         valid_capture(item) for item in window_capture_reports
     )
+    terminal_visual_ok = True
+    if mode in {"terminal", "failed-start"}:
+        for item in window_capture_reports:
+            report: dict[str, Any] = {}
+            report_path = str(item.get("path") or "").strip()
+            if report_path:
+                report = read_json(Path(report_path), {}) or {}
+            visual = item.get("visualContent") or report.get("visualContent")
+            output_path = str(report.get("outputPath") or item.get("outputPath") or "").strip()
+            if not isinstance(visual, dict) and output_path and Path(output_path).is_file():
+                visual = _terminal_visual_content_metrics(Path(output_path))
+            if not isinstance(visual, dict) or visual.get("ok") is not True:
+                terminal_visual_ok = False
+                break
     owners = {
         "Chrome" if str(item.get("ownerName") or "").strip() == "Google Chrome"
         else str(item.get("ownerName") or "").strip()
@@ -1628,7 +1725,14 @@ def recording_isolation_ok(
             service_cleanup.get("status") == "ok"
             and not (service_cleanup.get("residualAppPortListeners") or [])
         )
-    return targets_ok and window_capture_ok and cursor_ok and frontmost_ok and service_ok
+    return (
+        targets_ok
+        and window_capture_ok
+        and terminal_visual_ok
+        and cursor_ok
+        and frontmost_ok
+        and service_ok
+    )
 
 
 def _copy_final(source: Path, task_root: Path, side: str, output_name: str) -> Path:
@@ -1858,6 +1962,11 @@ def _run_web_otty(
             time.sleep(2.0)
             window_id, pane_id = _otty_open_window(title, Path(str(plan["projectDir"])).resolve())
             _otty_call(["config", "reload", "--json"], check=False)
+            # Otty can create a background window before its first frame is painted.
+            # Prime the pane before capture starts so SCK does not record a stale blank surface.
+            time.sleep(0.6)
+            _otty_send(pane_id, "printf '\\033[2J\\033[H'")
+            time.sleep(0.6)
             window_info = _window_info_by_title(title)
             helper_window_id, _helper_pane_id = _otty_open_window(
                 f"{title}-guard",
@@ -2248,6 +2357,11 @@ def _run_terminal_otty(
         try:
             window_id, pane_id = _otty_open_window(title, Path(str(plan["projectDir"])).resolve())
             _otty_call(["config", "reload", "--json"], check=False)
+            # Otty can create a background window before its first frame is painted.
+            # Prime the pane before capture starts so SCK does not record a stale blank surface.
+            time.sleep(0.6)
+            _otty_send(pane_id, "printf '\\033[2J\\033[H'")
+            time.sleep(0.6)
             window_info = _window_info_by_title(title)
             helper_window_id, _helper_pane_id = _otty_open_window(
                 f"{title}-guard",
@@ -2283,6 +2397,7 @@ def _run_terminal_otty(
                     cropped=cropped,
                     window_info=window_info,
                     pid_file=pid_file,
+                    require_visible_content=True,
                 )
         finally:
             if focus_anchor is not None:
@@ -2470,6 +2585,8 @@ def _record_side_locked(
                 "exitCode": report.get("exitCode"),
                 "readyPath": report.get("readyPath"),
                 "logPath": report.get("logPath"),
+                "outputPath": report.get("outputPath"),
+                "visualContent": report.get("visualContent"),
             }
         )
     chrome_profile_cleanup = read_json(runtime_dir / "chrome-profile-cleanup.json", {}) or {}
