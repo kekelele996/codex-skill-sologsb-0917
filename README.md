@@ -49,6 +49,8 @@ git clone <本仓库地址> ~/.codex/skills/sologsb-0917
 python3 ~/.codex/skills/sologsb-0917/scripts/configure.py wizard   # 配置该设备凭据并联网验证
 ```
 
+GitHub 相关调用固定走 Clash Verge 混合代理，默认地址为 `127.0.0.1:7897`；不可用时按门禁停止，不回退直连。
+
 ### 日常更新
 
 ```bash

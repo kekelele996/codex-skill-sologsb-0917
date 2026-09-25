@@ -30,6 +30,7 @@ from common import (
     atomic_copy,
     command_exists,
     commit_url,
+    github_env,
     is_lockfile,
     load_git_identity,
     mutate_state,
@@ -1112,7 +1113,7 @@ def _atomic_publish(task_root: Path, state: dict[str, Any], sides: dict[str, dic
         repo = _side_workspace(task_root, {**sides[side], "side": side})
         _git(origin, "fetch", str(repo), f"HEAD:refs/remotes/sologsb-local/{side}")
 
-    token_proc = run(["gh", "auth", "token"])
+    token_proc = run(["gh", "auth", "token"], env=github_env(require_proxy=True))
     token = token_proc.stdout.decode().strip()
     owner = str(state.get("owner") or "")
     if not token or not owner:
@@ -1135,7 +1136,7 @@ def _atomic_publish(task_root: Path, state: dict[str, Any], sides: dict[str, dic
             "A/B 原子推送失败，远端分支未发布: "
             + push.stderr.decode("utf-8", errors="replace")
         )
-    remote = _git(origin, "ls-remote", "--heads", "origin").stdout.decode().splitlines()
+    remote = _git(origin, "ls-remote", "--heads", "origin", env=env).stdout.decode().splitlines()
     remote_heads = {
         line.split("refs/heads/", 1)[1]: line.split()[0]
         for line in remote if "refs/heads/" in line

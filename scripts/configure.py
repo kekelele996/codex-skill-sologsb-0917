@@ -307,18 +307,19 @@ def verify_github(cfg: dict) -> Result:
     proxy_http = dc.resolve_from(cfg, "github.proxyHttp") or ""
     proxy_socks = dc.resolve_from(cfg, "github.proxySocks") or ""
     candidates = []
-    if proxy_http:
-        candidates.append(f"http://{proxy_http}" if "://" not in proxy_http else proxy_http)
-    if proxy_socks:
-        candidates.append(f"socks5h://{proxy_socks}" if "://" not in proxy_socks else proxy_socks)
-    candidates.append("")  # 最后兜底直连，仅用于给出明确错误
+    for raw, scheme in ((proxy_http, "http"), (proxy_socks, "socks5h")):
+        proxy = dc.proxy_url(raw, default_scheme=scheme)
+        if proxy and proxy not in candidates:
+            candidates.append(proxy)
+    if not candidates:
+        return Result("github", False, "未配置 Clash Verge GitHub 代理")
 
     last = ""
     saw_transient = False
     for proxy in candidates:
         status, body, headers = curl_json("https://api.github.com/user", token=token,
                                           proxy=proxy, timeout=TIMEOUT_GITHUB)
-        label = proxy or "直连"
+        label = proxy
         if status == 200:
             try:
                 login = json.loads(body).get("login", "?")
@@ -663,10 +664,15 @@ def section_solo2(cfg: dict, path: Path, *, advanced: bool = False) -> None:
 def section_github(cfg: dict, path: Path, *, advanced: bool = False) -> None:
     _rule(SECTION_TITLES["github"])
     print("  产物要推送到 GitHub，需要一个有 repo 权限的 Token。")
+    print("  GitHub 网络固定走 Clash Verge 混合代理 127.0.0.1:7897。")
     prompt_field(cfg, "github.token", "GitHub Token", secret=True)
     if advanced:
         prompt_field(cfg, "github.proxyHttp", "HTTP 代理", default=dc.FIELDS["github.proxyHttp"][1])
         prompt_field(cfg, "github.proxySocks", "SOCKS 代理", default=dc.FIELDS["github.proxySocks"][1])
+    for field, scheme in (("github.proxyHttp", "http"), ("github.proxySocks", "socks5h")):
+        value = dc.resolve_from(cfg, field)
+        if value:
+            dc.set_path(cfg, field, dc.proxy_url(value, default_scheme=scheme))
     dc.save(cfg, path)
 
 
