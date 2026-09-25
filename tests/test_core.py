@@ -2964,6 +2964,52 @@ class ContainerLimitTests(unittest.TestCase):
             self.assertNotIn("ld427-db", status["runningNames"])
 
 
+class ContainerImageTests(unittest.TestCase):
+    def test_default_image_matches_device_config_default(self) -> None:
+        import device_config as dc
+
+        self.assertEqual(dc.FIELDS["claude.image"][1], "adminfather/benzhi-claude-code2:20260919")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SOLOSB_DOCKER_IMAGE", None)
+            reloaded = importlib.reload(side_runner)
+            try:
+                self.assertEqual(reloaded.DEFAULT_IMAGE, dc.FIELDS["claude.image"][1])
+            finally:
+                importlib.reload(side_runner)
+
+    def test_start_container_does_not_depend_on_image_entrypoint_or_base_url(self) -> None:
+        # 新镜像的 entrypoint 放宽了 /workspace 非空检查，并内置了自己的 ANTHROPIC_BASE_URL；
+        # 运行器必须绕过 entrypoint、显式传入 Base URL，才不受镜像差异影响。
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "ws"
+            attempt = root / "attempt"
+            workspace.mkdir()
+            attempt.mkdir()
+            captured: list[list[str]] = []
+
+            def fake_run(cmd, **_kwargs):
+                captured.append(list(cmd))
+                return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+            slot = mock.Mock()
+            with mock.patch.object(side_runner, "run", side_effect=fake_run), \
+                    mock.patch.object(side_runner, "_docker_running", return_value=True), \
+                    mock.patch.object(side_runner, "task_project_code", return_value=""), \
+                    mock.patch.object(side_runner._CONTAINER_LIMITER, "acquire", return_value=slot):
+                info = side_runner._start_container(
+                    task_root=root, side="candidate-1", attempt_dir=attempt,
+                    workspace=workspace, secret="s", base_url="https://relay.example",
+                )
+            cmd = captured[0]
+            self.assertEqual(cmd[cmd.index("--entrypoint") + 1], "/bin/bash")
+            self.assertEqual(cmd[cmd.index("--entrypoint") + 2], side_runner.DEFAULT_IMAGE)
+            self.assertIn("ANTHROPIC_BASE_URL=https://relay.example", cmd)
+            self.assertIn("--cap-drop", cmd)
+            self.assertFalse(any("docker.sock" in part for part in cmd))
+            self.assertEqual(info["image"], side_runner.DEFAULT_IMAGE)
+
+
 class VersionTests(unittest.TestCase):
     """全局版本号只有一个来源：根目录 VERSION。"""
 

@@ -164,6 +164,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - Claude API Key 与 LLM Base URL
 - 最大并发容器 `claude.maxContainers`（默认 4，绝对上限 6）
+- 容器镜像 `claude.image`（默认 `adminfather/benzhi-claude-code2:20260919`：原生镜像，只带 Node 20 / Python 3.11（无 pip）/ git / Claude Code 2.1.197，不含 Go、JDK、Maven、Gradle、pnpm，也不含 docker；运行器以 `--entrypoint /bin/bash` 启动并显式传入 Base URL，不依赖镜像自带的 entrypoint 与 `ANTHROPIC_BASE_URL`）
 - Solo Manager 地址、账号、密码
 - SOLO2 地址、账号、密码
 - GitHub Token 与 Loon 代理

@@ -49,7 +49,7 @@ from trace_validator import validate_single_round
 
 DEFAULT_IMAGE = os.environ.get(
     "SOLOSB_DOCKER_IMAGE",
-    "adminfather/benzhi-claude-code:20260916-toolchains-v2",
+    "adminfather/benzhi-claude-code2:20260919",
 )
 DEFAULT_MODEL = os.environ.get("SOLOSB_MODEL", "auto_model/urm")
 DEFAULT_ANTHROPIC_BASE_URL = ""
