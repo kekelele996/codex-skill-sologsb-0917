@@ -1221,6 +1221,21 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(event["action"], "restore-user-app")
         self.assertTrue(event["restored"])
 
+    def test_visible_command_gate_blocks_credential_output(self) -> None:
+        recorder.assert_visible_commands_safe({
+            "startCommand": "pnpm dev --host 127.0.0.1",
+            "commands": ["curl -s http://127.0.0.1:3000/api/items", "cp .env.example .env.local && ls"],
+            "apiRequests": [{"url": "http://127.0.0.1:3000/api", "headers": {"Authorization": "Bearer test-token"}}],
+        })
+        for bad in ["cat .env", "printenv", "env | grep KEY", "cat ~/.codex/sologsb/config.json",
+                    "echo $SOLOSB_CLAUDE_KEY", "curl -H 'x: sk-ant-abcdefghijklmnopqrstu' x",
+                    "history"]:
+            with self.assertRaisesRegex(SologsbError, "录进视频"):
+                recorder.assert_visible_commands_safe({"startCommand": "pnpm dev", "commands": [bad]})
+        with self.assertRaisesRegex(SologsbError, "Key/Token"):
+            recorder.assert_visible_commands_safe({"startCommand": "pnpm dev", "apiRequests": [
+                {"url": "http://127.0.0.1/x", "headers": {"Authorization": "Bearer ghp_abcdefghijklmnopqrstuvwxyz"}}]})
+
     def test_terminal_title_gate_rejects_process_arguments(self) -> None:
         self.assertTrue(_terminal_title_is_clean("sologsb \u2014 sologsb"))
         self.assertTrue(_terminal_title_is_clean("sologsb"))

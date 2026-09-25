@@ -43,6 +43,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 网关 429 `max_parallel_requests` 属于准入失败：正式候选运行前先等待最小 `/v1/messages` 探测成功；发生最终 429 后不要立即重启新容器，先等待 Key 恢复。恢复后仍按红线使用新容器、新 Claude home 和新 SessionID，实际尝试次数照记。
 - pnpm fresh clone 固定按“安装失败留证 → `pnpm approve-builds --all` → 再次安装 → 构建”顺序处理。
 - Web 录屏先确认默认 Tab、当前用户和重复卡片选择器；同名操作按钮使用卡片范围或 `.last()`；同时清除 Chrome 登录/同步/密码/通知等浮层与终端多网卡干扰行。
+- 录屏画面内容红线：终端不得展示凭据、`.env`、环境变量或任务目录外文件，Chrome 只访问本地被测应用；原生弹窗（alert/confirm、文件选择、原生下拉、右键菜单）拍不到，关键验收步骤不得依赖它们，详见 `references/recording.md`「画面内容约束」。
 - 录屏必须使用窗口级后台模式：先用 Quartz 定位 Terminal.app/Chrome 的数字 `CGWindowID`，再调用 ScreenCaptureKit 的 `SCContentFilter(desktopIndependentWindow:)` 和 `SCRecordingOutput` 采集；必须设置 `showsCursor=false`、`showMouseClicks=false`、`capturesAudio=false`。全程不激活、不置前、不最小化录制窗口。开录瞬间必须复核窗口仍在当前 Space 且 `ownerPid + ownerName` 未变化，找不到就停机。
 - 具体踩坑记录见 `references/lessons-learned-20260917.md` 与 `references/lessons-learned-20260925-terminal-app.md`（切换 Terminal.app）。
 

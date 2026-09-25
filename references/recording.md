@@ -130,6 +130,24 @@
 - 录制器不得读取、最小化、激活、移动或恢复 ChatGPT 窗口，也不得把 ChatGPT 状态写入录屏门禁。
 - 窗口白名单：Web 题只允许 Terminal.app/Google Chrome，纯终端题只允许 Terminal.app。
 
+## 画面内容约束
+
+窗口级采集保证不会串录其他应用，但**录制窗口自身显示的内容会原样进入视频**，这部分由录屏计划和 scenario 负责：
+
+- 终端只执行与验收路径相关的命令。禁止 `cat`/`less`/`head` 等方式展示 `.env`、密钥、token、`~/.codex/sologsb/config.json`、
+  SSH/云凭据或任何本任务目录以外的文件；禁止 `env`、`printenv`、`set`、`history` 以及会回显环境变量或凭据的命令。
+- 启动命令、curl 请求头和请求体中不得出现真实平台 Key/Token（Claude/OpenAI/GitHub/GitLab/AWS 等）；需要鉴权时只用被测应用的本地测试账号，
+  优先用登录接口 + `extractName` 取 token，而不是把长 token 写死在计划里。
+- 服务日志若会打印连接串、密钥或绝对路径，先在 `preflightCommands` 中通过配置或环境变量关闭相应输出，再开录。
+- Chrome 只访问本地回环地址上的被测应用，不打开外部站点、账号页、`chrome://` 设置页或下载内容。
+- 原生弹窗不会进视频：`alert/confirm/prompt`、文件选择框、打印框、权限询问、原生 `<select>` 下拉以及右键菜单都是独立窗口，
+  窗口级采集拍不到，视频里只会缺这一段（不是串录）。scenario 不得把关键验收步骤放在这些弹窗上：
+  - `alert/confirm/prompt` 用 Playwright `page.on('dialog')` 自动处理，并在页面内可见区域体现结果；
+  - 原生 `<select>` 用 `selectOption()`，等待选中后的可见文本变化，不展示展开的下拉；
+  - 需要上传文件时用 `setInputFiles()`，不打开系统文件选择框；
+  - 应用内（DOM 渲染）的模态框、下拉组件、Toast 属于页面内容，可以正常录制。
+- 开录前和收尾后都要确认终端 scrollback 已清空、页面没有残留上一次运行的数据。
+
 ## 鼠标指针处理
 
 - 录制器不得干扰用户鼠标。禁止移动、停靠、恢复指针，禁止查询鼠标按键，也禁止调用任何会改变鼠标位置的系统接口。

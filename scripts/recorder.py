@@ -2460,6 +2460,30 @@ def _api_request_shell(item: dict[str, Any], timeout: float = 20.0) -> str:
     return " ".join(parts)
 
 
+# Commands typed into the recorded Terminal show up verbatim in the video, so
+# anything that would print credentials or env vars is refused up front.
+VISIBLE_COMMAND_DENYLIST = (
+    (re.compile(r"(?:^|[\s;&|(])(?:env|printenv|set|export\s+-p|history)(?:\s*$|\s*[;&|)])"), "打印环境变量或历史命令"),
+    (re.compile(r"\b(?:cat|less|more|head|tail|bat|nl|grep|rg|awk|sed|strings|xxd|od|jq)\b[^;&|]*(?:^|/|\s)\.env(?:\.[\w.-]+)?(?:\s|$|[;&|)'\"])"), "显示 .env 文件内容"),
+    (re.compile(r"\.codex/sologsb|\.ssh/|\.aws/|\.kube/|\.netrc|\.npmrc|\.git-credentials|id_rsa|id_ed25519"), "读取凭据文件"),
+    (re.compile(r"(?i)\b(?:sk-(?:ant-)?[\w-]{16,}|ghp_\w{20,}|glpat-[\w-]{16,}|AKIA[0-9A-Z]{16})"), "明文 Key/Token"),
+    (re.compile(r"\$\{?(?:SOLOSB_CLAUDE_KEY|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|OPENAI_API_KEY|GITHUB_TOKEN)\b"), "回显凭据环境变量"),
+)
+
+
+def assert_visible_commands_safe(plan: dict[str, Any]) -> None:
+    visible = [str(plan.get("startCommand") or ""), *[str(item) for item in plan.get("commands") or []]]
+    for request in plan.get("apiRequests") or []:
+        if isinstance(request, dict):
+            visible.append(str(request.get("url") or ""))
+            visible.extend(f"{key}: {value}" for key, value in (request.get("headers") or {}).items())
+            visible.append(json.dumps(request.get("body"), ensure_ascii=False))
+    for command in visible:
+        for pattern, reason in VISIBLE_COMMAND_DENYLIST:
+            if pattern.search(command):
+                raise SologsbError(f"录屏终端命令会{reason}，画面会原样录进视频，请修改录制计划: {command[:120]}")
+
+
 def _terminal_command(plan: dict[str, Any], log_path: Path, script_path: Path, result_path: Path) -> str:
     start = str(plan.get("startCommand") or "").strip()
     if not start:
@@ -2889,6 +2913,7 @@ def record_side(
     draft = read_json(plan_path, {})
     if "<" in str(draft.get("startCommand") or "") or "TODO" in str(draft.get("startCommand") or ""):
         raise SologsbError(f"请先完善录制脚本: {plan_path}")
+    assert_visible_commands_safe(draft)
     _run_recording_preflight(task_root, side, draft, key="buildCommands", stage="build")
     with global_recording_lock(task_root, side=side, timeout=lock_timeout) as lock_metadata:
         # The lock wait can be long; saving the pre-wait snapshot later would
