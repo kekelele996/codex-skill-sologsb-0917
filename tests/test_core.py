@@ -992,6 +992,29 @@ class ReasonFlowTests(unittest.TestCase):
         self.assertTrue(any("扣分点" in item for item in reason_flow_errors(reason)))
 
 
+    def test_subjectless_opener_and_form_option_block(self) -> None:
+        reason = (
+            "检查提交流程里的迁移脚本与快照表改动后，Go二进制、Vite产物和镜像均生成成功。"
+            "A 侧方案首次启动时examinees表约束名不匹配，删除唯一约束返回错误码42704导致容器持续退出。"
+            "B 侧方案首次启动时migrateAndSeed删users旧约束，让服务终止且Web入口没有监听。"
+            "这个任务最重要的是程序能否启动，两边都卡在数据库迁移，实际持平，所以选Same。"
+        )
+        errors = reason_flow_errors(reason)
+        self.assertTrue(any("“检查”起头" in item for item in errors), errors)
+        self.assertTrue(any("打平" in item for item in reason_style_errors("两侧卡在同一处，因此两侧打平。")))
+
+    def test_natural_same_reason_passes(self) -> None:
+        reason = (
+            "A 侧方案检查了迁移脚本和快照表的改动，前后端编译和镜像构建都成功了。"
+            "但首次启动时删除examinees表的唯一约束，找不到对应的约束名，容器反复退出。"
+            "结果登记页面和结果页面都打不开，快照功能没法在运行中确认。"
+            "B 侧方案核对过数据模型和版本历史，构建同样通过，可是migrateAndSeed删除users表旧约束也出错了。"
+            "这个任务最重要的是程序能不能跑起来，两侧都卡在数据库迁移，服务都没起来，因此选择Same。"
+        )
+        self.assertEqual(reason_flow_errors(reason), [])
+        self.assertEqual(reason_language_errors(reason), [])
+
+
 class DeliverySubmissionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

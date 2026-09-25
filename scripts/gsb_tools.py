@@ -112,6 +112,12 @@ REASON_MIN_LINK_WORDS = 2
 REASON_LINK_PATTERN = re.compile(
     r"(?:因为|由于|所以|因而|于是|结果|导致|以致|使得|这样一来|这就|但是|但|不过|可是|却|而是|只要|一旦|否则|才)"
 )
+# 2026-09-25 起：为了避开“相邻句同称谓起头”，理由出现“检查……后，……”这类无主语句，
+# 读者分不清是哪一侧做的。打平统一写“Same”，但“选A”“选B”这类选项代号不进正文。
+REASON_SUBJECTLESS_OPENER = re.compile(
+    r"^(?:检查|核对|读取|阅读|查看|查阅|梳理|比对|运行|执行|调用|修改|编辑|调整|排查|定位|验证|构建|启动|安装|补充|补齐|新增|删除|实现)"
+)
+REASON_FORM_OPTION_PATTERN = re.compile(r"选\s*[AB](?![A-Za-z\s]*侧)")
 # “并发保存先提交标题未更新”一类：省掉主语和衔接，把两件事压成一个短语，要回读才懂。
 REASON_COMPRESSED_CLAUSE = re.compile(r"先[\u4e00-\u9fffA-Za-z0-9]{1,8}未[\u4e00-\u9fff]{1,6}")
 REASON_FLUENCY_PATTERNS = (
@@ -125,9 +131,10 @@ REASON_FLUENCY_PATTERNS = (
         ),
     ),
     (
+        # “都成功了。”“出错了。”是口语复盘最自然的收尾，不算残句（2026-09-25）。
         "残句结尾",
         re.compile(
-            r"(?:的|了|和|与|及|而|但|因为|由于|如果|当|在|从|对|把|被|为|是|就|都|还|也|很|更|最|可以|能够|需要|应该|必须)[。！？!?]$"
+            r"(?:的|和|与|及|而|但|因为|由于|如果|当|在|从|对|把|被|为|是|就|都|还|也|很|更|最|可以|能够|需要|应该|必须)[。！？!?]$"
         ),
     ),
 )
@@ -216,6 +223,20 @@ def reason_flow_errors(reason: str) -> list[str]:
             )
             break
         previous = label
+    for index, sentence in enumerate(sentences, 1):
+        opener = REASON_SUBJECTLESS_OPENER.match(sentence)
+        if opener:
+            errors.append(
+                f"GSB 理由第 {index} 句以“{opener.group(0)}”起头，没有交代是哪一侧做的，"
+                "读者会把它算到上一侧；换侧时句首写明称谓，同一侧接着说用“随后”“它”承接"
+            )
+            break
+    form_option = REASON_FORM_OPTION_PATTERN.search(reason)
+    if form_option:
+        errors.append(
+            f"GSB 理由把表单选项“{form_option.group(0)}”写进了正文；结论用中文说，"
+            "例如“因此选择Same”“因此选择 B 侧方案”"
+        )
     for label in REASON_LABELS:
         count = reason.count(label)
         if count > REASON_MAX_LABEL_MENTIONS:
@@ -1224,7 +1245,7 @@ def validate_draft(draft: dict[str, Any], task_root: Path, *, review_path: Path)
             errors.append(f"GSB 理由必须使用完整表述“{full_label}”，禁止省略式单字")
         if not re.search(rf"\b{side}\b|[（(]{side}[）)]|{side}侧|{side}的表现|{side}跑", reason):
             errors.append(f"GSB 理由没有明确覆盖 {side}")
-    if verdict == "Same" and not re.search(r"等价|抵消|持平|无明显差异|难分高下", reason):
+    if verdict == "Same" and not re.search(r"Same|等价|抵消|持平|无明显差异|难分高下", reason):
         errors.append("Same 必须写明等价点和相互抵消项")
     errors.extend(_validate_reason_layer_coverage(draft, reason))
     errors.extend(_validate_sentence_evidence(reason, draft, evidence_doc))
