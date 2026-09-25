@@ -25,3 +25,12 @@
   现在改为对照本次录制累计的全部 `recording_pids`。
 - **报告汇总串目录**：旧的 `recording/<side>/web-otty/` 残留会被 `rglob` 一起汇总进来，导致白名单
   判为 {Otty, Terminal, Chrome} 而失败。现在汇总范围限定在本次的 `runtime_dir`。
+
+## 画面清晰度（分辨率保持 1280x720）
+
+- 模糊的根源是**多次有损编码**：片段转码（crf20 veryfast）→ 拼接（ffmpeg 默认 crf23）→ 成片（crf20 veryfast），
+  每过一次，UI 文字边缘就糊一层；缩放也用的是默认 bicubic。现在中间产物用 crf10，只有成片用
+  `preset slow / crf 16 / tune animation`，缩放统一用 lanczos（`VIDEO_SCALE_FILTER`、`*_X264_ARGS`）。
+  同一份原始录制，与无损 lanczos 参考相比，PSNR 44.8→55.0 dB，40 秒成片约 360KB→630KB。
+- Chrome 窗口由 1440x900（16:10）改为 1440x810（16:9）：2x 采集得到 2880x1620，正好 2.25 倍缩到
+  1280x720，两边不再有黑边，网页有效宽度从 1136 像素增加到 1280 像素，CSS 宽度不变，页面布局不受影响。

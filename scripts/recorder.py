@@ -43,13 +43,22 @@ CHECK_ENV = RECORDER_DIR / "scripts" / "check_environment.sh"
 BROWSER_DRIVER = RECORDER_DIR / "scripts" / "human_browser_driver.cjs"
 CHROME_BINARY = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 CHROME_BUNDLE_ID = "com.google.Chrome"
-CHROME_WINDOW_BOUNDS = (40, 40, 1440, 900)
+# 16:9 so the 2x capture (2880x1620) fills 1280x720 without pillarboxing.
+CHROME_WINDOW_BOUNDS = (40, 40, 1440, 810)
 TERMINAL_BUNDLE_ID = "com.apple.Terminal"
 # Quartz reports the localized process name, e.g. "终端" on a Chinese system.
 TERMINAL_OWNER_NAMES = {"Terminal", "终端"}
 TERMINAL_PROFILE_NAME = "sologsb"
 # AppleScript bounds: left, top, right, bottom.
 TERMINAL_WINDOW_BOUNDS = (40, 40, 1320, 760)
+# Every lossy pass smears UI text, so intermediates are near-lossless and only the
+# final file uses the delivery CRF; lanczos keeps glyph edges crisp when downscaling.
+VIDEO_SCALE_FILTER = (
+    "scale=1280:720:force_original_aspect_ratio=decrease:flags=lanczos,"
+    "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+)
+INTERMEDIATE_X264_ARGS = ["-c:v", "libx264", "-preset", "fast", "-crf", "10", "-tune", "animation", "-pix_fmt", "yuv420p"]
+FINAL_X264_ARGS = ["-c:v", "libx264", "-preset", "slow", "-crf", "16", "-tune", "animation", "-pix_fmt", "yuv420p"]
 TERMINAL_OSASCRIPT_TIMEOUT = 20.0
 TERMINAL_APP = "terminal"
 TERMINAL_APP_ALIASES = {"", "terminal", "terminal.app", "otty"}
@@ -1264,17 +1273,9 @@ def _stop_window_segment(
             "-i",
             str(raw),
             "-vf",
-            "scale=1280:720:force_original_aspect_ratio=decrease,"
-            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30",
+            f"{VIDEO_SCALE_FILTER},fps=30",
             "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
+            *INTERMEDIATE_X264_ARGS,
             "-movflags",
             "+faststart",
             str(cropped),
@@ -1366,12 +1367,9 @@ def _concat_segments(parts: list[Path], output: Path) -> None:
         cmd += ["-i", str(part)]
     filters = []
     for index in range(len(parts)):
-        filters.append(
-            f"[{index}:v]scale=1280:720:force_original_aspect_ratio=decrease,"
-            f"pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30[v{index}]"
-        )
+        filters.append(f"[{index}:v]{VIDEO_SCALE_FILTER},fps=30[v{index}]")
     concat = "".join(f"[v{index}]" for index in range(len(parts))) + f"concat=n={len(parts)}:v=1:a=0[out]"
-    proc = run([*cmd, "-filter_complex", ";".join([*filters, concat]), "-map", "[out]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output)], check=False)
+    proc = run([*cmd, "-filter_complex", ";".join([*filters, concat]), "-map", "[out]", *INTERMEDIATE_X264_ARGS, "-movflags", "+faststart", str(output)], check=False)
     if proc.returncode != 0:
         raise SologsbError(proc.stderr.decode("utf-8", errors="replace") or "视频片段拼接失败")
 
@@ -1911,9 +1909,8 @@ def _copy_final(source: Path, task_root: Path, side: str, output_name: str) -> P
     proc = run(
         [
             "ffmpeg", "-y", "-v", "error", "-i", str(source),
-            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1",
-            "-r", "30", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temp),
+            "-vf", VIDEO_SCALE_FILTER,
+            "-r", "30", "-an", *FINAL_X264_ARGS, "-movflags", "+faststart", str(temp),
         ],
         check=False,
     )

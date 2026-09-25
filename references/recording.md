@@ -121,7 +121,7 @@
   避免异常场景无限占用录屏。
 - Web 题的 Terminal 与 Chrome 分别按各自窗口 ID 采集，再拼接成最终视频。不得用同一窗口 ID、PID 粗匹配或标题猜测替代实际目标窗口 ID。
 - Web 题 Chrome 直接运行 `Google Chrome.app/Contents/MacOS/Google Chrome`（不经 `open`/LaunchServices，避免激活），带 `--no-startup-window`，
-  再通过 CDP `Target.createTarget {newWindow:true, background:true}` 在后台创建 1440x900 录制窗口。
+  再通过 CDP `Target.createTarget {newWindow:true, background:true}` 在后台创建 1440x810（16:9）录制窗口，2x 采集后正好铺满 1280x720，无黑边。
 - Web 题 Chrome 必须增加 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`；浏览器驱动传 `HUMAN_BROWSER_KEEP_FRONT=0`，默认值仍为保持旧行为的 `1`。
 - 录制期间每秒采样最前普通窗口并写 `frontmost-window-monitor.json`。录制窗口在最前的采样数必须为 0；非零时该侧 `ok=false`。
 
