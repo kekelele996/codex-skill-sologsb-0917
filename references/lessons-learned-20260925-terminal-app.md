@@ -34,3 +34,14 @@
   同一份原始录制，与无损 lanczos 参考相比，PSNR 44.8→55.0 dB，40 秒成片约 360KB→630KB。
 - Chrome 窗口由 1440x900（16:10）改为 1440x810（16:9）：2x 采集得到 2880x1620，正好 2.25 倍缩到
   1280x720，两边不再有黑边，网页有效宽度从 1136 像素增加到 1280 像素，CSS 宽度不变，页面布局不受影响。
+
+## 防串录实测（2026-09-25）
+
+- 录制器用 `SCContentFilter(desktopIndependentWindow:)`，只采集目标窗口自己的画面，不采集屏幕合成后的结果；
+  同时 `capturesAudio=false`、`showsCursor=false`。
+- 对抗实验：Terminal 窗口录制期间，另起一个进程放置悬浮的洋红色窗口，盖住目标窗口左半边（经 CGWindowList
+  前后顺序确认确实在其上方），同时弹出一条系统通知。逐帧扫描 64 帧，洋红像素数为 0；被遮住的区域照样录到了
+  Terminal 自己的内容，通知也没有出现。
+- 窗口来源：Terminal 窗口 ID 由创建它的 AppleScript 直接返回；Chrome 窗口按本次启动的进程 pid 选取（该进程
+  使用独立的临时 `--user-data-dir`，与用户自己的 Chrome 不是同一进程）。录制前按 owner 白名单校验，
+  SCK 就绪文件里的 windowId 也必须与之一致。
