@@ -6,6 +6,7 @@ import http.server
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import time
 import unittest
 import urllib
 import zipfile
+from typing import Any
 from collections import UserDict
 from unittest import mock
 from pathlib import Path
@@ -76,14 +78,18 @@ from semantic_review import validate_review  # noqa: E402
 import side_runner  # noqa: E402
 from recorder import default_plan, prepare_recording, recording_output_name  # noqa: E402
 from recorder import (  # noqa: E402
-    _capture_otty_pane_text,
+    _canonical_owner,
+    _capture_terminal_text,
+    _chrome_command,
     _copy_final,
     _ensure_sck_recorder,
     _MouseCursorGuard,
     SCK_RECORDER_SOURCE,
     normalize_pointer_strategy,
-    _otty_open_window,
     _recording_service_ports,
+    _terminal_close_window,
+    _terminal_open_window,
+    normalize_terminal_app,
     _require_window_id,
     _validate_recording_window,
     recording_isolation_ok,
@@ -1061,7 +1067,7 @@ class VideoTests(unittest.TestCase):
             {
                 "kCGWindowNumber": 6457,
                 "kCGWindowOwnerPID": 768,
-                "kCGWindowOwnerName": "Otty",
+                "kCGWindowOwnerName": "终端",
                 "kCGWindowName": "sologsb-a",
                 "kCGWindowLayer": 0,
                 "kCGWindowBounds": {"X": 10, "Y": 20, "Width": 1280, "Height": 720},
@@ -1078,7 +1084,7 @@ class VideoTests(unittest.TestCase):
             {
                 "kCGWindowNumber": 6457,
                 "kCGWindowOwnerPID": 768,
-                "kCGWindowOwnerName": "Otty",
+                "kCGWindowOwnerName": "终端",
                 "kCGWindowName": "sologsb-a",
                 "kCGWindowLayer": 0,
                 "kCGWindowBounds": UserDict(
@@ -1094,14 +1100,14 @@ class VideoTests(unittest.TestCase):
         expected = {
             "windowId": 6457,
             "ownerPid": 768,
-            "ownerName": "Otty",
+            "ownerName": "终端",
             "windowName": "sologsb-a",
             "bounds": "10,20,1280,720",
         }
         live = {
             "kCGWindowNumber": 6457,
             "kCGWindowOwnerPID": 768,
-            "kCGWindowOwnerName": "Otty",
+            "kCGWindowOwnerName": "终端",
             "kCGWindowName": "sologsb-a",
             "kCGWindowIsOnscreen": True,
             "kCGWindowLayer": 0,
@@ -1141,20 +1147,82 @@ class VideoTests(unittest.TestCase):
             self.assertFalse(report["mouseButtonsQueried"])
             self.assertFalse(report["parkApplied"])
 
-    def test_web_mode_captures_real_otty_pane_text(self) -> None:
+    def test_web_mode_captures_real_terminal_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "terminal.log"
-            proc = subprocess.CompletedProcess(
-                args=["otty-cli"],
-                returncode=0,
-                stdout=b"server ready\nGET /api/items 200\n",
-                stderr=b"",
-            )
-            with mock.patch("recorder._otty_call", return_value=proc) as call:
-                text = _capture_otty_pane_text("pane-1", output, lines=400)
+            with mock.patch(
+                "recorder._terminal_history",
+                return_value="sologsb app % pnpm dev\nserver ready\nGET /api/items 200",
+            ) as history:
+                text = _capture_terminal_text(4242, output)
             self.assertIn("GET /api/items 200", text)
-            self.assertIn("GET /api/items 200", output.read_text(encoding="utf-8"))
-            self.assertIn("--lines", call.call_args.args[0])
+            self.assertTrue(output.read_text(encoding="utf-8").endswith("200\n"))
+            history.assert_called_once_with(4242)
+            with mock.patch("recorder._terminal_history", return_value="  \n"):
+                with self.assertRaisesRegex(SologsbError, "无法抓取 Terminal 窗口文本"):
+                    _capture_terminal_text(4242, Path(temp) / "empty.log")
+
+    def test_terminal_close_waits_for_tty_processes_before_closing(self) -> None:
+        events: list[str] = []
+        remaining = [[101, 102], [101, 102], [], [], []]
+
+        def fake_pids(_tty: str) -> list[int]:
+            pids = remaining.pop(0) if remaining else []
+            events.append(f"pids:{len(pids)}")
+            return pids
+
+        def fake_kill(pid: int, sig: int) -> None:
+            events.append(f"kill:{pid}:{int(sig)}")
+
+        def fake_osascript(script: str, *args: str, **_kwargs: Any) -> str:
+            events.append("close")
+            self.assertIn("close (every window whose id is", script)
+            self.assertEqual(args, ("4242",))
+            return ""
+
+        with mock.patch("recorder._tty_user_pids", side_effect=fake_pids), \
+                mock.patch("recorder.os.kill", side_effect=fake_kill), \
+                mock.patch("recorder._osascript", side_effect=fake_osascript):
+            self.assertTrue(_terminal_close_window(4242, "/dev/ttys009"))
+        self.assertEqual(events[-1], "close")
+        self.assertLess(events.index(f"kill:101:{int(signal.SIGTERM)}"), events.index("close"))
+
+    def test_terminal_close_refuses_while_processes_survive(self) -> None:
+        with mock.patch("recorder._tty_user_pids", return_value=[101]), \
+                mock.patch("recorder.os.kill"), \
+                mock.patch("recorder.time.sleep"), \
+                mock.patch("recorder._osascript") as osascript:
+            self.assertFalse(_terminal_close_window(4242, "/dev/ttys009"))
+        osascript.assert_not_called()
+
+    def test_terminal_open_failure_closes_orphan_windows(self) -> None:
+        window_ids = [{10}, {10, 4242}]
+        with mock.patch("recorder._terminal_window_ids", side_effect=lambda: window_ids.pop(0)), \
+                mock.patch("recorder._osascript", side_effect=SologsbError("osascript 超时(20s)")), \
+                mock.patch("recorder._terminal_close_window") as close_window:
+            with self.assertRaisesRegex(SologsbError, "osascript 超时"):
+                _terminal_open_window("sologsb-late-window")
+        close_window.assert_called_once_with(4242)
+
+    def test_terminal_app_normalization_maps_legacy_otty(self) -> None:
+        self.assertEqual(normalize_terminal_app(""), "terminal")
+        self.assertEqual(normalize_terminal_app("otty"), "terminal")
+        self.assertEqual(normalize_terminal_app("Terminal"), "terminal")
+        with self.assertRaisesRegex(SologsbError, "terminalApp=terminal"):
+            normalize_terminal_app("iterm2")
+        self.assertEqual(_canonical_owner("终端"), "Terminal")
+        self.assertEqual(_canonical_owner("ターミナル", "com.apple.Terminal"), "Terminal")
+        self.assertEqual(_canonical_owner("Google Chrome"), "Chrome")
+        self.assertEqual(_canonical_owner("Otty"), "Otty")
+
+    def test_chrome_launch_never_opens_a_foreground_window(self) -> None:
+        command = _chrome_command(Path("/tmp/profile"), 9333)
+        self.assertTrue(command[0].endswith("/Contents/MacOS/Google Chrome"))
+        self.assertIn("--no-startup-window", command)
+        self.assertNotIn("open", command)
+        self.assertNotIn("--new-window", command)
+        self.assertNotIn("about:blank", command)
+        self.assertIn("--remote-debugging-port=9333", command)
 
     def test_recording_service_ports_only_uses_local_targets(self) -> None:
         ports = _recording_service_ports(
@@ -1167,19 +1235,8 @@ class VideoTests(unittest.TestCase):
         )
         self.assertEqual(ports, [5174, 8080, 9091, 18415])
 
-    def test_late_otty_window_after_open_timeout_is_cleaned_up(self) -> None:
-        with mock.patch("recorder._otty_call", side_effect=SologsbError("IPC response timed out")):
-            with mock.patch(
-                "recorder._otty_json",
-                return_value=[{"id": "w_late", "title": "sologsb-late-window"}],
-            ):
-                with mock.patch("recorder._otty_close_window") as close_window:
-                    with self.assertRaisesRegex(SologsbError, "IPC response timed out"):
-                        _otty_open_window("sologsb-late-window")
-        close_window.assert_called_once_with("w_late")
-
     def test_recording_isolation_gate_requires_window_ids(self) -> None:
-        captures = [{"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6457, "ownerPid": 768, "ownerName": "Otty"}]
+        captures = [{"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6457, "ownerPid": 768, "ownerName": "终端", "visualContent": {"ok": True}}]
         guards = [{
             "status": "ok",
             "pointerStrategy": "none",
@@ -1227,7 +1284,7 @@ class VideoTests(unittest.TestCase):
                     "captureKind": "window-id",
                     "windowId": 6457,
                     "ownerPid": 768,
-                    "ownerName": "Otty",
+                    "ownerName": "终端",
                 }],
                 guard_reports=guards,
                 frontmost_report=frontmost,
@@ -1235,7 +1292,7 @@ class VideoTests(unittest.TestCase):
             )
         )
         web_captures = [
-            {"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6457, "ownerPid": 768, "ownerName": "Otty"},
+            {"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6457, "ownerPid": 768, "ownerName": "终端", "ownerBundleId": "com.apple.Terminal"},
             {"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6458, "ownerPid": 769, "ownerName": "Chrome"},
         ]
         self.assertTrue(
@@ -1298,9 +1355,9 @@ class VideoTests(unittest.TestCase):
                     _ensure_sck_recorder()
 
     def test_window_id_gate_rejects_missing_identity(self) -> None:
-        self.assertEqual(_require_window_id({"windowId": 6457, "ownerPid": 768}, "Otty")["windowId"], 6457)
-        with self.assertRaisesRegex(SologsbError, "无法定位Otty窗口ID"):
-            _require_window_id({"windowId": 0, "ownerPid": 0}, "Otty")
+        self.assertEqual(_require_window_id({"windowId": 6457, "ownerPid": 768}, "Terminal")["windowId"], 6457)
+        with self.assertRaisesRegex(SologsbError, "无法定位Terminal窗口ID"):
+            _require_window_id({"windowId": 0, "ownerPid": 0}, "Terminal")
 
     def test_recording_plan_uses_mapped_candidate_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1353,12 +1410,14 @@ class VideoTests(unittest.TestCase):
             recording_command_ok(0, True)
 
     def test_only_terminal_and_chrome_are_allowed(self) -> None:
-        self.assertEqual(validate_recording_targets("web", ["Otty", "Chrome"]), ["Otty", "Chrome"])
-        self.assertEqual(validate_recording_targets("terminal", ["Otty"]), ["Otty"])
+        self.assertEqual(validate_recording_targets("web", ["Terminal", "Chrome"]), ["Terminal", "Chrome"])
+        self.assertEqual(validate_recording_targets("terminal", ["Terminal"]), ["Terminal"])
+        # Plans written before the Terminal.app switch still validate.
+        self.assertEqual(validate_recording_targets("web", ["Otty", "Chrome"], "otty"), ["Terminal", "Chrome"])
         with self.assertRaises(Exception):
             validate_recording_targets("web", ["iTerm2", "Chrome"], "iterm2")
         with self.assertRaises(Exception):
-            validate_recording_targets("web", ["Otty", "Chrome", "Finder"])
+            validate_recording_targets("web", ["Terminal", "Chrome", "Finder"])
 
     def test_backend_plan_requires_api_requests(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1392,7 +1451,7 @@ class VideoTests(unittest.TestCase):
             })
             plan = default_plan(root, "A")
             self.assertEqual(plan["mode"], "terminal")
-            self.assertEqual(plan["targetApps"], ["Otty"])
+            self.assertEqual(plan["targetApps"], ["Terminal"])
             self.assertTrue(plan["requiresApiRequests"])
             self.assertEqual(plan["apiBaseUrl"], "http://127.0.0.1:8080")
 

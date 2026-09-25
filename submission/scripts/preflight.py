@@ -93,7 +93,7 @@ ARTIFACT_OUTCOME_RE = re.compile(
 )
 FIELD_FACTOR_RE = re.compile(
     r"(?:录屏|屏幕录制|录制过程|录制画面|录制结果|视频画面|视频中|视频里|视频显示|视频可见|视频证据|"
-    r"视频|截图|画面中|画面显示|画面可见|镜头|剪辑|剪掉|\bOtty\b|\biTerm2?\b|"
+    r"视频|截图|画面中|画面显示|画面可见|镜头|剪辑|剪掉|\bOtty\b|\biTerm2?\b|\bTerminal\.app\b|"
     r"1280\s*[x×]\s*720|720p|\bMP4\b|鼠标|光标|终端窗口|终端界面|命令行窗口|"
     r"浏览器|浏览器窗口|屏幕|测试设备|测试机|运行环境|运行机器|验收宿主|验收机|采集环境|采集设备|录制设备)",
     re.I,
@@ -1632,7 +1632,11 @@ def main() -> int:
     for side in ("A", "B"):
         video_path = Path(str(((state.get("recordings") or {}).get(side) or {}).get("videoPath") or "")).expanduser()
         info = inspect_media(video_path, "video")
-        browser_result = task_root / "monitor" / "recording" / side.lower() / "web-otty" / "browser-result.json"
+        recording_side_dir = task_root / "monitor" / "recording" / side.lower()
+        browser_result = recording_side_dir / "web-terminal" / "browser-result.json"
+        if not browser_result.is_file():
+            # Recordings made before the Terminal.app switch used the Otty directory name.
+            browser_result = recording_side_dir / "web-otty" / "browser-result.json"
         browser_status = str(load_json(browser_result).get("status") or "")
         info["browserResult"] = str(browser_result) if browser_result.is_file() else ""
         info["browserStatus"] = browser_status

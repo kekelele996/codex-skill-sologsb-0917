@@ -1,18 +1,19 @@
 # 录屏规则
 
-- Web：最终画面只允许 Otty 和完整 Chrome 窗口；Otty 启动项目，Chrome 负责真实操作关键验收路径。
-- API/CLI：最终画面只允许 Otty，使用 Otty CLI 的真实命令和 pane 展示输出。
-- 只允许 `terminalApp=otty`；Web 题必须同时有 Otty 和 Chrome，API/CLI/失败题只允许 Otty。禁止 iTerm2、桌面模式和整屏采集。
+- Web：最终画面只允许 Terminal.app 和完整 Chrome 窗口；Terminal.app 启动项目，Chrome 负责真实操作关键验收路径。
+- API/CLI：最终画面只允许 Terminal.app，通过 AppleScript `do script` 在录制窗口里执行真实命令并展示输出。
+- 只允许 `terminalApp=terminal`（旧计划中的 `otty` 自动归一为 `terminal`，`targetApps` 中的 `Otty` 归一为 `Terminal`）；
+  Web 题必须同时有 Terminal 和 Chrome，API/CLI/失败题只允许 Terminal。禁止 Otty、iTerm2、桌面模式和整屏采集。
 - 禁止把桌面应用、IDE、Finder、系统设置、终端以外的工具纳入最终画面。
-- 失败也必须有录屏：应用能启动但关键业务路径报错时，仍录 Otty 启动过程和真实 Chrome 中的报错画面；
-  应用无法启动时只录 Otty 的真实启动与报错。不得因为预期失败而跳过该侧。
+- 失败也必须有录屏：应用能启动但关键业务路径报错时，仍录 Terminal.app 启动过程和真实 Chrome 中的报错画面；
+  应用无法启动时只录 Terminal.app 的真实启动与报错。不得因为预期失败而跳过该侧。
 - 启动失败或场景失败是非零结果，不是录制失败；只要视频真实生成，就必须保留 `browser-result.json`、
   终端日志、退出码和失败截图，并把失败事实写进评分与 GSB。
 - 禁止 headless 冒充、注入字幕、Demo 标签或后期伪造终端。
 - 所有录屏强制使用 macOS 数字 `CGWindowID`，通过 ScreenCaptureKit 的独立窗口滤镜和 `SCRecordingOutput` 采集；必须设置 `showsCursor=false`、`showMouseClicks=false`、`capturesAudio=false`。不再录制整屏后按 bounds 裁切，也不得保留桌面、Dock、菜单栏、通知或其他应用窗口。
-- 红线：录制前必须分别定位目标应用的 `kCGWindowNumber`。Web 题缺少 Otty 或 Chrome 窗口时先打开；仍无法定位、`windowId<=0`、窗口 ID 失效、窗口被最小化、不在当前 Space、应用不是 Otty/Google Chrome，或采集状态非 `ok` 时立即停止，禁止回退到整屏/裁切/iTerm2/headless。
+- 红线：录制前必须分别定位目标应用的 `kCGWindowNumber`。Web 题缺少 Terminal 或 Chrome 窗口时先在后台打开；仍无法定位、`windowId<=0`、窗口 ID 失效、窗口被最小化、不在当前 Space、应用不是 Terminal.app/Google Chrome，或采集状态非 `ok` 时立即停止，禁止回退到整屏/裁切/iTerm2/headless。
 - 开录瞬间必须再次读取该窗口 ID，确认 `ownerPid + ownerName` 与首次定位一致；不允许只按 PID、标题或面积猜测目标窗口。
-- 录制全程不得激活、置前或最小化录制窗口，也不得调用 Otty `window focus` 或定时 `page.bringToFront()`。
+- 录制全程不得激活、置前或最小化录制窗口，也不得调用 `activate`、`open -a` 或定时 `page.bringToFront()`；不得再打开“锚点/guard”辅助窗口来压住录制窗口。
 - ChatGPT 不属于录制目标。录制器不得最小化、激活、移动或恢复任何 ChatGPT 窗口，也不要求生成
   `chatgpt-window-guard.json`。
 - 每侧一段，统一输出 1280x720（720p），单段不超过 90 秒；超时即失败，不做静默裁剪。
@@ -25,18 +26,32 @@
   但若预期失败而应用实际成功，则录制失败；结果中的 `expectedAppFailure`、`observedAppFailure` 和
   `appOutcome` 必须与 GSB 结论一致。
 - 输出写 `workspace/视频信息/<side>/视频/demo.mp4` 或 `failed-start.mp4`，两者都必须为 720p。
-- 录制前临时开启并记录 `ipc-allow-send-keys`，结束后恢复原值并 reload；不得永久改写 Otty 配置。
-- 完成后必须停止开发服务、关闭独立 Chrome、关闭本次 Otty 窗口并生成哈希清单。
+- 完成后必须停止开发服务、关闭独立 Chrome、关闭本次 Terminal 窗口并生成哈希清单。
+
+## Terminal.app 窗口生命周期
+
+- 录制器在创建前台守卫之后才接触 Terminal：未运行时用 `open -g -b com.apple.Terminal --args -ApplePersistenceIgnoreState YES`
+  后台启动，不恢复历史窗口；启动时自动出现的默认窗口由录制器安全关闭；用户已打开的 Terminal 窗口一律不碰。
+- 每侧只开一个录制窗口（`do script ""`），AppleScript 返回的 `id of window` 就是 `CGWindowID`，按该 ID 直接定位，不按标题猜测。
+- 窗口使用 `sologsb` 配置描述文件（标题只显示自定义标题）。开窗后先 `exec /bin/zsh -f` 跳过用户 rc/插件主题，
+  再设置 `PS1='sologsb %1~ %# '`、中性窗口标题，并 `clear && printf '\033[3J'` 清空屏幕与 scrollback；
+  确认历史只剩一行干净提示符后才开录。注意 `zsh -f` 会丢失 rc 中定义的函数与别名（例如 `nvm` 函数），
+  导出的 `PATH` 等环境变量仍保留；需要时在 `preCommands` 中显式执行。
+- 关窗必须先清空该 tty：仅对当前用户在该 tty 上的进程依次发 TERM → HUP（zsh 忽略 TERM）→ KILL，确认进程为空后才
+  `close`；tty 上仍有进程时拒绝关窗，避免留下“是否终止进程”确认表单。
+- 本次录制启动了 Terminal 且收尾后没有剩余窗口时退出 Terminal；首次运行需要在“自动化”中允许启动技能的进程控制“终端”，
+  未授权（-1743）时直接报错停机。
+- 开窗失败时关闭本次调用前不存在的新窗口，避免残留孤儿窗口。
 
 ## 纯后端 / API 录制
 
-- 开录前必须给新建 Otty pane 留出首屏渲染时间，并发送一次不产生业务输出的预热命令；不得在 pane 仍是未绘制空白 surface 时启动 ScreenCaptureKit。
+- 开录前必须等录制窗口出现干净提示符（见上文生命周期），不得在窗口仍是未绘制空白 surface 时启动 ScreenCaptureKit。
 - 转码后必须运行终端画面内容门禁，读取 `*-visual-content.json`。中心终端区域的平均灰度标准差低于阈值时，判定为空白或未渲染画面，录制失败并要求重录；文件存在、轨迹有输出或积分器状态正常都不能替代这一检查。
 - 待返修记录重新提交时必须重新上传当前本地轨迹和录屏，不能复用平台上的旧视频 URL；只更新文字而保留旧附件，会把已经打回的空白或错误视频继续留在记录中。
 
-- 纯后端（没有浏览器页面）必须使用 `mode=terminal`，最终画面只允许 Otty，不得打开 Chrome。
+- 纯后端（没有浏览器页面）必须使用 `mode=terminal`，最终画面只允许 Terminal.app，不得打开 Chrome。
 - 必须模拟真实 API 请求：在 `record-plan.json.apiRequests` 中声明方法、完整 URL、请求头、请求体、
-  期望状态码和关键响应内容。运行器会在 Otty 中真实执行 `curl`，逐条展示请求、响应状态和响应正文。
+  期望状态码和关键响应内容。运行器会在 Terminal.app 中真实执行 `curl`，逐条展示请求、响应状态和响应正文。
 - 至少覆盖本题的关键验收路径；涉及登录态时用 `extract` 从响应中提取 token，再用 `{{token}}`
   传给后续请求，形成真正的多步业务链路。
 - `startCommand` 必须能返回控制权（后台启动服务或 `docker compose up -d`）；用 `commands` 做健康检查或等待，
@@ -50,8 +65,8 @@
 ```json
 {
   "mode": "terminal",
-  "terminalApp": "otty",
-  "targetApps": ["Otty"],
+  "terminalApp": "terminal",
+  "targetApps": ["Terminal"],
   "captureKind": "window-id",
   "pointerStrategy": "none",
   "requiresApiRequests": true,
@@ -88,13 +103,13 @@
 
 ## 窗口 ID 采集与当前 Space
 
-- Otty、Chrome 都必须先通过 Quartz 定位具体 `kCGWindowNumber`，再用该 ID 启动 ScreenCaptureKit 录制：
+- Terminal、Chrome 都必须先定位具体 `kCGWindowNumber`，再用该 ID 启动 ScreenCaptureKit 录制：
   `SCContentFilter(desktopIndependentWindow:)` 只绑定目标窗口，`SCRecordingOutput` 写入 `.mov`。窗口被其他应用遮挡不影响采集内容。
-- 必须记录 `windowId`、所属 PID、应用名、窗口名和 bounds。仅按 PID、标题或“面积最大的窗口”还不够，
+- 必须记录 `windowId`、所属 PID、应用名、`ownerBundleId`、归一应用名 `ownerApp`、窗口名和 bounds。Quartz 的应用名是本地化名（中文系统为“终端”），门禁按 bundle id 归一。仅按 PID、标题或“面积最大的窗口”还不够，
   实际采集必须绑定稳定窗口 ID。
 - 不创建、不切换 macOS Space。录制在当前 Space 执行；脚本不得调用 Space 切换或全屏模式。
-- 窗口不存在时按题型打开目标窗口：Web 题先开 Otty，再开独立 Chrome；纯终端题开 Otty。打开后仍定位不到具体窗口 ID 时停止作业。
-- 开窗可能短暂把新窗口置前。录制器必须在开窗前记录用户前台应用；仅当最前普通窗口属于本次打开的 Otty/Chrome 进程时，才把用户原应用恢复。恢复事实写入
+- 窗口不存在时按题型打开目标窗口：Web 题先开 Terminal 窗口，再开独立 Chrome；纯终端题只开 Terminal 窗口。打开后仍定位不到具体窗口 ID 时停止作业。
+- 开窗可能短暂把新窗口置前。录制器必须在开窗前记录用户前台应用；仅当最前普通窗口属于本次打开的 Terminal/Chrome 进程时，才把用户原应用恢复。恢复事实写入
   `recordingMetadata.userFrontmostAppAtStart` 和 `recordingMetadata.focusRestores`；用户此后切到的其他应用不得被抢回。
   发生抢占时必须在 1 秒内观察到用户原应用重新成为最前应用，并写 `focusRestoreOk=true`。
 - 窗口视频报告写 `<片段>-window-capture.json`，包含 `captureKind=window-id`、`captureBackend=screen-capture-kit`、
@@ -104,14 +119,16 @@
   终端或 Codex 应用授予“屏幕录制”权限；未授权时录制器会在 ready 文件出现前失败并写日志。
 - 录制器就绪后用信号停止并等待文件落盘。停止器至少保留 4 秒采集时间；最长由看门狗限制为 90 秒，
   避免异常场景无限占用录屏。
-- Web 题的 Otty 与 Chrome 分别按各自窗口 ID 采集，再拼接成最终视频。不得用同一窗口 ID、PID 粗匹配或标题猜测替代实际目标窗口 ID。
+- Web 题的 Terminal 与 Chrome 分别按各自窗口 ID 采集，再拼接成最终视频。不得用同一窗口 ID、PID 粗匹配或标题猜测替代实际目标窗口 ID。
+- Web 题 Chrome 直接运行 `Google Chrome.app/Contents/MacOS/Google Chrome`（不经 `open`/LaunchServices，避免激活），带 `--no-startup-window`，
+  再通过 CDP `Target.createTarget {newWindow:true, background:true}` 在后台创建 1440x900 录制窗口。
 - Web 题 Chrome 必须增加 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`；浏览器驱动传 `HUMAN_BROWSER_KEEP_FRONT=0`，默认值仍为保持旧行为的 `1`。
 - 录制期间每秒采样最前普通窗口并写 `frontmost-window-monitor.json`。录制窗口在最前的采样数必须为 0；非零时该侧 `ok=false`。
 
 ## 非目标窗口
 
 - 录制器不得读取、最小化、激活、移动或恢复 ChatGPT 窗口，也不得把 ChatGPT 状态写入录屏门禁。
-- 窗口白名单保持不变：Web 题只允许 Otty/Google Chrome，纯终端题只允许 Otty。
+- 窗口白名单：Web 题只允许 Terminal.app/Google Chrome，纯终端题只允许 Terminal.app。
 
 ## 鼠标指针处理
 
@@ -128,8 +145,8 @@
 
 ## Web 终端日志与收尾
 
-- Web 模式的 `terminal.log` 不得留空或伪造；收尾必须在 Otty 中执行
-  `otty pane capture --pane <id> --lines 400`，把真实 pane 文本写入 `terminal.log`。
+- Web 模式的 `terminal.log` 不得留空或伪造；收尾必须在关窗前读取录制窗口 `history of tab 1`，
+  把真实 scrollback 文本写入 `terminal.log`。
 - 两侧 `finally` 都必须执行计划中的 `cleanupCommands`。随后只查找应用端口上、本次录制开始后才出现的监听 PID；
   录制开始前已存在的进程绝不终止。
 - 清理报告写 `service-cleanup.json`，包含 `baselineListeners`、`terminatedAppPortListeners` 和
@@ -165,15 +182,15 @@
   - `preflightCommands`：启动服务（`docker compose up`）、占用端口、重置数据库或 `/tmp` 数据、
     `docker compose down` 等会碰共享资源的步骤，在录屏锁**之内**执行。
   拿不准的命令放 `preflightCommands`。正式录屏只做快速启动，不把 Docker 拉取、构建或数据初始化过程放进视频。
-- 终端不得显示用户真实绝对路径。Otty 直接以项目目录启动，开录前执行
-  `export PS1='sologsb %1~ %# '` 和 `clear`，只显示相对路径。
+- 终端不得显示用户真实绝对路径，窗口标题也不得出现路径。录制器在 `zsh -f` 中 `cd` 到项目目录，设置
+  `export PS1='sologsb %1~ %# '` 与中性标题，再清屏清 scrollback，只显示相对路径。
 - Chrome 必须关闭密码管理器、账号登录、同步、资料菜单推广和首启引导：使用临时 profile，并保留录制器内置的禁用参数。
 - 开录前检查 Chrome 页面没有“登录 Chrome?”、密码保存、翻译、通知、下载或崩溃恢复气泡；出现任一浮层时不得开始录制，修正启动参数后重录。
 - Web 终端启动命令应优先只监听回环地址，避免出现多网卡 `Network:` 地址行；终端只保留与验收路径直接相关的输出。
 - Web 自动操作默认 `pace>=1.8`。浏览器内交互使用 Playwright 合成事件并保持真实持续时间和缓动；不得使用任何系统级鼠标移动接口，录制期间主机指针始终不受影响。
   点击前停顿、点击后回落、步骤之间留出可观察间隔，避免看起来像脚本瞬移。
 - 对关键状态使用明确的 `wait` 或元素等待后再继续；场景总时长以 20–75 秒为目标，仍受单段 90 秒上限约束。
-- 启动命令使用单行；Otty 中发送的启动命令不得包含换行。
+- 启动命令使用单行；发送到 Terminal 的启动命令不得包含换行。
 - 浏览器场景中使用可访问名称或稳定的 CSS 选择器；Ant Design 按钮可能显示为“改 期”。
 
 ## 命名约定

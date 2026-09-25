@@ -68,7 +68,7 @@ LOW_VALUE_PROCESS_NOISE_PATTERN = re.compile(
 )
 FIELD_FACTOR_RE = re.compile(
     r"(?:录屏|屏幕录制|录制过程|录制画面|录制结果|视频画面|视频中|视频里|视频显示|视频可见|视频证据|"
-    r"视频|截图|画面中|画面显示|画面可见|镜头|剪辑|剪掉|\bOtty\b|\biTerm2?\b|"
+    r"视频|截图|画面中|画面显示|画面可见|镜头|剪辑|剪掉|\bOtty\b|\biTerm2?\b|\bTerminal\.app\b|"
     r"1280\s*[x×]\s*720|720p|\bMP4\b|鼠标|光标|终端窗口|终端界面|命令行窗口|"
     r"浏览器|浏览器窗口|屏幕|测试设备|测试机|运行环境|运行机器|验收宿主|验收机|采集环境|采集设备|录制设备)",
     re.I,
@@ -1482,7 +1482,7 @@ def write_field_guide(task_root: Path, schema: dict[str, Any], values: dict[str,
         if field.get("field_type") in {"attachment", "video"}:
             value = f"{value}<br>提交：`submit_api.py` 会上传文件，再把平台返回的对象地址写入 API payload；Excel 仍保留本地绝对路径。"
         if key in {"a_screencast", "b_screencast"}:
-            value = f"{value}<br>视频规格：1280x720（720p），单段不超过 90 秒；Web 仅 Otty+Chrome，终端/失败仅 Otty。"
+            value = f"{value}<br>视频规格：1280x720（720p），单段不超过 90 秒；Web 仅 Terminal.app+Chrome，终端/失败仅 Terminal.app。"
         lines.append(
             f"| {index} | {field.get('group', '')} | `{key}` / {field.get('label', '')} | "
             f"{field.get('field_type', '')} | {required} | {value} |"
@@ -1499,7 +1499,7 @@ def write_field_guide(task_root: Path, schema: dict[str, Any], values: dict[str,
             "- GSB 理由必须严格使用纯文本，不允许任何 Markdown 语法；标题、列表、代码块、行内代码、链接、图片、强调标记、表格、引用和 HTML 标签全部阻断。",
             "- 过程层写轨迹中的实际动作和定位节点，例如读取、检查、修改、执行、排查或返工了哪一步、文件、命令或需求；不能只写“进行了测试”或“做了迁移”。",
             "- 产物层写最终可观察结果，例如接口返回、缺少字段、未实现需求、构建启动结果或真实失败；不得只写交付物毛病。",
-            "- 录屏、视频、截图、浏览器、测试设备、运行环境、验收宿主、Otty、鼠标、分辨率等场外因素不得写进 GSB 理由，没有例外。",
+            "- 录屏、视频、截图、浏览器、测试设备、运行环境、验收宿主、Otty、Terminal.app、鼠标、分辨率等场外因素不得写进 GSB 理由，没有例外。",
             "- evaluationExcluded 的环境或工具噪声证据不得被 claim、sentenceEvidence 或理由正文引用；其他噪声也不能成为独立评分项或 A/B 胜负依据。",
             "- 用于支撑每侧过程/产物的 claim.text 必须原样出现在 GSB 理由中。",
             "- 每条负面 claim 必须提供 triggerKind/trigger；触发节点只允许步骤、文件、命令或需求，并原样写入 GSB 理由。",

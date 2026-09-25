@@ -43,8 +43,8 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 网关 429 `max_parallel_requests` 属于准入失败：正式候选运行前先等待最小 `/v1/messages` 探测成功；发生最终 429 后不要立即重启新容器，先等待 Key 恢复。恢复后仍按红线使用新容器、新 Claude home 和新 SessionID，实际尝试次数照记。
 - pnpm fresh clone 固定按“安装失败留证 → `pnpm approve-builds --all` → 再次安装 → 构建”顺序处理。
 - Web 录屏先确认默认 Tab、当前用户和重复卡片选择器；同名操作按钮使用卡片范围或 `.last()`；同时清除 Chrome 登录/同步/密码/通知等浮层与终端多网卡干扰行。
-- 录屏必须使用窗口级后台模式：先用 Quartz 定位 Otty/Chrome 的数字 `CGWindowID`，再调用 ScreenCaptureKit 的 `SCContentFilter(desktopIndependentWindow:)` 和 `SCRecordingOutput` 采集；必须设置 `showsCursor=false`、`showMouseClicks=false`、`capturesAudio=false`。全程不激活、不置前、不最小化录制窗口。开录瞬间必须复核窗口仍在当前 Space 且 `ownerPid + ownerName` 未变化，找不到就停机。
-- 具体踩坑记录见 `references/lessons-learned-20260917.md`。
+- 录屏必须使用窗口级后台模式：先用 Quartz 定位 Terminal.app/Chrome 的数字 `CGWindowID`，再调用 ScreenCaptureKit 的 `SCContentFilter(desktopIndependentWindow:)` 和 `SCRecordingOutput` 采集；必须设置 `showsCursor=false`、`showMouseClicks=false`、`capturesAudio=false`。全程不激活、不置前、不最小化录制窗口。开录瞬间必须复核窗口仍在当前 Space 且 `ownerPid + ownerName` 未变化，找不到就停机。
+- 具体踩坑记录见 `references/lessons-learned-20260917.md` 与 `references/lessons-learned-20260925-terminal-app.md`（切换 Terminal.app）。
 
 ## 固定红线
 
@@ -85,13 +85,13 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   若视频显示不可启动、页面崩溃或需求未完成，结论不得写成成功，必须修正评分与 GSB 后再交付。
 - 录屏 `ok` 不能只看文件是否生成：`expectedAppFailure=false` 而浏览器/API 非零退出时必须写 `ok=false`、`observedAppFailure=true`，
   `record` 命令返回非零并把状态退回 `gsb_ready`；先归档失败片段，修正 scenario 或应用后重录，未通过前不得进入 `recorded/complete`。
-- 录屏窗口 ID 红线：任何必须录屏的步骤只能使用 `window-id`。Web 题必须分别打开或定位 Otty 与 Chrome 窗口，并记录各自 `windowId`；API/CLI/失败题必须定位 Otty 窗口 ID。窗口缺失时先打开，无法定位或 `windowId<=0` 时立即停止，禁止回退到整屏、裁切、iTerm2 或 headless。
+- 录屏窗口 ID 红线：任何必须录屏的步骤只能使用 `window-id`。Web 题必须分别打开或定位 Terminal.app 与 Chrome 窗口，并记录各自 `windowId`；API/CLI/失败题必须定位 Terminal.app 窗口 ID。窗口缺失时先打开，无法定位或 `windowId<=0` 时立即停止，禁止回退到整屏、裁切、iTerm2 或 headless。
 - 每个片段必须写 `<片段>-window-capture.json`，其中必须包含 `captureKind=window-id`、`captureBackend=screen-capture-kit`、`showsCursor=false`、`cursorCaptured=false`、目标 `windowId`、所属 PID、bounds、退出码和采集状态；窗口 ID 缺失、失效、后端不是 ScreenCaptureKit、鼠标排除标记不为 false 或采集状态非 `ok` 时该侧录屏失败。
-- 开录瞬间必须再次确认目标窗口仍在当前 Space、未被最小化，且 `ownerPid + ownerName` 与定位时一致；窗口不在 Otty/Google Chrome 白名单内时立即停机。
+- 开录瞬间必须再次确认目标窗口仍在当前 Space、未被最小化，且 `ownerPid + ownerName` 与定位时一致；窗口不在 Terminal.app（本地化名如“终端”，按 bundle id `com.apple.Terminal` 判定）/Google Chrome 白名单内时立即停机。
 - ChatGPT 不属于录制目标。录制器不得最小化、激活、移动或恢复任何 ChatGPT 窗口，也不生成
-  `chatgpt-window-guard.json`；窗口级后台采集只处理 Otty/Google Chrome。
+  `chatgpt-window-guard.json`；窗口级后台采集只处理 Terminal.app/Google Chrome。
 - 开窗可能短暂把录制窗口置前；仅当最前普通窗口属于本次录制进程时，才把用户原前台应用恢复，并写入
-  `recordingMetadata.userFrontmostAppAtStart` 与 `recordingMetadata.focusRestores`。不得调用 `window focus` 或定时 `bringToFront`。
+  `recordingMetadata.userFrontmostAppAtStart` 与 `recordingMetadata.focusRestores`。不得调用 `window focus`、`activate` 或定时 `bringToFront`，也不再打开任何“锚点/guard”辅助终端窗口。
   发生焦点抢占时必须确认用户原应用重新成为最前应用并写 `focusRestoreOk=true`。
 - 指针策略固定使用 `pointerStrategy=none`（`pointerPolicy=host-input-untouched`）。录制器不得移动、停靠、恢复或读取鼠标按键，不得调用任何会改变用户鼠标位置的接口；旧计划中的 `background`、`park-pointer` 必须自动归一到 `none`。
 - 每个片段旁仍写纯 JSON `<片段>-cursor-guard.json`，至少包含 `segment`、数字 `windowId`、
@@ -100,15 +100,15 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   验收要求 `status=ok`、`pointerStrategy=none`、`pointerPolicy=host-input-untouched`、`hostInputRespected=true`、`pointerMoved=false`、`mouseButtonsQueried=false`、`parkApplied=false`；指针是否位于窗口内不影响录制，画面出现指针也不得要求重录。
 - Web 题在 Chrome 驱动中设置 `HUMAN_BROWSER_KEEP_FRONT=0`，并给 Chrome 加
   `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`。
-- Web 录制收尾必须用 `otty pane capture --pane <id> --lines 400` 写真实 `terminal.log`，不能用空文件占位。
+- Web 录制收尾必须读取录制窗口 `history of tab 1` 写真实 `terminal.log`，不能用空文件占位。
 - 录制期间每秒采样最前普通窗口，`recordingWindowFrontmostSamples` 必须为 0；采样报告写
   `frontmost-window-monitor.json`。
 - 收尾必须执行 `cleanupCommands`，且只终止本次录制新起的应用端口监听进程；残留写
   `service-cleanup.json.residualAppPortListeners`，非空时 `ok=false`。临时 `chrome-profile` 默认删除。
-- 录屏默认使用 Otty CLI，统一输出 1280x720（720p）。最终画面只允许出现
-  Otty 和浏览器：Web 题两者必须都有，API/CLI/失败题只允许 Otty。默认值必须为 Otty；Web 题按窗口 ID
-  录制仅支持 Otty，禁止出现桌面应用、IDE、Finder、系统设置、Dock 或其他应用。无法启动时也必须保留真实失败过程。
-- 纯后端/API 题必须使用 `mode=terminal`（仅 Otty），并在 `record-plan.json.apiRequests` 中配置真实请求
+- 录屏终端固定使用 macOS 原生 Terminal.app（`terminalApp=terminal`；旧计划的 `otty` 自动归一），统一输出 1280x720（720p）。最终画面只允许出现
+  Terminal.app 和浏览器：Web 题两者必须都有，API/CLI/失败题只允许 Terminal.app。每侧只开一个录制终端窗口，
+  禁止出现桌面应用、IDE、Finder、系统设置、Dock 或其他应用，禁止改用 Otty/iTerm2。无法启动时也必须保留真实失败过程。
+- 纯后端/API 题必须使用 `mode=terminal`（仅 Terminal.app），并在 `record-plan.json.apiRequests` 中配置真实请求
   （方法、完整 URL、请求头、请求体、期望状态码、关键响应字段）；录屏必须展示真实请求与响应，
   不得只录启动日志或用 headless 脚本代替。
 - 平台项目并发安全：`init --from-platform` 必须先获取按 Manager 地址隔离的全局选择锁，
@@ -149,7 +149,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 禁止把并发现象压成名词串或读数排列；按“触发动作、现场现象、客观后果”展开成完整短句，让读者能从业务过程读懂胜负原因。
 - GSB 理由必须同时覆盖 A、B 各自的过程与产物：每侧至少有一条过程 claim 和一条产物 claim，`claim.text` 原样写入理由。不能只写一侧过程、另一侧产物，也不能整段只写交付物毛病。
 - 过程层必须写原生轨迹可核对的执行事实：在哪个步骤、文件、命令或需求触发，读取、检查、修改、执行了什么，是否返工、发现或修正问题；不能只写“进行了测试”“做了迁移”“改过代码”这类空泛动作。
-- 产物层必须写最终可观察结果：功能、交互、数据、接口、性能、兼容性、可运行性、需求覆盖或真实失败结果。不得用录屏、视频、截图、浏览器、测试设备、运行环境、验收宿主、Otty、鼠标、分辨率、终端窗口等场外因素评价好坏；这些不能进入 GSB 理由，没有例外。
+- 产物层必须写最终可观察结果：功能、交互、数据、接口、性能、兼容性、可运行性、需求覆盖或真实失败结果。不得用录屏、视频、截图、浏览器、测试设备、运行环境、验收宿主、Otty、Terminal.app、鼠标、分辨率、终端窗口等场外因素评价好坏；这些不能进入 GSB 理由，没有例外。
 - 禁止在 GSB 理由中引用 `evaluationExcluded` 的环境或工具噪声证据；这类证据也不能作为独立 claim、评分或胜负依据。
 - GSB 理由不堆测试或断言数量，改成“后端关键路径完整覆盖”“完整接口流程验证”等业务覆盖描述；`gsb_tools.py` 会直接阻断计数式写法。
 - 低价值环境/工具噪声不直接参与 GSB 评定：解释器或命令未找到、测试 PYTHONPATH 缺失、编辑工具替换文本未匹配、临时工作目录、重跑等，不能作为独立 claim、评分项或胜负依据。标记为 `evaluationExcluded` 的证据不得进入 GSB 理由正文。
@@ -220,8 +220,8 @@ SOLO2 会话失效时，运行器会用配置里的账号密码自动重新登�
    该命令会同时把草稿写到提交预检固定读取的 `monitor/gsb-draft.json`，录屏后刷新 Excel 也会保持同步。
 9. 为 A、B 分别生成录屏计划和 scenario，再运行 `record --side A/B --plan ...`。
    命令会在锁内执行预检/预构建、环境检查、真实录屏和收尾；另一项目持锁时当前任务等待而不是并发启动。
-   默认使用 Otty；终端只显示相对路径，不暴露真实绝对路径。录制固定当前 Space，不切换 Space；
-   不对 ChatGPT 做任何窗口操作；先定位或打开 Otty/Chrome 窗口并取得数字 `CGWindowID`，开录瞬间复核后只用
+   默认使用 Terminal.app（后台启动、单窗口、`zsh -f` 干净 shell）；终端只显示相对路径，不暴露真实绝对路径。录制固定当前 Space，不切换 Space；
+   不对 ChatGPT 做任何窗口操作；先在后台打开 Terminal.app/Chrome 窗口并取得数字 `CGWindowID`，开录瞬间复核后只用
    ScreenCaptureKit 按窗口 ID 后台采集，不激活录制窗口。若开窗短暂抢到前台，只把用户原应用恢复；默认
    `pointerStrategy=none`，全程不操作鼠标，并强制 `showsCursor=false`，用户仍可正常操作鼠标。结束后检查前台采样、焦点恢复和服务清理。
    视频统一保存为 `<项目编号-项目名>-验证A产物.mp4` 和 `<项目编号-项目名>-验证B产物.mp4`。

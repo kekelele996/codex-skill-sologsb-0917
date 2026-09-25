@@ -27,7 +27,7 @@
 │   ├── recording/{a,b}/
 │   │   ├── frontmost-window-monitor.json
 │   │   ├── service-cleanup.json
-│   │   └── {web-otty,terminal-otty}/*-{window-capture,cursor-guard}.json
+│   │   └── {web-terminal,terminal-session}/*-{window-capture,cursor-guard}.json
 │   ├── runtime/candidates/candidate-N/
 │   └── runtime/{a,b}/
 └── workspace/
