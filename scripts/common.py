@@ -82,6 +82,10 @@ def skill_release_tag() -> str:
     """与全局版本号对应的发布标签，例如 v1.0.0。"""
     return skill_version_info().get("release_tag", "")
 
+DEFAULT_GITHUB_PROXY_HOST = "127.0.0.1"
+DEFAULT_GITHUB_PROXY_PORT = 7897
+
+
 def _proxy_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -90,33 +94,44 @@ def _proxy_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
         return False
 
 
-def github_proxy_url(*, required: bool = False) -> str:
-    """Return the verified GitHub proxy endpoint, preferring an explicit override.
+def normalize_github_proxy(value: str, *, default_scheme: str = "http") -> str:
+    """Normalize bare ports and host:port values into a proxy URL."""
+    text = value.strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        if text.isdigit():
+            text = f"{DEFAULT_GITHUB_PROXY_HOST}:{text}"
+        text = f"{default_scheme}://{text}"
+    return text
 
-    The local Loon setup exposes HTTP/HTTPS on 17890 and SOCKS5 on 17891. Only a
-    reachable endpoint is returned, so hosts without Loon keep their normal
-    network settings.
+
+def github_proxy_url(*, required: bool = False) -> str:
+    """Return the Clash Verge mixed-port proxy used for GitHub traffic.
+
+    An explicit ``SOLOSB_GITHUB_PROXY``/``GITHUB_PROXY`` wins. Otherwise the
+    local Clash Verge mixed listener at 127.0.0.1:7897 is used. With
+    ``required=True``, a missing listener fails closed instead of allowing a
+    direct GitHub connection.
     """
     explicit = (
         os.environ.get("SOLOSB_GITHUB_PROXY", "").strip()
         or os.environ.get("GITHUB_PROXY", "").strip()
     )
     if explicit:
-        return explicit
-    if _proxy_port_open("127.0.0.1", 17890):
-        return "http://127.0.0.1:17890"
-    if _proxy_port_open("127.0.0.1", 17891):
-        return "socks5h://127.0.0.1:17891"
+        return normalize_github_proxy(explicit)
+    if _proxy_port_open(DEFAULT_GITHUB_PROXY_HOST, DEFAULT_GITHUB_PROXY_PORT):
+        return f"http://{DEFAULT_GITHUB_PROXY_HOST}:{DEFAULT_GITHUB_PROXY_PORT}"
     if required:
         raise SologsbError(
-            "Loon GitHub 代理不可用：请设置 SOLOSB_GITHUB_PROXY，"
-            "或启动 HTTP 127.0.0.1:17890 / SOCKS5 127.0.0.1:17891"
+            "Clash Verge GitHub 代理不可用：请设置 SOLOSB_GITHUB_PROXY，"
+            f"或启动混合代理 {DEFAULT_GITHUB_PROXY_HOST}:{DEFAULT_GITHUB_PROXY_PORT}"
         )
     return ""
 
 
 def github_env(extra: dict[str, str] | None = None, *, require_proxy: bool = False) -> dict[str, str]:
-    """Build an environment with the Loon proxy applied to GitHub traffic."""
+    """Build an environment with the Clash Verge proxy applied to GitHub traffic."""
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     proxy = github_proxy_url(required=require_proxy)

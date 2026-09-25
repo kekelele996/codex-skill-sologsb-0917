@@ -111,19 +111,19 @@ class ProxyTests(unittest.TestCase):
     def test_explicit_github_proxy_is_injected(self) -> None:
         with mock.patch.dict(
             os.environ,
-            {"SOLOSB_GITHUB_PROXY": "http://127.0.0.1:17890"},
+            {"SOLOSB_GITHUB_PROXY": "7897"},
             clear=False,
         ):
             env = github_env()
-        self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:17890")
-        self.assertEqual(env["HTTP_PROXY"], "http://127.0.0.1:17890")
-        self.assertEqual(env["ALL_PROXY"], "http://127.0.0.1:17890")
+        self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:7897")
+        self.assertEqual(env["HTTP_PROXY"], "http://127.0.0.1:7897")
+        self.assertEqual(env["ALL_PROXY"], "http://127.0.0.1:7897")
         self.assertIn("127.0.0.1", env["NO_PROXY"])
 
     def test_required_github_proxy_fails_closed(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             with mock.patch("common._proxy_port_open", return_value=False):
-                with self.assertRaisesRegex(SologsbError, "Loon GitHub 代理不可用"):
+                with self.assertRaisesRegex(SologsbError, "Clash Verge GitHub 代理不可用"):
                     github_env(require_proxy=True)
 
 

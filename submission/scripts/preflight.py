@@ -135,6 +135,10 @@ GENERATED_DIR_NAMES = {
 }
 
 
+DEFAULT_GITHUB_PROXY_HOST = "127.0.0.1"
+DEFAULT_GITHUB_PROXY_PORT = 7897
+
+
 def _proxy_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -143,22 +147,33 @@ def _proxy_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
         return False
 
 
+def _normalize_proxy_url(value: str, *, default_scheme: str = "http") -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        if text.isdigit():
+            text = f"{DEFAULT_GITHUB_PROXY_HOST}:{text}"
+        text = f"{default_scheme}://{text}"
+    return text
+
+
 def github_env(extra: dict[str, str] | None = None, *, require_proxy: bool = False) -> dict[str, str]:
-    """Apply the local Loon proxy to GitHub CLI and Git network commands."""
+    """Apply the local Clash Verge mixed proxy to GitHub CLI and Git commands."""
     env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
     proxy = (
         os.environ.get("SOLOSB_GITHUB_PROXY", "").strip()
         or os.environ.get("GITHUB_PROXY", "").strip()
     )
-    if not proxy:
-        if _proxy_port_open("127.0.0.1", 17890):
-            proxy = "http://127.0.0.1:17890"
-        elif _proxy_port_open("127.0.0.1", 17891):
-            proxy = "socks5h://127.0.0.1:17891"
+    if proxy:
+        proxy = _normalize_proxy_url(proxy)
+    elif _proxy_port_open(DEFAULT_GITHUB_PROXY_HOST, DEFAULT_GITHUB_PROXY_PORT):
+        proxy = f"http://{DEFAULT_GITHUB_PROXY_HOST}:{DEFAULT_GITHUB_PROXY_PORT}"
     if not proxy and require_proxy:
         raise RuntimeError(
-            "Loon GitHub 代理不可用：请设置 SOLOSB_GITHUB_PROXY，"
-            "或启动 HTTP 127.0.0.1:17890 / SOCKS5 127.0.0.1:17891"
+            "Clash Verge GitHub 代理不可用：请设置 SOLOSB_GITHUB_PROXY，"
+            f"或启动混合代理 {DEFAULT_GITHUB_PROXY_HOST}:{DEFAULT_GITHUB_PROXY_PORT}"
         )
     if proxy:
         env["HTTPS_PROXY"] = proxy

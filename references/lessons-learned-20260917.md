@@ -90,10 +90,10 @@
   A/B 至少 30 行、跨 3 个业务文件，避免贴着平台 10 行阈值。
 - 详细规则见 `references/change-volume-gate.md`。
 
-## 2026-09-20 GitHub 网络实测：Loon 代理
+## 2026-09-23 GitHub 网络实测：Clash Verge 混合代理
 
-- GitHub CLI 与远端 Git 命令统一从 `SOLOSB_GITHUB_PROXY` 读取代理；未设置时自动探测本机 Loon HTTP `127.0.0.1:17890`，再探测 SOCKS5 `127.0.0.1:17891`。
-- 实测 `gh api user`、`git ls-remote`、`git clone/fetch` 经 `127.0.0.1:17890` 或 `127.0.0.1:17891` 均成功；未显式注入时曾出现 `SSL connection timeout` 与空仓库清理 `TLS handshake timeout`。
+- GitHub CLI 与远端 Git 命令统一从 `SOLOSB_GITHUB_PROXY` 读取代理；未设置时自动探测本机 Clash Verge 混合代理 `127.0.0.1:7897`。裸端口 `7897`、`host:port` 和完整代理 URL 都可用。
+- 复核时 `127.0.0.1:7897` 正在监听，经该代理访问 GitHub API 返回 HTTP 200；`gh api user` 与公开仓库 `git ls-remote` 也经该代理成功。自动探测只认该混合端口，不回退其他旧端点或直连。
 - `github-init`、A/B 原子发布、远端验证 clone 和提交预检必须复用同一代理环境。代理故障是一次网络重试范围，不得计入 Claude 候选尝试次数，也不得在仓库清理失败后继续批量创建仓库。
 
 
@@ -113,7 +113,7 @@
 - 取消倒计时遮罩及其 `*-countdown.json` 门禁；录制开始前不再运行 `countdown_overlay.py`。
 - 所有必须录屏的任务只允许 `captureKind=window-id`。Web 题必须先定位 Otty 和独立 Chrome 的具体窗口 ID；
   窗口不存在就打开，仍无法定位或 `windowId<=0` 时立即停止，禁止整屏、裁切、iTerm2 或 headless 回退。
-- GitHub 网络访问统一走 Loon：显式 `SOLOSB_GITHUB_PROXY`，否则探测 HTTP `127.0.0.1:17890`，再探测 SOCKS5 `127.0.0.1:17891`；不可用即按基础设施门禁停止。
+- GitHub 网络访问统一走 Clash Verge 混合代理：显式 `SOLOSB_GITHUB_PROXY`，否则探测 `127.0.0.1:7897`；不可用即按基础设施门禁停止，禁止回退直连。
 
 ## 2026-09-21 窗口级后台录制加固
 

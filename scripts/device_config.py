@@ -44,8 +44,8 @@ FIELDS: dict[str, tuple[str | None, str]] = {
     "solo2.keychainService": ("SOLOSB_SOLO2_KEYCHAIN_SERVICE", ""),
     "github.token": ("GITHUB_TOKEN", ""),
     "github.username": ("SOLOSB_GITHUB_USERNAME", ""),
-    "github.proxyHttp": ("SOLOSB_GITHUB_PROXY", "127.0.0.1:17890"),
-    "github.proxySocks": (None, "127.0.0.1:17891"),
+    "github.proxyHttp": ("SOLOSB_GITHUB_PROXY", "127.0.0.1:7897"),
+    "github.proxySocks": (None, "127.0.0.1:7897"),
 }
 
 # 这些字段在 show / 日志里必须脱敏
@@ -162,6 +162,18 @@ def _text(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value).strip()
+
+
+def proxy_url(value: str, *, default_scheme: str = "http") -> str:
+    """Normalize a bare port or host:port into a proxy URL."""
+    text = _text(value)
+    if not text:
+        return ""
+    if "://" not in text:
+        if text.isdigit():
+            text = f"127.0.0.1:{text}"
+        text = f"{default_scheme}://{text}"
+    return text
 
 
 def resolve(dotted: str, *, cli: Any = None, path: Path | None = None) -> str:
@@ -365,8 +377,8 @@ def apply_to_env(*, override: bool = False, path: Path | None = None,
         if not value:
             applied[env_name] = "skipped"
             continue
-        if dotted == "github.proxyHttp" and "://" not in value:
-            value = f"http://{value}"
+        if dotted == "github.proxyHttp":
+            value = proxy_url(value)
         if _text(os.environ.get(env_name)) and not override:
             applied[env_name] = "kept"
             continue

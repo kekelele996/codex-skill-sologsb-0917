@@ -67,8 +67,8 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   不等待它们完成。
 - 候选阶段绝不创建 GitHub 仓库、绝不 push。重复启动同一任务根时，`run_candidates` 会先只读探测候选任务锁，占用就直接退出，不再清空状态或重建正在使用的工作区；`_clone_candidate` 也不会删除仍被运行中容器挂载的目录。
 - GitHub 仓库名必须以平台项目标识开头，再跟 3–6 位小写字母数字唯一后缀，例如 `cy-291-a1b2`；平台项目拿不到 `projectCode` 时禁止创建仓库。
-- GitHub 网络红线：所有 GitHub 网络访问，包括 `gh api`、`gh repo view/create/delete`、`git clone/fetch/push/ls-remote`，必须经 Loon 代理。优先使用显式 `SOLOSB_GITHUB_PROXY`，否则自动探测 HTTP `127.0.0.1:17890`，再探测 SOCKS5 `127.0.0.1:17891`；两者不可用时停止作业，禁止裸网直连。
-- Loon 端口都不可达或经代理仍出现 TLS/SSL 故障时，保留真实错误并按基础设施门禁停止，不得反复创建候选仓库。
+- GitHub 网络红线：所有 GitHub 网络访问，包括 `gh api`、`gh repo view/create/delete`、`git clone/fetch/push/ls-remote`，必须经 Clash Verge 混合代理。默认地址为 `127.0.0.1:7897`；优先使用显式 `SOLOSB_GITHUB_PROXY`（支持裸端口 `7897`、`host:port` 或完整 URL），代理不可用时停止作业，禁止裸网直连。
+- Clash Verge 混合代理不可达或经代理仍出现 TLS/SSL 故障时，保留真实错误并按基础设施门禁停止，不得反复创建候选仓库。
 - A/B 映射完成后才允许 `github-init` 以原始源码创建 `main/A/B`；A/B 产物先停在 staged，必须两侧都通过语义完成审核，
   才允许通过原子 push 同时发布 A、B。
 - A、B 产物 commit 的父提交必须严格等于初始环境快照；A/B 只是候选映射后的逻辑代号。
@@ -167,7 +167,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 容器镜像 `claude.image`（默认 `adminfather/benzhi-claude-code2:20260919`：原生镜像，只带 Node 20 / Python 3.11（无 pip）/ git / Claude Code 2.1.197，不含 Go、JDK、Maven、Gradle、pnpm，也不含 docker；运行器以 `--entrypoint /bin/bash` 启动并显式传入 Base URL，不依赖镜像自带的 entrypoint 与 `ANTHROPIC_BASE_URL`）
 - Solo Manager 地址、账号、密码
 - SOLO2 地址、账号、密码
-- GitHub Token 与 Loon 代理
+- GitHub Token 与 Clash Verge 混合代理（默认 `127.0.0.1:7897`）
 
 技能入口启动时会自动把它注入环境变量，一般配置优先级为
 `命令行参数 > 环境变量 > 配置文件 > 代码默认值`；磁盘上不存在该文件时，
