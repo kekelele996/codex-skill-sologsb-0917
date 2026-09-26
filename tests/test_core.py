@@ -367,6 +367,24 @@ class ExcelTests(unittest.TestCase):
         self.assertTrue(reason_language_errors("A 侧方案修改了保存逻辑，配置仍然没有写入"))
         self.assertTrue(reason_language_errors("A 侧方案修改了保存逻辑（配置仍然没有写入。"))
 
+    def test_gsb_reason_warns_adjacent_repetition(self) -> None:
+        # 2026-09-27 记录 15476：后一句把前一句又说了一遍，“代码块”两句里出现三次。
+        stitched = (
+            "A 侧方案在workbench.tsx里调用applyTermChange重开代码块。"
+            "代码块seg-06被重开，代码块保护逻辑失败。"
+        )
+        self.assertTrue(any("复述" in item for item in reason_style_warnings(stitched)))
+        rewritten = (
+            "A 侧方案在workbench.tsx里调用applyTermChange处理译名修改。"
+            "但它没有跳过代码块，结果seg-06这段代码也被重新打开了。"
+            "B 侧方案改了workbench.tsx里的术语处理函数，只重新打开正文，依赖安装和构建都通过了。"
+            "不过它修改译名时允许不填原因，留空后修改历史里看不出为什么改。"
+            "这个任务最重要的是代码块不能进入重开范围，A 侧方案错在这里，B 侧方案缺原因只影响追溯，因此选择 B 侧方案。"
+        )
+        self.assertEqual(reason_style_warnings(rewritten), [])
+        self.assertEqual(reason_flow_errors(rewritten), [])
+        self.assertEqual(reason_language_errors(rewritten), [])
+
     def test_gsb_reason_rejects_evaluation_excluded_evidence(self) -> None:
         evidence_doc = {
             "evidence": [

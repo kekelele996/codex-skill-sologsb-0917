@@ -103,6 +103,7 @@ REASON_MAX_SENTENCE_COMMAS = 5
 REASON_VAGUE_PATTERN = re.compile(r"(?:真实|真正|其实|本质上|实际上)")
 # 2026-09-23 起：平台“理由 AI 化打分”会扣句句同主语起头、碎句和“只罗列不交代判准”。
 REASON_MAX_LABEL_MENTIONS = 3
+REASON_MAX_ADJACENT_REPEATS = 3
 REASON_MIN_SENTENCE_CHARS = 8
 REASON_CRITERION_PATTERN = re.compile(
     r"(?:看重|要紧|关键|决定|差别在|差距在|分开|分出|拉开|主要看|更在意|优先|首先要|最重要)"
@@ -201,6 +202,13 @@ def reason_style_warnings(reason: str) -> list[str]:
             "GSB 理由缺少语气与衔接词，读起来像提纲；建议补“还是照旧”“已经”“从…变…”这类说法: "
             f"命中 {softeners} 处"
         )
+    repeated = _adjacent_repetition(reason)
+    if repeated:
+        word, index = repeated
+        warnings.append(
+            f"GSB 理由第 {index}、{index + 1} 句里“{word}”出现了 3 次以上，后一句像在复述前一句；"
+            "同一件事只说一遍，用“它”“这段”指代，或把两句合成“做了什么，结果怎样”"
+        )
     vague = REASON_VAGUE_PATTERN.findall(reason)
     if vague:
         warnings.append(
@@ -208,6 +216,24 @@ def reason_style_warnings(reason: str) -> list[str]:
             + "、".join(dict.fromkeys(vague))
         )
     return warnings
+
+
+def _adjacent_repetition(reason: str) -> tuple[str, int] | None:
+    """First three-character term used 3+ times across two adjacent sentences (labels excluded)."""
+    text = reason
+    for label in (*REASON_LABELS, "这个任务最重要的是", "因此选择"):
+        text = text.replace(label, "|")
+    sentences = [part for part in re.split(r"[。！？!?]", text) if part.strip()]
+    for index in range(len(sentences) - 1):
+        counts: dict[str, int] = {}
+        for run in re.findall(r"[\u4e00-\u9fff]+", sentences[index] + "|" + sentences[index + 1]):
+            for start in range(len(run) - 2):
+                term = run[start:start + 3]
+                counts[term] = counts.get(term, 0) + 1
+        for term, count in counts.items():
+            if count >= REASON_MAX_ADJACENT_REPEATS:
+                return term, index + 1
+    return None
 
 
 def reason_flow_errors(reason: str) -> list[str]:
