@@ -456,6 +456,52 @@ def require_status(task_root: Path, accepted: Iterable[str]) -> dict[str, Any]:
     return state
 
 
+def side_trace_directory(task_root: Path, side: str) -> Path:
+    """Return the top-level trace directory for one logical side."""
+    normalized = str(side).upper()
+    if normalized not in SIDES:
+        raise SologsbError(f"未知逻辑侧: {side}")
+    return Path(task_root) / "workspace" / "轨迹文件" / SIDE_LOWER[normalized]
+
+
+def side_trace_files(task_root: Path, side: str) -> list[Path]:
+    """List uploadable top-level JSONL traces; rejected attempts are excluded."""
+    directory = side_trace_directory(task_root, side)
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() == ".jsonl"
+    )
+
+
+def ensure_single_side_trace(
+    task_root: Path,
+    side: str,
+    trace_path: str | Path | None = None,
+) -> Path:
+    """Require exactly one top-level JSONL trace per A/B side and return it.
+
+    Failed attempts may remain under ``rejected/`` for audit, but they are not
+    valid side evidence and must never be attached to the submission.
+    """
+    files = side_trace_files(task_root, side)
+    rendered = ", ".join(path.name for path in files) if files else "无"
+    if len(files) != 1:
+        raise SologsbError(
+            f"{str(side).upper()} 侧轨迹目录必须恰好包含 1 个顶层 .jsonl 文件，"
+            f"当前 {len(files)} 个: {rendered}"
+        )
+    unique = files[0].resolve()
+    if trace_path not in (None, ""):
+        selected = Path(trace_path).expanduser().resolve()
+        if selected != unique:
+            raise SologsbError(
+                f"{str(side).upper()} 侧状态记录的轨迹不是该侧唯一顶层 .jsonl: {selected}"
+            )
+    return unique
+
+
 def ensure_task_dirs(task_root: Path) -> None:
     paths = [
         task_root / "source" / "origin",

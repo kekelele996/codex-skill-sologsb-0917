@@ -63,9 +63,11 @@ CONTAINER_LIMIT_PATH = Path(os.environ.get(
     str(Path.home() / ".codex" / "sologsb-0917" / "container-limit.json"),
 ))
 DEFAULT_MAX_CONTAINERS = 4
-ABSOLUTE_MAX_CONTAINERS = 6
+ABSOLUTE_MAX_CONTAINERS = 8
 CONTAINER_QUEUE_POLL_SECONDS = 5.0
-CONTAINER_SETTINGS_REFRESH_SECONDS = 180.0
+# 排队号每轮都会刷新；超过这个时间没刷新（线程已不在）的号不再挡住后面的候选。
+CONTAINER_TICKET_STALE_SECONDS = 120.0
+CONTAINER_TASK_RE = re.compile(r"^(sologsb-.+?)-candidate-\d+-")
 
 
 def anthropic_base_url() -> str:
@@ -431,6 +433,11 @@ class _ContainerLimiter:
         self.reservations = self.root / "reservations"
         self.lock_path = self.root / "limit.lock"
 
+    @property
+    def queue_dir(self) -> Path:
+        """排队号目录，与预占位目录同级。"""
+        return self.reservations.parent / "queue"
+
     @staticmethod
     def _positive_int(value: Any, default: int = DEFAULT_MAX_CONTAINERS) -> int:
         try:
@@ -643,7 +650,38 @@ class _ContainerLimiter:
             "reservations": sorted(reservations),
             "runningNames": sorted(running_names),
             "deadMarkers": [str(path) for path in dead],
+            "queuedCandidates": len(self._live_tickets()),
         }
+
+    def _live_tickets(self) -> list[dict[str, Any]]:
+        """按发放顺序排好的有效排队号，顺手删掉失效的号。
+
+        同一任务的候选按该任务最早的号排在一起，A/B 尽量同时拿到容器，
+        不会一个跑完了另一个还在排队。
+        """
+        now = time.time()
+        tickets: list[dict[str, Any]] = []
+        for path in list(self.queue_dir.glob("*.json")) if self.queue_dir.is_dir() else []:
+            data = read_json(path, {})
+            try:
+                stale = now - path.stat().st_mtime > CONTAINER_TICKET_STALE_SECONDS
+            except OSError:
+                continue
+            if not isinstance(data, dict) or stale or not self._pid_alive(data.get("pid")):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            data["_path"] = path
+            tickets.append(data)
+        first_by_task: dict[str, float] = {}
+        for ticket in tickets:
+            task = str(ticket.get("task") or "")
+            first_by_task[task] = min(first_by_task.get(task, float("inf")), float(ticket.get("enqueuedAt") or 0))
+        tickets.sort(key=lambda t: (first_by_task[str(t.get("task") or "")],
+                                    float(t.get("enqueuedAt") or 0), str(t.get("id") or "")))
+        return tickets
 
     def acquire(
         self,
@@ -651,64 +689,94 @@ class _ContainerLimiter:
         container_name: str,
         stop_event: Any = None,
     ) -> _ContainerReservation:
+        """领号排队，按号发放容器名额。
+
+        每轮（``CONTAINER_QUEUE_POLL_SECONDS``）都重新读取上限：监控台调大上限后
+        几秒内就多放候选，调小后不再放新的。空出 N 个名额时只放行队首 N 个号，
+        后来的候选不会插队。
+        """
         self.reservations.mkdir(parents=True, exist_ok=True)
         started_at = time.monotonic()
-        next_settings_refresh = 0.0
-        limit = DEFAULT_MAX_CONTAINERS
-        excluded: set[str] = set()
-        wait_seconds = 14400.0
-
-        while True:
-            now = time.monotonic()
-            if now >= next_settings_refresh:
+        limit, excluded, wait_seconds = self._settings()
+        if self._container_is_excluded(container_name, project_code, excluded):
+            return _ContainerReservation(None)
+        if stop_event is not None and stop_event.is_set():
+            raise CandidateCancelled("已有两个候选先完成，放弃排队中的容器名额")
+        match = CONTAINER_TASK_RE.match(container_name)
+        ticket_id = uuid.uuid4().hex
+        ticket_path = self.queue_dir / f"{ticket_id}.json"
+        self.queue_dir.mkdir(parents=True, exist_ok=True)
+        ticket = {
+            "id": ticket_id,
+            "task": match.group(1) if match else container_name,
+            "container": container_name,
+            "projectCode": project_code,
+            "pid": os.getpid(),
+            "enqueuedAt": time.time(),
+            "createdAt": utc_now(),
+        }
+        write_json(ticket_path, ticket)
+        last_notice = ""
+        try:
+            while True:
                 limit, excluded, wait_seconds = self._settings()
-                next_settings_refresh = now + max(0.0, CONTAINER_SETTINGS_REFRESH_SECONDS)
-
-            if self._container_is_excluded(container_name, project_code, excluded):
-                return _ContainerReservation(None)
-
-            if stop_event is not None and stop_event.is_set():
-                raise CandidateCancelled("已有两个候选先完成，放弃排队中的容器名额")
-            elapsed = now - started_at
-            if elapsed >= wait_seconds:
-                raise SologsbError(
-                    f"等待容器名额超时：非测试项目最多同时运行 {limit} 个容器，"
-                    f"已等待 {int(wait_seconds)} 秒"
-                )
-
-            with self.lock_path.open("a+", encoding="utf-8") as lock:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                if stop_event is not None and stop_event.is_set():
+                    raise CandidateCancelled("已有两个候选先完成，放弃排队中的容器名额")
+                if time.monotonic() - started_at >= wait_seconds:
+                    raise SologsbError(
+                        f"等待容器名额超时：非测试项目最多同时运行 {limit} 个容器，"
+                        f"已等待 {int(wait_seconds)} 秒"
+                    )
                 try:
-                    self._reap_orphan_containers()
-                    running = self._running_containers(self._count_all_containers())
-                    running_names = {
-                        name for name, label in running
-                        if not self._container_is_excluded(name, label, excluded)
-                    }
-                    reservations, dead = self._classify_markers(running_names, excluded)
-                    for marker in dead:
-                        try:
-                            marker.unlink()
-                        except OSError:
-                            pass
-                    # 必须在同一把独占锁内完成“统计运行中容器 + 统计存活预占位 + 写预占位”。
-                    # 预约也占用名额，所以并发调用不会在容器尚未出现时同时越过上限。
-                    active_names = running_names | reservations
-                    if len(active_names) < limit:
-                        marker_path = self.reservations / f"{uuid.uuid4().hex}.json"
-                        write_json(marker_path, {
-                            "container": container_name,
-                            "projectCode": project_code,
-                            "pid": os.getpid(),
-                            "createdAt": utc_now(),
-                        })
-                        return _ContainerReservation(marker_path)
-                finally:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                    os.utime(ticket_path)
+                except OSError:
+                    # 号被当作失效删掉了（例如机器休眠超过 CONTAINER_TICKET_STALE_SECONDS）：按原号重领。
+                    write_json(ticket_path, ticket)
 
-            _emit_live(project_code or "container", f"容器名额已满，排队等待（上限 {limit}）")
-            remaining = max(0.0, wait_seconds - (time.monotonic() - started_at))
-            time.sleep(min(CONTAINER_QUEUE_POLL_SECONDS, remaining))
+                with self.lock_path.open("a+", encoding="utf-8") as lock:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                    try:
+                        self._reap_orphan_containers()
+                        running = self._running_containers(self._count_all_containers())
+                        running_names = {
+                            name for name, label in running
+                            if not self._container_is_excluded(name, label, excluded)
+                        }
+                        reservations, dead = self._classify_markers(running_names, excluded)
+                        for marker in dead:
+                            try:
+                                marker.unlink()
+                            except OSError:
+                                pass
+                        # 必须在同一把独占锁内完成“统计运行中容器 + 统计存活预占位 + 按号发放”。
+                        # 预约也占用名额，所以并发调用不会在容器尚未出现时同时越过上限。
+                        used = len(running_names | reservations)
+                        free = max(0, limit - used)
+                        order = [str(t.get("id") or "") for t in self._live_tickets()]
+                        position = order.index(ticket_id) if ticket_id in order else len(order)
+                        if position < free:
+                            marker_path = self.reservations / f"{uuid.uuid4().hex}.json"
+                            write_json(marker_path, {
+                                "container": container_name,
+                                "projectCode": project_code,
+                                "pid": os.getpid(),
+                                "createdAt": utc_now(),
+                            })
+                            return _ContainerReservation(marker_path)
+                    finally:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+                notice = f"容器名额已满，排队第 {position - free + 1} 位（已用 {used} / 上限 {limit}）"
+                if notice != last_notice:
+                    _emit_live(project_code or "container", notice)
+                    last_notice = notice
+                remaining = max(0.0, wait_seconds - (time.monotonic() - started_at))
+                time.sleep(min(CONTAINER_QUEUE_POLL_SECONDS, remaining))
+        finally:
+            try:
+                ticket_path.unlink()
+            except OSError:
+                pass
 
 
 CANDIDATE_CONTAINER_RE = re.compile(r"^sologsb-.+-candidate-\d+-")

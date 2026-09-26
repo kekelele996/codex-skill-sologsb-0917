@@ -23,6 +23,7 @@ from common import (
     DEFAULT_RECORDING_LOCK_TIMEOUT,
     SCHEMA_FALLBACK,
     SologsbError,
+    ensure_single_side_trace,
     ensure_task_dirs,
     github_env,
     load_state,
@@ -345,17 +346,19 @@ def build_status(root: Path) -> dict[str, Any]:
         if side_state.get("status") != "clean":
             errors.append(f"{side} 尚未干净完成")
             continue
-        trace = Path(str(side_state.get("tracePath") or ""))
-        if not trace.is_file():
-            errors.append(f"{side} 轨迹缺失")
-        elif prompt_path.is_file():
-            validation = validate_single_round(
-                trace,
-                expected_prompt=prompt_path.read_text(encoding="utf-8"),
-                expected_session_id=str(side_state.get("sessionId") or ""),
-            )
-            if not validation.get("ok"):
-                errors.append(f"{side} 轨迹校验失败: {validation.get('errors')}")
+        try:
+            trace = ensure_single_side_trace(root, side, side_state.get("tracePath"))
+        except SologsbError as exc:
+            errors.append(str(exc))
+        else:
+            if prompt_path.is_file():
+                validation = validate_single_round(
+                    trace,
+                    expected_prompt=prompt_path.read_text(encoding="utf-8"),
+                    expected_session_id=str(side_state.get("sessionId") or ""),
+                )
+                if not validation.get("ok"):
+                    errors.append(f"{side} 轨迹校验失败: {validation.get('errors')}")
         video = (state.get("recordings") or {}).get(side) or {}
         video_path = Path(str(video.get("videoPath") or ""))
         if not video.get("ok") or not video_path.is_file():

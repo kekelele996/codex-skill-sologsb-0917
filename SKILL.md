@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.4.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.4.0`
-- 精确提交号：运行 `git rev-parse v1.4.0` 获取。
+- 全局版本号：`1.5.0`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.5.0`
+- 精确提交号：运行 `git rev-parse v1.5.0` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -34,7 +34,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 困难题默认单 attempt 超时使用 7200 秒；先区分“仍在推进”与“已失败”，不要因自动重连次数频繁重启。
 - 单 Key 并发安全：`run` 默认全局最多同时 4 个 Claude 容器，按“两个任务、每个任务两个候选”共享名额。每次 `docker run` 前都必须调用 `_CONTAINER_LIMITER.acquire`；它在同一个主机级独占锁内完成“统计运行中容器 + 统计存活预占位 + 写入预占位”。运行中容器与预占位合计达到上限时，当前候选不启动并等待已有名额释放。数据库、验证 clone、监控台辅助容器等非任务容器一律不占名额。
-- 上限不是写死的 4：若 `~/.codex/sologsb-0917/container-limit.json` 带 `managedBy`（调度监控台托管），其 `maxContainers` 最优先；否则动态读取设备配置 `~/.codex/sologsb/config.json` 的 `claude.maxContainers`，环境变量 `SOLOSB_MAX_CONTAINERS` 和兼容配置 `container-limit.json.maxContainers` 只作回退，默认 4，并受绝对硬顶 6 约束。每个任务启动容器前都会重新读取该文件；排队等待期间每 180 秒重新读取一次，配置调高或调低后最多 3 分钟生效。实际生效值用 `python3 scripts/side_runner.py` 内部的 `_CONTAINER_LIMITER.status()` 读取，它返回 `limit / runningContainers / reservedSlots / advisoryReservedSlots / used / available / runningNames`；其中 `used = runningContainers + reservedSlots`，`available = limit - used`。
+- 上限不是写死的 4：若 `~/.codex/sologsb-0917/container-limit.json` 带 `managedBy`（调度监控台托管），其 `maxContainers` 最优先；否则动态读取设备配置 `~/.codex/sologsb/config.json` 的 `claude.maxContainers`，环境变量 `SOLOSB_MAX_CONTAINERS` 和兼容配置 `container-limit.json.maxContainers` 只作回退，默认 4，并受绝对硬顶 8 约束。候选按领号先后排队（同一任务的候选排在一起），排队期间每 5 秒重新读取一次上限：监控台调高后几秒内按号放入，调低后不再放新的；上限变化（包括高于以往的数值）属正常，不得据此判定超限或停止任务。实际生效值用 `python3 scripts/side_runner.py` 内部的 `_CONTAINER_LIMITER.status()` 读取，它返回 `limit / runningContainers / reservedSlots / advisoryReservedSlots / used / available / runningNames`；其中 `used = runningContainers + reservedSlots`，`available = limit - used`。
 - 调度模式由监控台 `automation.scheduleMode` 决定，执行器按提示词里的 `{{schedule_mode}}` 取值行动：
   - `容器优先`：保持运行中的候选容器数等于设定值，任务数可以少于上限；
   - `任务数量优先`：保持并行任务数等于设定值，容器数可以少于上限。
@@ -135,7 +135,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   不能替代轨迹校验、语义完成审核或产物证据。
 - 2026-09-23 官方表单（fingerprint `954e9db2d25afeb4`，23 个字段全部必填）删除了“备注”，新增 `A/B-交付完整性`（1~5 整数）和 `A/B-交付完整性描述`。草稿必须提供 `delivery.A/B.score/description/evidenceIds`，打分与写法见 `references/delivery-scoring.md`：只写完整性，两侧独立撰写，允许与 GSB 理由少量重合但不得照抄，A、B 两段之间和与历史数据之间都按 G12 查重。
 - 红线：A/B 交付完整性描述必须与本侧轨迹对应，不得出现对立意见。锚点必须在本侧原始轨迹中存在，分数和描述不得与本侧真实复核结果、引用证据、GSB 理由或 GSB 结论相反（详见 `references/delivery-scoring.md` 红线一）。本地（容器外）编写的任何测试和自动化脚本，包括验收、冒烟、Playwright、录制场景，都不参与交付完整性描述：不写进描述，不引用其证据，也不作为分数依据（红线二）。有页面的项目和之前一样引用录屏证据；纯后端 API 项目的录屏排除，改用验证计划的 `probe` 接口探活作为证据。描述和理由都直接写“请求了登录接口，返回404”这种主观直述，不写“从录屏来看”“根据编写的测试”。
+- GSB 理由首句直接写业务问题，例如“领用单提交后直接扣库存，实验被驳回时库存不会恢复”；不得用“这次冲突在……”“本题冲突在……”等元描述开场。
 - GSB 理由与题目提示词都要写得像人话：理由按“一侧一段话”组织，相邻句不用同一称谓起头、每侧称谓最多 3 次；不写电报体，全文最多 6 句，结论前至少 2 处“结果”“导致”“但”“却”这类因果或转折衔接，不把两件事压成“先提交标题未更新”式短语，结论前必须点明判准和扣分点（2026-09-24 电报体打回后改为阻断）；句子不能以“检查”“核对”等动作直接起头而没有交代是哪一侧，两侧打平时结论统一写“因此选择Same”，不写“打平”，也不写“选A”“选B”（2026-09-25）；提示词像业务方交代需求，硬性措辞最多 3 处、分号最多 2 个，不用“刷新后……一致”式模板收尾。
+- 每个逻辑侧只允许一个有效轨迹文件：`workspace/轨迹文件/a`、`workspace/轨迹文件/b` 顶层必须恰好各有一个 `.jsonl`，状态、Excel 和上传接口只能使用这个文件。`rejected/` 下的失败尝试只留审计，不参与上传；顶层为 0 个或超过 1 个时，导出、状态复核、预检和上传全部阻断。
 - 提交前必须逐份读取 A/B 轨迹 JSONL，确认内容实际包含 SessionID，且与状态、Excel 中的对应 SessionID 完全一致；缺失或不一致直接阻断。
 - 提交前必须从只读接口刷新历史 GSB 记录，将完整 `user_prompt` 与 `gsb_reason` 写入本地持久缓存 `$CODEX_HOME/cache/sologsb-0917/gsb-history-cache.json`，并按当前 A/B SessionID/已提交 ID 排除自身。历史文案缓存不可只保存在单个任务目录。
 - 当前 `GSB 理由` 必须与历史 `gsb_reason` 逐条执行 B-5 公共长片段、模板 n-gram 和相似度检测；低整句相似度但存在公共长片段同样阻断。任何 `EXACT`、`SIMILAR`、`REVIEW_REQUIRED` 或 `MISSING` 都不得上传或提交。
@@ -143,7 +145,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 命中历史理由后，必须回到本次和对应历史记录的轨迹、commit、构建/测试/启动输出重写对比理由；禁止只替换项目名、保留公共句式或套用统一模板。
 - GSB 理由使用完整、质朴的中文描述，不使用省略式单字；统一写“A 侧方案”“B 侧方案”，业务名词写完整。禁止使用“落在……”式收束句式，结论直接写“因此选择 B 侧方案”或“B 侧方案更好”。
 - GSB 理由必须严格使用纯文本，不允许任何 Markdown 语法；标题、列表、代码块、行内代码、链接、图片、强调标记、表格、引用和 HTML 标签均由 `gsb_tools.py` 硬阻断。
-- GSB 理由禁用“闭环”“根因”“落库”，也禁用旧句式“这题”“最要紧”，统一写“这个任务最重要的是”；数据写入统一写“入库”；常用命令“npm run build”统一写“build”，避免触发历史公共长片段。“真实”“真正”“其实”等空泛表达会给出警告。数字两侧不留空格，写“计数从2变22”。文风要朴实但不要过于干练：动词后补足语气与结果（“建了独立表”“覆盖掉了”“还是照旧读回”），禁止电报式短句。
+- GSB 理由禁用“闭环”“根因”“落库”，也禁用“端掉”“拉起”“干掉”这类怪词和旧句式“这题”“最要紧”，统一写“这个任务最重要的是”；关闭服务后重启写“关掉运行进程再重新启动”或“关闭服务后重新启动”；数据写入统一写“入库”；常用命令“npm run build”统一写“build”，避免触发历史公共长片段。“真实”“真正”“其实”等空泛表达会给出警告。数字两侧不留空格，写“计数从2变22”。文风要朴实但不要过于干练：动词后补足语气与结果（“建了独立表”“覆盖掉了”“还是照旧读回”），禁止电报式短句。
 - GSB 理由必须达到高中语文阅读水平，句子通顺；单句非空白字符不得超过 56 字，分句过多、重复标点、标点不成对、连接词堆叠、重复虚词和残句均阻断。
 - 禁止用中文念法或缩写代称提交号，例如“依六四二四七二c”；引用原有业务值或代码值即可。
 - 负面触发节点不能只写“首次运行阶段”这类泛化阶段，必须落到具体页面、入口、接口、文件、命令或报错原文，例如“打开专栏详情页时”“调用我的订阅接口返回401”。
@@ -163,7 +165,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 设备专属凭据不在技能包内，统一放在 `~/.codex/sologsb/config.json`（明文，权限 0600）：
 
 - Claude API Key 与 LLM Base URL
-- 最大并发容器 `claude.maxContainers`（默认 4，绝对上限 6）
+- 最大并发容器 `claude.maxContainers`（默认 4，绝对上限 8）
 - 容器镜像 `claude.image`（默认 `adminfather/benzhi-claude-code2:20260919`：原生镜像，只带 Node 20 / Python 3.11（无 pip）/ git / Claude Code 2.1.197，不含 Go、JDK、Maven、Gradle、pnpm，也不含 docker；运行器以 `--entrypoint /bin/bash` 启动并显式传入 Base URL，不依赖镜像自带的 entrypoint 与 `ANTHROPIC_BASE_URL`）
 - Solo Manager 地址、账号、密码
 - SOLO2 地址、账号、密码
@@ -172,7 +174,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 技能入口启动时会自动把它注入环境变量，一般配置优先级为
 `命令行参数 > 环境变量 > 配置文件 > 代码默认值`；磁盘上不存在该文件时，
 运行器按旧方式回退到 macOS 钥匙串与环境变量。容器上限 `claude.maxContainers` 是例外：
-它优先读取上述设备配置，并在每个任务启动容器前以及排队等待期间的每 180 秒重新读取。
+它优先读取上述托管值或设备配置，排队等待期间每 5 秒重新读取，按领号顺序放行。
 
 新设备接入、更换任一凭据、或 `verify` 失败时，执行向导（会联网验证四项）：
 

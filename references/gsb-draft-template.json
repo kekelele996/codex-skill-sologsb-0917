@@ -98,7 +98,10 @@
     "bannedWords": [
       "闭环",
       "根因",
-      "落库"
+      "落库",
+      "端掉",
+      "拉起",
+      "干掉"
     ],
     "writeOperationLabel": "入库",
     "externalFactorReferencesAllowed": false,

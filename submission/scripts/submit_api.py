@@ -28,6 +28,7 @@ for _parent in Path(__file__).resolve().parents:
         sys.path.insert(0, str(_parent / "scripts"))
         break
 import device_config as _device_config  # noqa: E402
+from common import SologsbError, ensure_single_side_trace  # noqa: E402
 
 _device_config.load_and_apply()
 
@@ -105,6 +106,14 @@ def keychain_secret(service: str, account: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+def _with_csrf_cookie(cookie: str, csrf: str) -> str:
+    """Ensure the double-submit CSRF cookie accompanies the session cookie."""
+    if not csrf or "solo_qa_csrf=" in cookie:
+        return cookie
+    prefix = cookie.rstrip("; ")
+    return f"{prefix}; solo_qa_csrf={csrf}" if prefix else f"solo_qa_csrf={csrf}"
+
+
 def credentials(service: str) -> tuple[str, str]:
     cookie = os.environ.get("SOLO_QA_COOKIE", "").strip()
     csrf = os.environ.get("SOLO_QA_CSRF", "").strip()
@@ -112,22 +121,27 @@ def credentials(service: str) -> tuple[str, str]:
     # 设备配置文件优先：提交是写操作，开始前先确认会话有效，失效就用账号密码重登。
     # 这样避免上传到一半才因为 Cookie 过期而失败。
     try:
-        valid_cookie, valid_csrf = _device_config.ensure_solo2_session(validate=True)
+        # Uploads are CSRF-protected writes.  A still-valid GET session can
+        # carry an old CSRF token, so refresh the login before every submit.
+        valid_cookie, valid_csrf = _device_config.refresh_solo2_session()
     except Exception:
-        valid_cookie = valid_csrf = ""
+        try:
+            valid_cookie, valid_csrf = _device_config.ensure_solo2_session(validate=True)
+        except Exception:
+            valid_cookie = valid_csrf = ""
     if valid_cookie and valid_csrf:
         if valid_cookie != cookie:
             print("会话已失效，已用配置里的账号密码自动重新登录 SOLO2", file=sys.stderr)
-        return valid_cookie, valid_csrf
+        return _with_csrf_cookie(valid_cookie, valid_csrf), valid_csrf
 
     if cookie and csrf:
-        return cookie, csrf
+        return _with_csrf_cookie(cookie, csrf), csrf
     account = os.environ.get("USER", "")
     cookie = cookie or keychain_secret(service + "-cookie", account) or keychain_secret(service, account)
     csrf = csrf or keychain_secret(service + "-csrf", account)
     if not cookie or not csrf:
         raise RuntimeError("缺少 SOLO2 凭据；请设置 SOLO_QA_COOKIE / SOLO_QA_CSRF 或配置 Keychain")
-    return cookie, csrf
+    return _with_csrf_cookie(cookie, csrf), csrf
 
 
 def api_headers(cookie: str, csrf: str, *, json_body: bool = False,
@@ -196,6 +210,17 @@ def verify_payload(payload: dict[str, Any]) -> None:
     uploads = payload.get("uploads") or {}
     if not isinstance(fields, dict) or not isinstance(uploads, dict):
         raise RuntimeError("submission payload 的 fields/uploads 必须是对象")
+    task_root = Path(str(payload.get("taskRoot") or "")).expanduser()
+    if not str(task_root):
+        raise RuntimeError("submission payload 缺少 taskRoot")
+    for side, label in (("A", "A-轨迹文件"), ("B", "B-轨迹文件")):
+        info = uploads.get(label)
+        if not isinstance(info, dict) or not str(info.get("path") or "").strip():
+            raise RuntimeError(f"submission payload 缺少 {label} 的单个文件路径")
+        try:
+            ensure_single_side_trace(task_root, side, info.get("path"))
+        except SologsbError as exc:
+            raise RuntimeError(str(exc)) from exc
     delivery = payload.get("deliverySheet") or {}
     delivery_path = Path(str(delivery.get("path") or "")).expanduser()
     if not delivery_path.is_file():

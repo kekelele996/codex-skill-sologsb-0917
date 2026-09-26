@@ -1,6 +1,6 @@
 # sologsb-0917
 
-全局版本号 `1.4.0`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
+全局版本号 `1.5.0`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
 
 0917 期 Pair-wise GSB 的可复用 Codex Skill。详见 `SKILL.md`。
 
@@ -11,7 +11,7 @@
    `source/candidates/candidate-1..N`；候选目录永不改名。
 3. `run --side both --candidates 2` 让 N 个候选在独立容器中并行无头执行；Base URL 取设备配置的 `claude.baseUrl`。
    每次启动容器都在主机级独占锁内预占名额，运行中容器与预占位合计不得超过设备配置
-   `claude.maxContainers`（默认 4，绝对上限 6）；该值每个任务动态读取，排队时每 180 秒重读，
+   `claude.maxContainers`（默认 4，绝对上限 8）；该值每个任务动态读取，排队时每 5 秒重读、按领号顺序放行，
    超限时排队等待释放。
    前两个干净完成者按完成顺序映射为逻辑 A/B，其余候选立即停止。
 4. 每个候选最多六次实际尝试（含首次）。模型异常后从本地初始快照重新 clone，
@@ -66,3 +66,9 @@ git add -A && git commit -m "说明改了什么" && git push
 ```
 
 其它设备 `git pull --ff-only` 即可拿到同一份。
+
+## 轨迹文件约束
+
+- `workspace/轨迹文件/a`、`workspace/轨迹文件/b` 顶层必须各自恰好包含 1 个 `.jsonl`。
+- `rejected/` 下的失败尝试仅作审计，不进入 Excel 或上传接口。
+- 生成 Excel、状态复核、提交预检和真实上传都会复验数量，0 个或超过 1 个均阻断。

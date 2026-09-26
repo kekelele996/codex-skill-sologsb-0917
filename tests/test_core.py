@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from common import (  # noqa: E402
     SologsbError,
+    ensure_single_side_trace,
     github_env,
     global_recording_lock,
     read_json,
@@ -216,6 +217,37 @@ class TraceTests(unittest.TestCase):
             self.assertTrue(any("SessionID 不匹配" in item for item in mismatch["errors"]), mismatch)
 
 
+class TraceUploadTests(unittest.TestCase):
+    def test_each_side_requires_exactly_one_top_level_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            a_dir = root / "workspace" / "轨迹文件" / "a"
+            b_dir = root / "workspace" / "轨迹文件" / "b"
+            (a_dir / "rejected").mkdir(parents=True)
+            (b_dir / "rejected").mkdir(parents=True)
+            a_trace = a_dir / "session-a.jsonl"
+            b_trace = b_dir / "session-b.jsonl"
+            a_trace.write_text("{}\n", encoding="utf-8")
+            b_trace.write_text("{}\n", encoding="utf-8")
+            (a_dir / "rejected" / "attempt-01.jsonl").write_text("{}\n", encoding="utf-8")
+            self.assertEqual(ensure_single_side_trace(root, "A", a_trace), a_trace.resolve())
+            self.assertEqual(ensure_single_side_trace(root, "B", b_trace), b_trace.resolve())
+
+            (a_dir / "stale-copy.jsonl").write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(SologsbError, "恰好包含 1 个"):
+                ensure_single_side_trace(root, "A", a_trace)
+
+    def test_state_trace_must_match_the_unique_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            trace_dir = root / "workspace" / "轨迹文件" / "a"
+            trace_dir.mkdir(parents=True)
+            actual = trace_dir / "actual.jsonl"
+            actual.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(SologsbError, "不是该侧唯一顶层"):
+                ensure_single_side_trace(root, "A", trace_dir / "other.jsonl")
+
+
 class PromptTests(unittest.TestCase):
     def test_history_exact_and_shingle(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -380,6 +412,14 @@ class ExcelTests(unittest.TestCase):
         self.assertTrue(reason_style_errors("A 侧方案把根因写成配置缺失。"))
         self.assertTrue(reason_style_errors("A 侧方案把改动入库，计数 2 变 22。"))
         self.assertTrue(reason_style_errors("A 侧方案读取 Mock 服务配置。"))
+        for phrase in ("端掉运行进程再启动", "拉起服务后检查", "干掉旧进程后重启"):
+            errors = reason_style_errors(phrase)
+            self.assertTrue(errors, phrase)
+        self.assertEqual(reason_style_errors("A 侧方案关掉运行进程再重新启动。"), [])
+        for phrase in ("这次冲突在领用冻结和实验审核之间。", "本次冲突在状态流转和库存之间。", "本题冲突在审批和领用之间。"):
+            errors = reason_style_errors(phrase)
+            self.assertTrue(errors, phrase)
+        self.assertEqual(reason_style_errors("领用单提交后直接扣库存，实验被驳回时库存不会恢复。"), [])
         legacy = reason_style_errors("A 侧方案实现验收，这题最要紧的是状态一致。")
         self.assertTrue(any("这题" in item for item in legacy), legacy)
         self.assertTrue(any("最要紧" in item for item in legacy), legacy)
@@ -926,7 +966,11 @@ class DeliveryFieldTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "monitor").mkdir()
-            trace_a, trace_b, prompt = root / "a.jsonl", root / "b.jsonl", root / "p.md"
+            trace_a = root / "workspace" / "轨迹文件" / "a" / "session-a.jsonl"
+            trace_b = root / "workspace" / "轨迹文件" / "b" / "session-b.jsonl"
+            prompt = root / "p.md"
+            trace_a.parent.mkdir(parents=True)
+            trace_b.parent.mkdir(parents=True)
             for path in (trace_a, trace_b, prompt):
                 path.write_text("x", encoding="utf-8")
             write_json(root / "monitor" / "state.json", {
@@ -945,6 +989,10 @@ class DeliveryFieldTests(unittest.TestCase):
             self.assertEqual(values["a_score_delivery"], 2)
             self.assertEqual(values["b_desc_delivery"], self.DESC_B)
             self.assertNotIn("remark", values)
+            (trace_a.parent / "stale-copy.jsonl").write_text("x", encoding="utf-8")
+            with self.assertRaisesRegex(Exception, "恰好包含 1 个"):
+                build_values(root, draft, schema)
+            (trace_a.parent / "stale-copy.jsonl").unlink()
             draft["delivery"]["A"]["score"] = "2"
             with self.assertRaises(Exception):
                 build_values(root, draft, schema)
@@ -2590,12 +2638,64 @@ class ChangeVolumeGateTests(unittest.TestCase):
                     live = self.preflight.fetch_gsb_prompt_history(set(), set(), force_refresh=True)
                 self.assertTrue(cache.is_file())
                 self.assertEqual(live["items"][0]["gsbReason"], "历史 GSB 理由")
-                with mock.patch.object(self.preflight, "_readonly_json", side_effect=RuntimeError("offline")):
+                with mock.patch.object(self.preflight, "_readonly_json", side_effect=RuntimeError("offline")), \
+                        mock.patch.object(self.preflight, "GSB_HISTORY_SHARED_REFRESH_SECONDS", 0):
                     fallback = self.preflight.fetch_gsb_prompt_history(set(), set(), force_refresh=True)
                 self.assertTrue(fallback["cacheHit"])
                 self.assertFalse(fallback["cacheFresh"])
                 self.assertIn("offline", fallback["fetchError"])
                 self.assertEqual(fallback["items"][0]["gsbReason"], "历史 GSB 理由")
+
+    def test_gsb_history_refresh_only_fetches_new_or_changed_details(self) -> None:
+        listing = {"items": [
+            {"id": 2091, "current_version": 1, "status_label": "待质检"},
+            {"id": 2090, "current_version": 1, "status_label": "待质检"},
+        ]}
+        calls: list[str] = []
+
+        def readonly(path: str) -> dict:
+            calls.append(path)
+            if path.startswith("/api/v1/gsb/submissions?"):
+                return {"meta": {"total": len(listing["items"]), "total_pages": 1}, "items": listing["items"]}
+            item_id = int(path.rsplit("/", 1)[1])
+            return {"id": item_id, "status_label": "待质检", "user_prompt": f"提示词{item_id}", "gsb_reason": f"理由{item_id}"}
+
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / "gsb-history-cache.json"
+            with mock.patch.dict(os.environ, {self.preflight.GSB_HISTORY_CACHE_ENV: str(cache)}), \
+                    mock.patch.object(self.preflight, "_readonly_json", side_effect=readonly), \
+                    mock.patch.object(self.preflight, "GSB_HISTORY_SHARED_REFRESH_SECONDS", 0):
+                first = self.preflight.fetch_gsb_prompt_history(set(), set(), force_refresh=True)
+                self.assertEqual(first["refreshMode"], "full")
+                self.assertEqual(first["detailFetched"], 2)
+                listing["items"] = [
+                    {"id": 2092, "current_version": 1, "status_label": "待质检"},
+                    {"id": 2091, "current_version": 2, "status_label": "待质检"},
+                    {"id": 2090, "current_version": 1, "status_label": "质检通过"},
+                ]
+                calls.clear()
+                second = self.preflight.fetch_gsb_prompt_history(set(), set(), force_refresh=True)
+        self.assertEqual(second["refreshMode"], "incremental")
+        self.assertEqual(sorted(path for path in calls if "?" not in path), [
+            "/api/v1/gsb/submissions/2091", "/api/v1/gsb/submissions/2092",
+        ])
+        self.assertEqual([item["id"] for item in second["items"]], [2092, 2091, 2090])
+        self.assertEqual(second["items"][2]["status"], "质检通过")
+        self.assertNotIn("listVersions", second)
+
+    def test_forced_gsb_history_refresh_reuses_cache_just_refreshed_by_another_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / "gsb-history-cache.json"
+            cache.write_text(json.dumps({
+                "fetchedAt": self.preflight.utc_now(),
+                "items": [{"id": 2090, "gsbReason": "历史 GSB 理由", "userPrompt": "历史提示词"}],
+            }), encoding="utf-8")
+            with mock.patch.dict(os.environ, {self.preflight.GSB_HISTORY_CACHE_ENV: str(cache)}), \
+                    mock.patch.object(self.preflight, "_readonly_json", side_effect=AssertionError("no fetch")):
+                result = self.preflight.fetch_gsb_prompt_history(set(), set(), force_refresh=True)
+        self.assertTrue(result["cacheHit"])
+        self.assertTrue(result["cacheFresh"])
+        self.assertEqual(result["fetchError"], "")
 
     def test_manual_history_merges_for_inaccessible_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2714,6 +2814,24 @@ class SubmitApprovalTests(unittest.TestCase):
         payload_path = pre_submit / "submission-payload.json"
         payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return payload_path, payload
+
+    def test_payload_requires_one_trace_file_per_side(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, payload = self._bundle(root)
+            for side, label in (("a", "A-轨迹文件"), ("b", "B-轨迹文件")):
+                old = Path(payload["uploads"][label]["path"])
+                target = root / "workspace" / "轨迹文件" / side / f"session-{side}.jsonl"
+                target.parent.mkdir(parents=True)
+                old.rename(target)
+                payload["uploads"][label]["path"] = str(target)
+                payload["uploads"][label]["sha256"] = self.submit_api.sha256_file(target)
+            self.submit_api.verify_payload(payload)
+
+            extra = root / "workspace" / "轨迹文件" / "a" / "stale.jsonl"
+            extra.write_text("x", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "恰好包含 1 个"):
+                self.submit_api.verify_payload(payload)
 
     def test_complete_audit_gets_automatic_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2882,7 +3000,7 @@ class ContainerLimitTests(unittest.TestCase):
                 if second is not None:
                     second.release()
 
-    def test_waiting_task_reloads_device_config_after_refresh_interval(self) -> None:
+    def test_waiting_task_rereads_the_limit_on_every_poll(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = root / "container-limit.json"
@@ -2909,8 +3027,6 @@ class ContainerLimitTests(unittest.TestCase):
                         write_json(device_config, {"claude": {"maxContainers": "2"}})
 
                     with mock.patch.object(
-                        side_runner, "CONTAINER_SETTINGS_REFRESH_SECONDS", 0.0
-                    ), mock.patch.object(
                         side_runner.time, "sleep", side_effect=reload_limit
                     ):
                         second = limiter.acquire(
@@ -2927,6 +3043,81 @@ class ContainerLimitTests(unittest.TestCase):
                 if second is not None:
                     second.release()
 
+    def _queued_limiter(self, root: Path, limit: int):
+        config = root / "container-limit.json"
+        write_json(config, {"maxContainers": limit, "managedBy": "sologsb-monitor", "waitSeconds": 60})
+        return config, side_runner._ContainerLimiter(config)
+
+    def _ticket(self, limiter, task: str, container: str, at: float) -> Path:
+        limiter.queue_dir.mkdir(parents=True, exist_ok=True)
+        path = limiter.queue_dir / f"{container}.json"
+        write_json(path, {"id": container, "task": task, "container": container,
+                          "projectCode": "cy-1", "pid": os.getpid(), "enqueuedAt": at})
+        return path
+
+    def test_queued_candidates_get_slots_in_ticket_order(self) -> None:
+        """后来的候选不能插队：只空出 1 个名额时先放排在前面的号。"""
+        with tempfile.TemporaryDirectory() as temp:
+            config, limiter = self._queued_limiter(Path(temp), 1)
+            self._ticket(limiter, "sologsb-cy-1-a", "sologsb-cy-1-a-candidate-1-1-a", time.time() - 60)
+            sleeps: list[float] = []
+
+            def earlier_ticket_admitted(seconds: float) -> None:
+                sleeps.append(seconds)
+                for path in limiter.queue_dir.glob("sologsb-cy-1-a-*.json"):
+                    path.unlink()
+
+            with mock.patch.object(limiter, "_running_containers", return_value=[]), \
+                    mock.patch.object(side_runner.time, "sleep", side_effect=earlier_ticket_admitted):
+                reservation = limiter.acquire("cy-2", "sologsb-cy-2-b-candidate-1-1-a")
+            self.assertEqual(len(sleeps), 1)
+            self.assertIsNotNone(reservation.path)
+            self.assertEqual(list(limiter.queue_dir.glob("*.json")), [])
+            reservation.release()
+
+    def test_candidates_of_one_task_are_served_together(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            _config, limiter = self._queued_limiter(Path(temp), 2)
+            now = time.time()
+            self._ticket(limiter, "sologsb-old", "sologsb-old-candidate-1-1-a", now - 100)
+            self._ticket(limiter, "sologsb-new", "sologsb-new-candidate-1-1-a", now - 50)
+            self._ticket(limiter, "sologsb-old", "sologsb-old-candidate-2-1-b", now - 10)
+            order = [t["container"] for t in limiter._live_tickets()]
+            self.assertEqual(order, ["sologsb-old-candidate-1-1-a", "sologsb-old-candidate-2-1-b",
+                                     "sologsb-new-candidate-1-1-a"])
+
+    def test_dead_or_stale_tickets_do_not_block_the_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            _config, limiter = self._queued_limiter(Path(temp), 1)
+            dead = self._ticket(limiter, "sologsb-a", "sologsb-a-candidate-1-1-a", time.time() - 90)
+            write_json(dead, {**json.loads(dead.read_text()), "pid": 999_999})
+            stale = self._ticket(limiter, "sologsb-b", "sologsb-b-candidate-1-1-a", time.time() - 80)
+            old = time.time() - side_runner.CONTAINER_TICKET_STALE_SECONDS - 5
+            os.utime(stale, (old, old))
+            with mock.patch.object(limiter, "_running_containers", return_value=[]):
+                reservation = limiter.acquire("cy-3", "sologsb-c-candidate-1-1-a")
+            self.assertIsNotNone(reservation.path)
+            self.assertFalse(dead.exists())
+            self.assertFalse(stale.exists())
+            reservation.release()
+
+    def test_raising_the_limit_admits_waiting_candidates_at_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config, limiter = self._queued_limiter(Path(temp), 1)
+            running = [("sologsb-x-candidate-1-1-a", "cy-x")]
+            sleeps: list[float] = []
+
+            def monitor_raises_limit(seconds: float) -> None:
+                sleeps.append(seconds)
+                write_json(config, {"maxContainers": 2, "managedBy": "sologsb-monitor", "waitSeconds": 60})
+
+            with mock.patch.object(limiter, "_running_containers", return_value=running), \
+                    mock.patch.object(side_runner.time, "sleep", side_effect=monitor_raises_limit):
+                reservation = limiter.acquire("cy-4", "sologsb-d-candidate-1-1-a")
+            self.assertEqual(sleeps, [side_runner.CONTAINER_QUEUE_POLL_SECONDS])
+            self.assertIsNotNone(reservation.path)
+            reservation.release()
+
     def test_absolute_cap_cannot_be_raised_by_env_or_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2940,7 +3131,7 @@ class ContainerLimitTests(unittest.TestCase):
                 "SOLOSB_MAX_CONTAINERS": "99",
             }, clear=False):
                 limit, _, _ = limiter._settings()
-            self.assertEqual(limit, 6)
+            self.assertEqual(limit, 8)
 
     def test_test_project_is_excluded_and_new_container_gets_one_slot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -3068,6 +3259,66 @@ class VersionTests(unittest.TestCase):
         payload = json.loads(command.stdout)
         self.assertEqual(payload["version"], skill_version())
         self.assertEqual(payload["releaseTag"], skill_version_info().get("release_tag"))
+
+
+class DraftHistoryDedupTests(unittest.TestCase):
+    HISTORY = {"items": [
+        {"id": 2090, "aSessionId": "a-old", "bSessionId": "b-old",
+         "gsbReason": "A侧方案在订单导出入口遗漏了权限过滤，普通用户可以下载他人的订单文件；B侧方案补齐了角色校验并返回403。",
+         "aDescDelivery": "导出接口缺少权限过滤，普通用户能下载别人的订单，功能不能交付。",
+         "bDescDelivery": "补齐了角色校验，越权请求返回403，其余导出功能完整。"},
+    ]}
+
+    def test_reason_dedup_blocks_reused_history_reason_at_draft_stage(self) -> None:
+        import gsb_tools
+
+        reused = self.HISTORY["items"][0]["gsbReason"]
+        unrelated = {"items": [{"id": 2091, "gsbReason": "订单导出入口遗漏了权限过滤，普通用户可以下载他人的订单文件；补齐角色校验后返回403。"}]}
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.object(gsb_tools, "fetch_submission_history", return_value=self.HISTORY):
+                errors = gsb_tools._validate_reason_dedup(reused, Path(temp))
+            with mock.patch.object(gsb_tools, "fetch_submission_history", return_value=unrelated):
+                fresh = gsb_tools._validate_reason_dedup(
+                    "A侧方案把日程回退时的通知写了两遍，同一提醒推送两次；B侧方案改成幂等写入，接口只返回一条记录。", Path(temp)
+                )
+        self.assertTrue(errors and errors[0].startswith("G10"), errors)
+        self.assertIn("#2090", errors[0])
+        self.assertEqual(fresh, [])
+
+    def test_reason_dedup_excludes_own_sessions_from_history(self) -> None:
+        import gsb_tools
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_json(root / "monitor" / "state.json", {"sides": {"A": {"sessionId": "a-old"}, "B": {"sessionId": "b-old"}}})
+            with mock.patch("preflight._readonly_json", side_effect=AssertionError("no fetch")), \
+                    mock.patch("preflight.gsb_history_cache_path", return_value=root / "cache.json"), \
+                    mock.patch("preflight.gsb_history_manual_cache_path", return_value=root / "manual.json"):
+                (root / "cache.json").write_text(json.dumps({
+                    "fetchedAt": gsb_tools._load_submission_preflight().utc_now(), **self.HISTORY,
+                }), encoding="utf-8")
+                errors = gsb_tools._validate_reason_dedup(self.HISTORY["items"][0]["gsbReason"], root)
+        self.assertEqual(errors, [])
+
+    def test_delivery_dedup_blocks_copied_history_description(self) -> None:
+        import gsb_tools
+
+        draft = {"delivery": {
+            "A": {"score": 2, "description": self.HISTORY["items"][0]["aDescDelivery"]},
+            "B": {"score": 5, "description": "登录跳转和列表分页都能正常使用，没有发现缺失的功能。"},
+        }}
+        with mock.patch.object(gsb_tools, "fetch_submission_history", return_value=self.HISTORY):
+            errors = gsb_tools._validate_delivery_dedup(draft, None)
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("G12 A-"), errors)
+
+    def test_offline_history_is_skipped_only_when_allowed(self) -> None:
+        import gsb_tools
+
+        with mock.patch.object(gsb_tools, "fetch_submission_history", side_effect=RuntimeError("offline")):
+            self.assertIn("offline", gsb_tools._validate_reason_dedup("任意理由", None)[0])
+            with mock.patch.dict(os.environ, {"SOLOSB_ALLOW_OFFLINE_DEDUP": "1"}):
+                self.assertEqual(gsb_tools._validate_reason_dedup("任意理由", None), [])
 
 
 if __name__ == "__main__":

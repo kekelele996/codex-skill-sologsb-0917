@@ -624,7 +624,7 @@ def section_claude(cfg: dict, path: Path, *, advanced: bool = False) -> None:
         "claude.maxContainers",
         f"最大并发容器（默认 {max_containers}，绝对上限 6）",
         default=max_containers,
-        validate=lambda v: None if v.isdigit() and 1 <= int(v) <= 6 else "必须是 1-6 的正整数",
+        validate=lambda v: None if v.isdigit() and 1 <= int(v) <= 8 else "必须是 1-8 的正整数",
     )
     if advanced:
         prompt_field(cfg, "claude.model", "模型名", default=dc.FIELDS["claude.model"][1])

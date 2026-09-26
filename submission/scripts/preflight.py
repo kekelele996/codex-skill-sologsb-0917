@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import difflib
 import hashlib
 import importlib
@@ -18,10 +19,12 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -32,7 +35,7 @@ for _parent in Path(__file__).resolve().parents:
         sys.path.insert(0, str(_parent / "scripts"))
         break
 import device_config as _device_config  # noqa: E402
-from common import LOCKFILE_NAMES, paired_lockfiles  # noqa: E402
+from common import LOCKFILE_NAMES, SologsbError, ensure_single_side_trace, paired_lockfiles  # noqa: E402
 
 _device_config.load_and_apply()
 
@@ -62,6 +65,12 @@ def gsb_server() -> str:
 GSB_HISTORY_CACHE_ENV = "SOLOGBS_0917_GSB_HISTORY_CACHE"
 GSB_HISTORY_MANUAL_CACHE_ENV = "SOLOGBS_0917_GSB_HISTORY_MANUAL_CACHE"
 GSB_HISTORY_CACHE_TTL = float(os.environ.get("SOLOGBS_0917_GSB_HISTORY_CACHE_TTL", "300") or "300")
+# 增量刷新只重拉新增或 current_version 变化的详情；每隔一段时间整体重拉一次兜底。
+GSB_HISTORY_FULL_REFRESH_SECONDS = float(os.environ.get("SOLOGBS_0917_GSB_HISTORY_FULL_REFRESH", "86400") or "86400")
+GSB_HISTORY_DETAIL_WORKERS = max(1, int(os.environ.get("SOLOGBS_0917_GSB_HISTORY_WORKERS", "8") or "8"))
+# 强制刷新时，别的任务刚刷新过（持锁后看到）的缓存直接复用，避免多个任务同时提交时各拉一遍。
+GSB_HISTORY_SHARED_REFRESH_SECONDS = float(os.environ.get("SOLOGBS_0917_GSB_HISTORY_SHARED_REFRESH", "60") or "60")
+GSB_HISTORY_LOCK_TIMEOUT = 300.0
 REASON_FRAGMENT_MIN = int(os.environ.get("SOLOGBS_REASON_FRAGMENT_MIN", "12") or "12")
 REASON_FRAGMENT_REVIEW = int(os.environ.get("SOLOGBS_REASON_FRAGMENT_REVIEW", "8") or "8")
 REASON_SIMILARITY_BLOCK = float(os.environ.get("SOLOGBS_REASON_SIMILARITY_BLOCK", "0.40") or "0.40")
@@ -594,7 +603,37 @@ def _filter_gsb_history(
     return result
 
 
-def _fetch_live_gsb_history() -> dict:
+def _history_item_from_detail(item_id: int, detail: dict) -> dict | None:
+    prompt = str(detail.get("user_prompt") or "").strip()
+    reason = str(detail.get("gsb_reason") or detail.get("reason") or "").strip()
+    if not prompt and not reason:
+        return None
+    return {
+        "id": item_id,
+        "status": str(detail.get("status_label") or detail.get("status") or ""),
+        "submittedAt": str(detail.get("submitted_at") or detail.get("created_at") or ""),
+        "userPrompt": prompt,
+        "gsbReason": reason,
+        "questionType": str(detail.get("question_type") or ""),
+        "difficulty": str(detail.get("difficulty") or ""),
+        "languages": str(detail.get("languages") or ""),
+        "repoId": str(detail.get("repo_id") or ""),
+        "aSessionId": str(detail.get("a_session_id") or ""),
+        "bSessionId": str(detail.get("b_session_id") or ""),
+        "aDescDelivery": str(detail.get("a_desc_delivery") or "").strip(),
+        "bDescDelivery": str(detail.get("b_desc_delivery") or "").strip(),
+    }
+
+
+def _fetch_history_detail(item_id: int) -> dict:
+    try:
+        return _readonly_json(f"/api/v1/gsb/submissions/{item_id}")
+    except Exception:
+        # 单条详情偶发超时/5xx 重试一次，仍失败再让整次刷新失败并回落到缓存。
+        return _readonly_json(f"/api/v1/gsb/submissions/{item_id}")
+
+
+def _fetch_live_gsb_history(previous: dict | None = None) -> dict:
     params = {
         "verdict": "", "git_state": "", "difficulty": "", "needs_review": "false",
         "keyword": "", "date_from": "", "date_to": "", "user_id": "0", "team": "",
@@ -610,37 +649,90 @@ def _fetch_live_gsb_history() -> dict:
         payload = _readonly_json("/api/v1/gsb/submissions?" + urllib.parse.urlencode(params))
         list_items.extend(payload.get("items") or [])
 
-    items = []
+    # 列表不带 user_prompt / gsb_reason，只能逐条读详情；current_version 没变的沿用上次缓存。
+    previous = previous if isinstance(previous, dict) else {}
+    previous_versions = previous.get("listVersions") if isinstance(previous.get("listVersions"), dict) else {}
+    previous_items = {
+        int(item.get("id") or 0): item
+        for item in previous.get("items") or []
+        if isinstance(item, dict) and int(item.get("id") or 0) > 0
+    }
+    full_age = _cache_age_seconds({"fetchedAt": previous.get("fullFetchedAt")})
+    full = not previous_versions or full_age is None or full_age > GSB_HISTORY_FULL_REFRESH_SECONDS
+
+    versions: dict[str, str] = {}
+    ordered: list[int] = []
+    reused: dict[int, dict] = {}
+    to_fetch: list[int] = []
     for item in list_items:
         item_id = int(item.get("id") or 0)
-        if item_id <= 0:
+        if item_id <= 0 or item_id in versions:
             continue
-        detail = _readonly_json(f"/api/v1/gsb/submissions/{item_id}")
-        prompt = str(detail.get("user_prompt") or "").strip()
-        reason = str(detail.get("gsb_reason") or detail.get("reason") or "").strip()
-        if not prompt and not reason:
+        ordered.append(item_id)
+        version = item.get("current_version")
+        versions[str(item_id)] = "" if version is None else str(version)
+        known = str(item_id) in previous_versions
+        if (
+            not full
+            and version is not None
+            and known
+            and str(previous_versions.get(str(item_id))) == str(version)
+        ):
+            cached = previous_items.get(item_id)
+            if cached is not None:
+                cached = dict(cached)
+                cached["status"] = str(item.get("status_label") or item.get("status") or cached.get("status") or "")
+            reused[item_id] = cached  # None：上次详情就是空的，同样不必重拉
             continue
-        items.append({
-            "id": item_id,
-            "status": str(detail.get("status_label") or detail.get("status") or ""),
-            "submittedAt": str(detail.get("submitted_at") or detail.get("created_at") or ""),
-            "userPrompt": prompt,
-            "gsbReason": reason,
-            "questionType": str(detail.get("question_type") or ""),
-            "difficulty": str(detail.get("difficulty") or ""),
-            "languages": str(detail.get("languages") or ""),
-            "repoId": str(detail.get("repo_id") or ""),
-            "aSessionId": str(detail.get("a_session_id") or ""),
-            "bSessionId": str(detail.get("b_session_id") or ""),
-            "aDescDelivery": str(detail.get("a_desc_delivery") or "").strip(),
-            "bDescDelivery": str(detail.get("b_desc_delivery") or "").strip(),
-        })
+        to_fetch.append(item_id)
+
+    fetched: dict[int, dict | None] = {}
+    if to_fetch:
+        with ThreadPoolExecutor(max_workers=min(GSB_HISTORY_DETAIL_WORKERS, len(to_fetch))) as pool:
+            for item_id, detail in zip(to_fetch, pool.map(_fetch_history_detail, to_fetch)):
+                fetched[item_id] = _history_item_from_detail(item_id, detail)
+
+    items = []
+    for item_id in ordered:
+        value = fetched[item_id] if item_id in fetched else reused.get(item_id)
+        if value:
+            items.append(value)
+    now = utc_now()
     return {
         "source": gsb_server() + "/app/gsb/submissions",
-        "fetchedAt": utc_now(),
+        "fetchedAt": now,
+        "fullFetchedAt": now if full else str(previous.get("fullFetchedAt") or now),
         "serverTotal": int(meta.get("total") or len(list_items)),
+        "refreshMode": "full" if full else "incremental",
+        "detailFetched": len(to_fetch),
+        "detailReused": len(reused),
+        "listVersions": versions,
         "items": items,
     }
+
+
+@contextlib.contextmanager
+def _gsb_history_lock(cache_path: Path, timeout: float = GSB_HISTORY_LOCK_TIMEOUT):
+    """跨任务互斥刷新历史缓存；等锁超时就不再等，照常自行刷新。"""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(cache_path.with_name(cache_path.name + ".lock"), "a+")
+    locked = False
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.2)
+        yield locked
+    finally:
+        if locked:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def unresolved_history_ids(history: dict) -> list[int]:
@@ -662,40 +754,60 @@ def fetch_gsb_prompt_history(
     cache = load_json(cache_path)
     age = _cache_age_seconds(cache)
     if cache.get("items") and not force_refresh and age is not None and age <= max_age_seconds:
-        result = _filter_gsb_history(merge_manual_history_items(cache), current_sessions, exclude_ids)
-        result.update({
-            "cachePath": str(cache_path),
-            "cacheHit": True,
-            "cacheFresh": True,
-            "cacheAgeSeconds": round(age, 3),
-            "fetchError": "",
-        })
-        return result
-    try:
-        live = _fetch_live_gsb_history()
-        _write_json_atomic(cache_path, live)
-        result = _filter_gsb_history(merge_manual_history_items(live), current_sessions, exclude_ids)
-        result.update({
-            "cachePath": str(cache_path),
-            "cacheHit": False,
-            "cacheFresh": True,
-            "cacheAgeSeconds": 0.0,
-            "fetchError": "",
-        })
-        return result
-    except Exception as exc:
-        manual_count = len(load_manual_history_items())
-        if not cache.get("items") and not manual_count:
-            raise
-        result = _filter_gsb_history(merge_manual_history_items(cache), current_sessions, exclude_ids)
-        result.update({
-            "cachePath": str(cache_path),
-            "cacheHit": True,
-            "cacheFresh": False,
-            "cacheAgeSeconds": round(age, 3) if age is not None else None,
-            "fetchError": str(exc),
-        })
-        return result
+        return _cached_history_result(cache, cache_path, age, current_sessions, exclude_ids)
+    with _gsb_history_lock(cache_path):
+        # 等锁期间别的任务可能刚刷新完，重新读一次。
+        cache = load_json(cache_path)
+        age = _cache_age_seconds(cache)
+        shared_limit = min(max_age_seconds, GSB_HISTORY_SHARED_REFRESH_SECONDS) if force_refresh else max_age_seconds
+        if cache.get("items") and age is not None and age <= shared_limit:
+            return _cached_history_result(cache, cache_path, age, current_sessions, exclude_ids)
+        try:
+            live = _fetch_live_gsb_history(cache)
+            _write_json_atomic(cache_path, live)
+            result = _filter_gsb_history(merge_manual_history_items(live), current_sessions, exclude_ids)
+            result.pop("listVersions", None)
+            result.update({
+                "cachePath": str(cache_path),
+                "cacheHit": False,
+                "cacheFresh": True,
+                "cacheAgeSeconds": 0.0,
+                "fetchError": "",
+            })
+            return result
+        except Exception as exc:
+            manual_count = len(load_manual_history_items())
+            if not cache.get("items") and not manual_count:
+                raise
+            result = _filter_gsb_history(merge_manual_history_items(cache), current_sessions, exclude_ids)
+            result.pop("listVersions", None)
+            result.update({
+                "cachePath": str(cache_path),
+                "cacheHit": True,
+                "cacheFresh": False,
+                "cacheAgeSeconds": round(age, 3) if age is not None else None,
+                "fetchError": str(exc),
+            })
+            return result
+
+
+def _cached_history_result(
+    cache: dict,
+    cache_path: Path,
+    age: float,
+    current_sessions: set[str],
+    exclude_ids: set[int],
+) -> dict:
+    result = _filter_gsb_history(merge_manual_history_items(cache), current_sessions, exclude_ids)
+    result.pop("listVersions", None)
+    result.update({
+        "cachePath": str(cache_path),
+        "cacheHit": True,
+        "cacheFresh": True,
+        "cacheAgeSeconds": round(age, 3),
+        "fetchError": "",
+    })
+    return result
 
 
 # Backward-compatible alias used by the standalone prompt_dedup CLI.
@@ -1621,7 +1733,18 @@ def main() -> int:
     trace_results = {}
     for side in ("A", "B"):
         side_state = (state.get("sides") or {}).get(side) or {}
-        trace = Path(str(side_state.get("tracePath") or "")).expanduser()
+        trace_error = ""
+        try:
+            trace = ensure_single_side_trace(task_root, side, side_state.get("tracePath"))
+        except SologsbError as exc:
+            trace_error = str(exc)
+            trace = Path(str(side_state.get("tracePath") or "")).expanduser()
+        add(
+            f"trace-count-{side.lower()}",
+            not trace_error,
+            f"{side} 轨迹目录顶层只能有 1 个 JSONL",
+            evidence={"error": trace_error, "side": side},
+        )
         info = inspect_trace(trace, prompt_text, str(side_state.get("sessionId") or ""))
         info["upload"] = inspect_media(trace, "trace")
         trace_results[side] = info

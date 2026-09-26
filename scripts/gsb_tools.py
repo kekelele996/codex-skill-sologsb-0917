@@ -21,6 +21,7 @@ from common import (
     SologsbError,
     atomic_write_text,
     commit_url,
+    ensure_single_side_trace,
     read_json,
     save_state,
     sha256_text,
@@ -582,29 +583,42 @@ def _validate_artifact_description(reason: str) -> list[str]:
     return errors
 
 
-def _shingles(value: str, size: int = 12) -> set[str]:
-    clean = _normalize(value)
-    return {clean[index : index + size] for index in range(max(0, len(clean) - size + 1))}
+SUBMISSION_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "submission" / "scripts"
 
 
-def fetch_reason_history() -> list[str]:
-    try:
-        payload = _request_json("/api/v1/gsb/submissions?page=1&size=200")
-    except SologsbError as exc:
-        if os.environ.get("SOLOSB_ALLOW_OFFLINE_DEDUP") == "1":
-            return []
-        raise SologsbError(f"无法读取当前 GSB 理由用于 G10 查重: {exc}") from exc
-    records: Any = payload
-    if isinstance(payload, dict):
-        records = payload.get("items") or payload.get("data") or payload.get("records") or []
-    reasons: list[str] = []
-    if isinstance(records, list):
-        for item in records:
-            if isinstance(item, dict):
-                value = item.get("gsb_reason") or item.get("reason")
-                if value:
-                    reasons.append(str(value))
-    return reasons
+def _load_submission_preflight():
+    # 历史查重与提交前 preflight 共用同一份缓存和判定口径；preflight 也会反向懒加载本模块，所以只能在函数里导入。
+    import importlib
+
+    if str(SUBMISSION_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SUBMISSION_SCRIPTS_DIR))
+    return importlib.import_module("preflight")
+
+
+def fetch_submission_history(task_root: Path | None = None) -> dict[str, Any]:
+    """读取历史 GSB（本机共享缓存，过期才增量刷新），排除本任务自己的提交。"""
+    preflight = _load_submission_preflight()
+    current_sessions: set[str] = set()
+    exclude_ids: set[int] = set()
+    if task_root is not None:
+        state = read_json(task_root / "monitor" / "state.json", {}) or {}
+        current_sessions = {
+            str(((state.get("sides") or {}).get(side) or {}).get("sessionId") or "")
+            for side in ("A", "B")
+        } - {""}
+        result = read_json(task_root / "workspace" / "评审文件" / "pre-submit" / "submission-result.json", {}) or {}
+        number = str(result.get("submissionNo") or "")
+        if number.isdigit():
+            exclude_ids = {int(number)}
+    return preflight.fetch_gsb_prompt_history(current_sessions, exclude_ids)
+
+
+def fetch_reason_history(task_root: Path | None = None) -> dict[str, Any]:
+    history = fetch_submission_history(task_root)
+    return {
+        **history,
+        "items": [item for item in history.get("items") or [] if str(item.get("gsbReason") or "").strip()],
+    }
 
 
 def _reason_similarity_approval_ok(task_root: Path, reason: str) -> bool:
@@ -627,20 +641,55 @@ def _reason_similarity_approval_ok(task_root: Path, reason: str) -> bool:
 
 
 def _validate_reason_dedup(reason: str, task_root: Path | None = None) -> list[str]:
+    """G10：与提交前 preflight 的 B-5 同一口径，在草稿阶段就挡住历史理由复用。"""
     if task_root is not None and _reason_similarity_approval_ok(task_root, reason):
         return []
-    errors: list[str] = []
-    clean = _normalize(reason)
-    for index, historical in enumerate(fetch_reason_history(), 1):
-        other = _normalize(historical)
-        if clean == other:
-            errors.append(f"GSB 理由与已有数据第 {index} 条精确重复")
-            continue
-        overlap = _shingles(clean) & _shingles(other)
-        if overlap:
-            errors.append(f"GSB 理由与已有数据第 {index} 条存在连续片段复用")
-            break
+    try:
+        history = fetch_reason_history(task_root)
+        review = _load_submission_preflight().assess_gsb_reason_dedup(reason, history)
+    except Exception as exc:
+        if os.environ.get("SOLOSB_ALLOW_OFFLINE_DEDUP") == "1":
+            return []
+        return [f"无法读取历史 GSB 理由用于 G10 查重: {exc}"]
+    decision = str(review.get("decision") or "")
+    if decision in {"UNIQUE", "MISSING"}:
+        return []
+    top = (review.get("matches") or [{}])[0]
+    return [
+        f"G10 GSB 理由与历史理由重复（{decision}，最长公共片段 {top.get('longestCommonSubstringLength', 0)} 字）："
+        f"{review.get('rewriteInstruction') or ''}"
+    ]
+
+
+def _validate_delivery_dedup(draft: dict[str, Any], task_root: Path | None = None) -> list[str]:
+    """G12：交付完整性描述与历史 A/B 描述比对；只有 EXACT/SIMILAR 阻断，与 preflight 一致。"""
+    delivery = draft.get("delivery") if isinstance(draft.get("delivery"), dict) else {}
+    texts = {
+        side: str(((delivery.get(side) or {}) if isinstance(delivery.get(side), dict) else {}).get("description") or "").strip()
+        for side in ("A", "B")
+    }
+    if not all(texts.values()):
+        return []  # 缺描述由 validate_delivery 报
+    try:
+        history = fetch_submission_history(task_root)
+        review = _load_submission_preflight().assess_delivery_dedup(texts, history)
+    except Exception as exc:
+        if os.environ.get("SOLOSB_ALLOW_OFFLINE_DEDUP") == "1":
+            return []
+        return [f"无法读取历史交付完整性描述用于 G12 查重: {exc}"]
+    errors = []
+    for side, result in (review.get("sides") or {}).items():
+        if result.get("decision") in {"EXACT", "SIMILAR"}:
+            errors.append(f"G12 {side}-交付完整性描述与历史描述重复（{result.get('decision')}）：{result.get('rewriteInstruction') or ''}")
     return errors
+
+
+def _validate_reason_quality(draft: dict[str, Any], evidence_doc: dict[str, Any]) -> list[str]:
+    """提交前 preflight 的 reason-quality 门禁提前到草稿阶段（A/B 过程与产物、负面触发点和客观后果）。"""
+    try:
+        return list(_load_submission_preflight().assess_reason_quality(draft, evidence_doc).get("errors") or [])
+    except Exception as exc:
+        return [f"GSB 理由质量校验器不可用: {exc}"]
 
 
 def _validate_claim_evidence(draft: dict[str, Any], evidence_doc: dict[str, Any]) -> list[str]:
@@ -1277,6 +1326,8 @@ def validate_draft(draft: dict[str, Any], task_root: Path, *, review_path: Path)
     if len(file_tokens) > 2:
         errors.append(f"GSB 理由代码细节过多，当前 {len(file_tokens)} 个文件/代码标记")
     errors.extend(_validate_reason_dedup(reason, task_root))
+    errors.extend(_validate_delivery_dedup(draft, task_root))
+    errors.extend(_validate_reason_quality(draft, evidence_doc))
     delivery = validate_delivery(draft, evidence_doc, reason)
     errors.extend(delivery["errors"])
 
@@ -1381,14 +1432,12 @@ def build_values(task_root: Path, draft: dict[str, Any], schema: dict[str, Any])
     raw_harness_version = str(side_a.get("harnessVersion") or side_b.get("harnessVersion") or "").strip()
     harness_match = re.search(r"(?<!\d)(\d+(?:\.\d+)+)", raw_harness_version)
     harness_version = harness_match.group(1) if harness_match else raw_harness_version
-    trace_a = Path(str(side_a.get("tracePath") or ""))
-    trace_b = Path(str(side_b.get("tracePath") or ""))
+    trace_a = ensure_single_side_trace(task_root, "A", side_a.get("tracePath"))
+    trace_b = ensure_single_side_trace(task_root, "B", side_b.get("tracePath"))
     recording_a = ((state.get("recordings") or {}).get("A") or {})
     recording_b = ((state.get("recordings") or {}).get("B") or {})
     video_a = Path(str(recording_a.get("videoPath") or _video_expected(task_root, "A")))
     video_b = Path(str(recording_b.get("videoPath") or _video_expected(task_root, "B")))
-    if not trace_a.is_file() or not trace_b.is_file():
-        raise SologsbError("A/B 轨迹文件不完整")
     if trace_a.stat().st_size > 27 * 1024 * 1024 or trace_b.stat().st_size > 27 * 1024 * 1024:
         raise SologsbError("轨迹文件超过 27MB 上限")
     if "languages" not in draft or not str(draft.get("languages") or "").strip():

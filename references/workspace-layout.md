@@ -44,7 +44,8 @@
     │       ├── submission-approval.json  # 完整审核通过时自动写入，approvedBy 为设备配置里的审批人
     │       └── change-volume-line-gate-approval.json  # 仅例外审批时生成
     ├── 轨迹文件/candidates/candidate-N/
-    ├── 轨迹文件/{a,b}/
+    ├── 轨迹文件/a/            # 顶层恰好 1 个有效 .jsonl
+    ├── 轨迹文件/b/            # 顶层恰好 1 个有效 .jsonl
     └── 视频信息/{a,b}/{脚本,视频}/
 ```
 
@@ -75,4 +76,5 @@
 - 每个片段必须保留 `<片段>-window-capture.json` 和 `<片段>-cursor-guard.json`；录制侧还必须保留
   `frontmost-window-monitor.json` 和 `service-cleanup.json`。这些报告与最终 mp4 共同构成
   `recordings.ok` 门禁，缺失或状态异常不得进入 `recorded`。录制器不读取或操作 ChatGPT 窗口。
+- `workspace/轨迹文件/a` 和 `workspace/轨迹文件/b` 的顶层必须各自恰好有一个 `.jsonl`；`rejected/` 只保存失败尝试，不作为有效证据，也不得上传。生成 Excel、状态复核、提交预检和上传前都会重新计数，数量不是 1 时直接阻断。
 - 每道题一个仓库；本地源和审核文件不得写进模型执行工作区以外的共享路径。
