@@ -45,6 +45,12 @@ CHROME_BINARY = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chro
 CHROME_BUNDLE_ID = "com.google.Chrome"
 # 16:9 so the 2x capture (2880x1620) fills 1280x720 without pillarboxing.
 CHROME_WINDOW_BOUNDS = (40, 40, 1440, 810)
+# 采集面按“采集开始那一刻的窗口尺寸”分配，之后改窗口大小会把页面缩放或留黑边。
+# 需要窄窗口（例如只为手机断点录屏）时，必须在计划里提前声明，并保持 16:9。
+BROWSER_WINDOW_ASPECT = 16 / 9
+BROWSER_WINDOW_ASPECT_TOLERANCE = 0.015
+BROWSER_WINDOW_MIN_WIDTH = 640
+BROWSER_WINDOW_MIN_HEIGHT = 360
 TERMINAL_BUNDLE_ID = "com.apple.Terminal"
 # Quartz reports the localized process name, e.g. "终端" on a Chinese system.
 TERMINAL_OWNER_NAMES = {"Terminal", "终端"}
@@ -637,12 +643,24 @@ class _FrontmostWindowMonitor:
         self.report_path = report_path
         self.started_at = utc_now()
         self._stop = threading.Event()
+        # 采样只覆盖窗口采集真正进行的时段：录制开始前与采集停止后的收尾
+        # （例如 Chrome 退出）不属于“录制期间”，不应计入门禁。
+        self._capture_active = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._targets: dict[int, dict[str, Any]] = {}
         self._samples: list[dict[str, Any]] = []
         self._recording_frontmost_samples = 0
         self._error = ""
+
+    def resume(self) -> None:
+        """开始采样：紧接在窗口采集进程启动之前调用。"""
+        self._capture_active.set()
+        self._sample_once()
+
+    def pause(self) -> None:
+        """停止采样：窗口采集进程停止之后立即调用。"""
+        self._capture_active.clear()
 
     def register_target(self, window_info: dict[str, Any]) -> None:
         try:
@@ -670,6 +688,8 @@ class _FrontmostWindowMonitor:
             self._stop.wait(FRONTMOST_SAMPLE_SECONDS)
 
     def _sample_once(self) -> None:
+        if not self._capture_active.is_set():
+            return
         with self._lock:
             targets = dict(self._targets)
         if not targets:
@@ -702,6 +722,7 @@ class _FrontmostWindowMonitor:
             "status": "ok" if targets and not self._error else ("not-applicable" if not targets else "failed"),
             "path": str(self.report_path.resolve()),
             "pollIntervalSeconds": FRONTMOST_SAMPLE_SECONDS,
+            "sampledDuringCaptureOnly": True,
             "targets": targets,
             "sampleCount": len(samples),
             "recordingWindowFrontmostSamples": frontmost_samples,
@@ -751,6 +772,7 @@ _ACTIVE_WINDOW_CAPTURE: subprocess.Popen[bytes] | None = None
 _ACTIVE_WINDOW_CAPTURE_LOG: Any = None
 _ACTIVE_WINDOW_CAPTURE_WATCHDOG: threading.Timer | None = None
 _ACTIVE_WINDOW_CAPTURE_STARTED: float | None = None
+_ACTIVE_FRONTMOST_MONITOR: "_FrontmostWindowMonitor | None" = None
 
 
 def _bounds_rect(bounds: str) -> tuple[float, float, float, float] | None:
@@ -1028,6 +1050,7 @@ def _start_window_segment(
     frontmost_monitor: _FrontmostWindowMonitor | None = None,
 ) -> None:
     global _ACTIVE_WINDOW_CAPTURE, _ACTIVE_WINDOW_CAPTURE_LOG, _ACTIVE_WINDOW_CAPTURE_WATCHDOG, _ACTIVE_WINDOW_CAPTURE_STARTED
+    global _ACTIVE_FRONTMOST_MONITOR
     if _ACTIVE_WINDOW_CAPTURE is not None and _ACTIVE_WINDOW_CAPTURE.poll() is None:
         raise SologsbError("已有窗口录屏进程在运行")
 
@@ -1044,6 +1067,8 @@ def _start_window_segment(
     )
     if frontmost_monitor is not None:
         frontmost_monitor.register_target(window_info)
+        frontmost_monitor.resume()
+    _ACTIVE_FRONTMOST_MONITOR = frontmost_monitor
 
     log_path = output.with_name(f"{output.stem}-window-recorder.log")
     ready_path = output.with_name(f"{output.stem}-window-recorder-ready.json")
@@ -1225,6 +1250,7 @@ def _stop_window_segment(
     require_visible_content: bool = False,
 ) -> None:
     global _ACTIVE_WINDOW_CAPTURE, _ACTIVE_WINDOW_CAPTURE_LOG, _ACTIVE_WINDOW_CAPTURE_WATCHDOG, _ACTIVE_WINDOW_CAPTURE_STARTED
+    global _ACTIVE_FRONTMOST_MONITOR
     proc = _ACTIVE_WINDOW_CAPTURE
     handle = _ACTIVE_WINDOW_CAPTURE_LOG
     watchdog = _ACTIVE_WINDOW_CAPTURE_WATCHDOG
@@ -1252,6 +1278,9 @@ def _stop_window_segment(
         elif proc is not None:
             exit_code = proc.poll()
     finally:
+        if _ACTIVE_FRONTMOST_MONITOR is not None:
+            _ACTIVE_FRONTMOST_MONITOR.pause()
+            _ACTIVE_FRONTMOST_MONITOR = None
         if watchdog is not None:
             watchdog.cancel()
         _stop_cursor_guard()
@@ -1328,6 +1357,76 @@ def _wait_url(url: str, timeout: float = 45.0) -> bool:
         except Exception:
             time.sleep(0.4)
     return False
+
+
+def _window_bounds_text(rect: tuple[float, float, float, float] | None) -> str:
+    if not rect:
+        return ""
+    return ",".join(str(int(value)) for value in rect)
+
+
+def _assert_browser_window_aspect(window_info: dict[str, Any]) -> None:
+    """实际窗口尺寸必须是 16:9，否则成片会出现黑边或页面被拉伸。
+
+    系统或 Chrome 可能把请求的窗口尺寸调成自己的最小尺寸/贴边尺寸，这里按实际 bounds 复核。
+    """
+    actual = _bounds_rect(str(window_info.get("bounds") or ""))
+    if not actual or int(actual[3]) <= 0:
+        raise SologsbError("无法读取 Chrome 录制窗口尺寸，停止录制")
+    width, height = int(actual[2]), int(actual[3])
+    aspect = width / height
+    if abs(aspect - BROWSER_WINDOW_ASPECT) > BROWSER_WINDOW_ASPECT_TOLERANCE:
+        raise SologsbError(
+            f"Chrome 实际录制窗口 {width}x{height}（比例 {aspect:.3f}）不是 16:9，"
+            "成片会留黑边或把页面拉伸；请调整计划里的 browserWindow 尺寸后重录"
+        )
+
+
+def _assert_window_bounds_unchanged(window_info: dict[str, Any], raw: Path) -> dict[str, Any]:
+    """复核录制窗口在采集期间没有被改过尺寸，并把结论写进窗口采集报告。
+
+    ScreenCaptureKit 的采集面按采集开始时的窗口尺寸分配。采集期间把窗口改小或改大，
+    画面里的页面会被整体缩放或留出黑边，成片比例失真，因此这种录制按失败处理。
+    采集报告的 ``status`` 会因此变成 ``failed``，``record`` 命令随之返回非零并把状态退回
+    ``gsb_ready``，重复录制前必须先修计划或 scenario。
+    """
+    window_id = int(window_info.get("windowId") or 0)
+    before = _bounds_rect(str(window_info.get("bounds") or ""))
+    after: tuple[float, float, float, float] | None = None
+    try:
+        current = _window_info_by_id(window_id, label="Chrome", timeout=3.0)
+    except Exception:
+        current = {}
+    after = _bounds_rect(str(current.get("bounds") or ""))
+    changed: bool | None = None
+    if before and after:
+        changed = int(before[2]) != int(after[2]) or int(before[3]) != int(after[3])
+    metadata_path = raw.with_name(f"{raw.stem}-window-capture.json")
+    metadata = read_json(metadata_path, {}) or {}
+    metadata.update(
+        {
+            "windowBoundsAtCaptureStart": _window_bounds_text(before),
+            "windowBoundsAtCaptureStop": _window_bounds_text(after),
+            "windowBoundsChangedDuringCapture": changed,
+        }
+    )
+    if changed:
+        metadata["status"] = "failed"
+        metadata["error"] = "采集期间窗口尺寸发生变化，页面比例会失真"
+    write_json(metadata_path, metadata)
+    return {
+        "before": _window_bounds_text(before),
+        "after": _window_bounds_text(after),
+        "changed": changed,
+        "error": (
+            "采集期间录制窗口尺寸发生了变化（"
+            f"{_window_bounds_text(before)} → {_window_bounds_text(after)}），"
+            "页面会被整体缩放或留出黑边；窗口尺寸只能在开录前用计划里的 browserWindow 定好，"
+            "scenario 里不要调用 setViewportSize 或 Browser.setWindowBounds 改窗口大小。"
+            if changed
+            else ""
+        ),
+    }
 
 
 def _window_info_for_pids(
@@ -1700,6 +1799,13 @@ def default_plan(task_root: Path, side: str) -> dict[str, Any]:
             "scenarioScript": scenario,
             "terminalApp": TERMINAL_APP,
             "pace": 1.8,
+            # 录制窗口尺寸只能在这里定；保持 16:9，需要手机断点就改成 820x461。
+            "browserWindow": {
+                "left": CHROME_WINDOW_BOUNDS[0],
+                "top": CHROME_WINDOW_BOUNDS[1],
+                "width": CHROME_WINDOW_BOUNDS[2],
+                "height": CHROME_WINDOW_BOUNDS[3],
+            },
             "targetApps": ["Terminal", "Chrome"],
             "captureKind": "window-id",
             "pointerStrategy": "none",
@@ -1716,6 +1822,12 @@ def default_plan(task_root: Path, side: str) -> dict[str, Any]:
             "scenarioScript": scenario,
             "terminalApp": TERMINAL_APP,
             "pace": 1.8,
+            "browserWindow": {
+                "left": CHROME_WINDOW_BOUNDS[0],
+                "top": CHROME_WINDOW_BOUNDS[1],
+                "width": CHROME_WINDOW_BOUNDS[2],
+                "height": CHROME_WINDOW_BOUNDS[3],
+            },
             "targetApps": ["Terminal", "Chrome"],
             "captureKind": "window-id",
             "pointerStrategy": "none",
@@ -1991,10 +2103,52 @@ def _chrome_command(profile: Path, port: int) -> list[str]:
     ]
 
 
-def _chrome_open_background_window(ws_url: str) -> str:
+def browser_window_bounds(plan: dict[str, Any]) -> tuple[int, int, int, int]:
+    """录制窗口的四边尺寸，默认 ``CHROME_WINDOW_BOUNDS``，计划可用 ``browserWindow`` 覆盖。
+
+    ScreenCaptureKit 的采集面在窗口采集开始时按当时的窗口尺寸分配，采集期间再改窗口大小
+    会把页面按比例放大或压扁并留出黑边，最终成片的页面比例就不正常了。因此窗口尺寸只能
+    在开录之前一次性定好：计划里写 ``browserWindow: {width, height[, left, top]}``。
+    窗口保持 16:9，成片才能不留黑边地铺满 1280x720。
+    """
+    raw = plan.get("browserWindow")
+    raw = raw if isinstance(raw, dict) else {}
+    default_left, default_top, default_width, default_height = CHROME_WINDOW_BOUNDS
+
+    def _value(name: str, fallback: int) -> int:
+        candidate = raw.get(name)
+        if candidate in (None, ""):
+            return int(fallback)
+        try:
+            return int(candidate)
+        except (TypeError, ValueError) as exc:
+            raise SologsbError(f"browserWindow.{name} 必须是整数，当前 {candidate!r}") from exc
+
+    left = _value("left", default_left)
+    top = _value("top", default_top)
+    width = _value("width", default_width)
+    height = _value("height", default_height)
+    if width < BROWSER_WINDOW_MIN_WIDTH or height < BROWSER_WINDOW_MIN_HEIGHT:
+        raise SologsbError(
+            f"browserWindow 太小: {width}x{height}；"
+            f"至少 {BROWSER_WINDOW_MIN_WIDTH}x{BROWSER_WINDOW_MIN_HEIGHT}"
+        )
+    aspect = width / height
+    if abs(aspect - BROWSER_WINDOW_ASPECT) > BROWSER_WINDOW_ASPECT_TOLERANCE:
+        raise SologsbError(
+            f"browserWindow 必须是 16:9，当前 {width}x{height}（比例 {aspect:.3f}）；"
+            "否则成片会留黑边或把页面拉伸，可用 1440x810、1280x720、820x461"
+        )
+    return (left, top, width, height)
+
+
+def _chrome_open_background_window(
+    ws_url: str,
+    bounds: tuple[int, int, int, int] | None = None,
+) -> str:
     if not ws_url:
         raise SologsbError("Chrome CDP 没有返回 webSocketDebuggerUrl")
-    left, top, width, height = CHROME_WINDOW_BOUNDS
+    left, top, width, height = bounds or CHROME_WINDOW_BOUNDS
     proc = run(
         ["node", "-e", CHROME_BACKGROUND_WINDOW_JS, ws_url, str(left), str(top), str(width), str(height)],
         check=False,
@@ -2017,6 +2171,7 @@ def _record_chrome_segment(
     pointer_strategy: str,
     focus_guard: _FocusRestoreGuard,
     frontmost_monitor: _FrontmostWindowMonitor,
+    window_bounds: tuple[int, int, int, int] | None = None,
 ) -> tuple[Path, int]:
     if not CHROME_BINARY.is_file():
         raise SologsbError(f"缺少 Google Chrome: {CHROME_BINARY}")
@@ -2094,8 +2249,13 @@ def _record_chrome_segment(
         else:
             raise SologsbError("Chrome CDP 未启动")
         chrome_pids = [chrome_proc.pid]
-        _chrome_open_background_window(str(version.get("webSocketDebuggerUrl") or ""))
+        _chrome_open_background_window(
+            str(version.get("webSocketDebuggerUrl") or ""),
+            window_bounds,
+        )
         window_info = _window_info_for_pids(chrome_pids, label="Chrome")
+        # 系统可能把请求的窗口尺寸改写，按实际尺寸复核，避免成片留黑边或拉伸。
+        _assert_browser_window_aspect(window_info)
         focus_guard.restore_if_recording_frontmost(
             set(chrome_pids),
             "chrome-open",
@@ -2134,6 +2294,9 @@ def _record_chrome_segment(
                 window_info=window_info,
                 pid_file=pid_file,
             )
+        # 采集面在开录时按窗口尺寸固定；采集期间被改过尺寸的窗口会被缩放或留黑边，
+        # 成片里的页面比例就不正常了，这种录制不能算通过。
+        _assert_window_bounds_unchanged(window_info, raw)
         return cropped, proc.returncode
     finally:
         if chrome_proc is not None and chrome_proc.poll() is None:
@@ -2216,6 +2379,7 @@ def _run_web_terminal(
             pointer_strategy=pointer_strategy,
             focus_guard=focus_guard,
             frontmost_monitor=frontmost_monitor,
+            window_bounds=browser_window_bounds(plan),
         )
         combined = output_dir / "combined.mp4"
         _concat_segments([terminal_cropped, browser_cropped], combined)
@@ -2722,6 +2886,14 @@ def _record_side_locked(
             if mode == "web":
                 default_targets = ["Terminal", "Chrome"]
                 validate_recording_targets(mode, draft.get("targetApps") or default_targets, terminal_app)
+                # 开录前先定死窗口尺寸：采集期间再改窗口会把页面缩放或留黑边。
+                bounds = browser_window_bounds(draft)
+                draft["browserWindow"] = {
+                    "left": bounds[0],
+                    "top": bounds[1],
+                    "width": bounds[2],
+                    "height": bounds[3],
+                }
                 if CHECK_ENV.is_file():
                     check = run(["/bin/bash", str(CHECK_ENV)], check=False, timeout=120)
                     if check.returncode != 0:
@@ -2814,6 +2986,10 @@ def _record_side_locked(
                 "ownerApp": report.get("ownerApp"),
                 "windowName": report.get("windowName"),
                 "bounds": report.get("bounds"),
+                "windowBoundsAtCaptureStart": report.get("windowBoundsAtCaptureStart"),
+                "windowBoundsAtCaptureStop": report.get("windowBoundsAtCaptureStop"),
+                "windowBoundsChangedDuringCapture": report.get("windowBoundsChangedDuringCapture"),
+                "error": report.get("error"),
                 "exitCode": report.get("exitCode"),
                 "readyPath": report.get("readyPath"),
                 "logPath": report.get("logPath"),
@@ -2851,11 +3027,21 @@ def _record_side_locked(
         frontmost_report=frontmost_report,
         service_cleanup=service_cleanup,
     )
+    capture_error_message = next(
+        (
+            str(item.get("error") or "")
+            for item in window_capture_reports
+            if item.get("windowBoundsChangedDuringCapture") is True
+        ),
+        "",
+    )
     result = {
         "ok": recording_ok,
         "mode": mode,
         "captureMethod": "window-id",
         "captureBackend": "screen-capture-kit",
+        "browserWindow": draft.get("browserWindow") or {},
+        "error": capture_error_message,
         "cursorExcludedFromCapture": capture_backend_ok,
         "recordingMetadata": recording_metadata,
         "windowCaptures": window_capture_reports,

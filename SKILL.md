@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.7.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.7.0`
-- 精确提交号：运行 `git rev-parse v1.7.0` 获取。
+- 全局版本号：`1.7.1`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.7.1`
+- 精确提交号：运行 `git rev-parse v1.7.1` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -88,6 +88,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 录屏 `ok` 不能只看文件是否生成：`expectedAppFailure=false` 而浏览器/API 非零退出时必须写 `ok=false`、`observedAppFailure=true`，
   `record` 命令返回非零并把状态退回 `gsb_ready`；先归档失败片段，修正 scenario 或应用后重录，未通过前不得进入 `recorded/complete`。
 - 录屏窗口 ID 红线：任何必须录屏的步骤只能使用 `window-id`。Web 题必须分别打开或定位 Terminal.app 与 Chrome 窗口，并记录各自 `windowId`；API/CLI/失败题必须定位 Terminal.app 窗口 ID。窗口缺失时先打开，无法定位或 `windowId<=0` 时立即停止，禁止回退到整屏、裁切、iTerm2 或 headless。
+- 录屏窗口尺寸红线：窗口尺寸只能由计划里的 `browserWindow` 在开录前定好（默认 `40,40,1440,810`，必须 16:9，容差 1.5%）；采集期间禁止改窗口或视口大小（`setViewportSize`、`Browser.setWindowBounds` 等），否则 macOS 会缩放页面并留黑边。采集结束后录制器复核窗口尺寸并写 `windowBoundsAtCaptureStart`/`windowBoundsAtCaptureStop`/`windowBoundsChangedDuringCapture`，尺寸变过即判该片段失败、`record` 返回非零并退回 `gsb_ready`。
 - 每个片段必须写 `<片段>-window-capture.json`，其中必须包含 `captureKind=window-id`、`captureBackend=screen-capture-kit`、`showsCursor=false`、`cursorCaptured=false`、目标 `windowId`、所属 PID、bounds、退出码和采集状态；窗口 ID 缺失、失效、后端不是 ScreenCaptureKit、鼠标排除标记不为 false 或采集状态非 `ok` 时该侧录屏失败。
 - 开录瞬间必须再次确认目标窗口仍在当前 Space、未被最小化，且 `ownerPid + ownerName` 与定位时一致；窗口不在 Terminal.app（本地化名如“终端”，按 bundle id `com.apple.Terminal` 判定）/Google Chrome 白名单内时立即停机。
 - ChatGPT 不属于录制目标。录制器不得最小化、激活、移动或恢复任何 ChatGPT 窗口，也不生成

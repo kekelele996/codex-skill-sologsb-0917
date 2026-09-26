@@ -105,8 +105,18 @@
 
 - Terminal、Chrome 都必须先定位具体 `kCGWindowNumber`，再用该 ID 启动 ScreenCaptureKit 录制：
   `SCContentFilter(desktopIndependentWindow:)` 只绑定目标窗口，`SCRecordingOutput` 写入 `.mov`。窗口被其他应用遮挡不影响采集内容。
+- 录制窗口尺寸在计划里用 `browserWindow` 一次性定好：`{"left":40,"top":40,"width":1440,"height":810}`，不写就是默认 `1440x810`。
+  窗口必须保持 16:9（容差 1.5%），常用 `1440x810`、`1280x720`，需要手机断点时写 `820x461`；
+  比例不对时录制器直接报错，不会生成留黑边或页面被拉伸的成片。
+- ScreenCaptureKit 的采集面按开录那一刻的窗口尺寸分配，采集期间再改窗口大小会让 macOS 把页面整体缩放并留出黑边。
+  实测把 `1440x810` 窗口在采集期间改成 `820x560`，成片里的页面被放大 1.45 倍、右侧多出 18% 黑边，页面比例明显失真。
+  因此 scenario 和浏览器驱动里都不许调用 `setViewportSize`、`Browser.setWindowBounds` 或任何改窗口大小的接口；
+  窄版页面要在开录前用 `browserWindow` 声明，不要在录制过程中改窗口。
+- 采集结束后录制器会重新读取该窗口尺寸，把 `windowBoundsAtCaptureStart`、`windowBoundsAtCaptureStop`、
+  `windowBoundsChangedDuringCapture` 写进 `*-window-capture.json`。尺寸发生变化时该片段 `status=failed`，
+  `record` 返回非零并把状态退回 `gsb_ready`，必须先改计划或 scenario 再重录，不能把这种成片当通过。
 - 必须记录 `windowId`、所属 PID、应用名、`ownerBundleId`、归一应用名 `ownerApp`、窗口名和 bounds。Quartz 的应用名是本地化名（中文系统为“终端”），门禁按 bundle id 归一。仅按 PID、标题或“面积最大的窗口”还不够，
-  实际采集必须绑定稳定窗口 ID。
+ 实际采集必须绑定稳定窗口 ID。
 - 不创建、不切换 macOS Space。录制在当前 Space 执行；脚本不得调用 Space 切换或全屏模式。
 - 窗口不存在时按题型打开目标窗口：Web 题先开 Terminal 窗口，再开独立 Chrome；纯终端题只开 Terminal 窗口。打开后仍定位不到具体窗口 ID 时停止作业。
 - 开窗可能短暂把新窗口置前。录制器必须在开窗前记录用户前台应用；仅当最前普通窗口属于本次打开的 Terminal/Chrome 进程时，才把用户原应用恢复。恢复事实写入
