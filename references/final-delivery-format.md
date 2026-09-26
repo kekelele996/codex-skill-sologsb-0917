@@ -80,6 +80,7 @@
 
 - Submission ID：`...`
 - 质检终态：`QC_PASSED / ...`
+  （10 分钟内未出结果时写：`未出结果（等待 10 分钟超时，平台仍为 SUBMITTED 待质检，需稍后到平台查看）`）
 - API 结果：[submission-api-result.json](/absolute/path/submission-api-result.json)
 
 ## 未解决问题

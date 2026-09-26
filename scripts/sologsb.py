@@ -621,7 +621,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--server", default=os.environ.get("SOLO2_SERVER", "").strip())
     submit.add_argument("--keychain-service",
                         default=os.environ.get("SOLOSB_SOLO2_KEYCHAIN_SERVICE", "").strip())
-    submit.add_argument("--poll-timeout", type=float, default=1800.0)
+    submit.add_argument("--poll-timeout", type=float, default=600.0, help="等待质检终态的秒数，默认 10 分钟，每分钟查询一次")
     submit.set_defaults(func=cmd_submit)
 
     approve_line_gate = sub.add_parser(

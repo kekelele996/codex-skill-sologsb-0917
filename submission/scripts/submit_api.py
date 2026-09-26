@@ -51,6 +51,8 @@ TERMINAL_STATUS_HINTS = {
     "PENDING_FIX",
 }
 PASS_STATUSES = {"QC_PASSED", "PASSED"}
+QC_POLL_TIMEOUT_SECONDS = 600.0
+QC_POLL_INTERVAL_SECONDS = 60.0
 EXCLUDED_SUBMISSION_FIELDS = {"remark"}
 CHANGE_VOLUME_APPROVAL_SCOPE = "change-volume-line-gate"
 AUTO_APPROVER = os.environ.get("SOLOGBS_AUTO_APPROVER", "").strip() or "auto"
@@ -421,7 +423,7 @@ def poll_submission(
     deadline = time.monotonic() + timeout
     last: dict[str, Any] = {}
     errors = 0
-    while time.monotonic() < deadline:
+    while True:
         try:
             last = request_json("GET", f"{server}/api/v1/gsb/submissions/{submission_id}", cookie, csrf)
             errors = 0
@@ -431,15 +433,26 @@ def poll_submission(
                 last = dict(last)
                 last["pollError"] = str(exc)
                 return last
-            time.sleep(min(30.0, 2.5 * (2 ** errors)))
-            continue
-        status = str(last.get("status") or "")
-        if status and status != "SUBMITTED":
-            return last
-        time.sleep(2.5)
+        else:
+            status = str(last.get("status") or "")
+            if status and status != "SUBMITTED":
+                return last
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # Check once per interval; the last check lands on the deadline itself.
+        time.sleep(min(QC_POLL_INTERVAL_SECONDS, remaining))
     last = dict(last)
     last["pollTimedOut"] = True
     return last
+
+
+def qc_pending_message(submission_id: str, timeout: float) -> str:
+    return (
+        f"已提交（submission id {submission_id}），等待质检 {timeout / 60:g} 分钟仍未出结果，先结束本次等待；"
+        "平台仍为待质检（SUBMITTED），不是通过。请稍后到平台查看该记录的质检终态，"
+        "不要重复提交（重跑 submit 会被拒绝）。"
+    )
 
 
 def write_result(task_root: Path, result: dict[str, Any]) -> Path:
@@ -513,7 +526,7 @@ def main() -> int:
     parser.add_argument("--keychain-service", default=DEFAULT_KEYCHAIN_SERVICE)
     parser.add_argument("--execute", action="store_true", help="真正上传并提交；默认只做审核和 dry-run")
     parser.add_argument("--force", action="store_true", help="忽略本地已有提交结果，允许重新提交")
-    parser.add_argument("--poll-timeout", type=float, default=1800.0)
+    parser.add_argument("--poll-timeout", type=float, default=QC_POLL_TIMEOUT_SECONDS)
     args = parser.parse_args()
 
     if args.execute and args.skip_preflight:
@@ -638,9 +651,16 @@ def main() -> int:
     })
     detail = poll_submission(args.server, cookie, csrf, submission_id, args.poll_timeout)
     status = str(detail.get("status") or "")
+    qc_pending = bool(detail.get("pollTimedOut")) and status in {"", "SUBMITTED"}
+    if status in PASS_STATUSES:
+        result_status = "submitted"
+    elif qc_pending:
+        result_status = "submitted_qc_pending"
+    else:
+        result_status = "submitted_not_passed"
     result = {
         "schemaVersion": 1,
-        "status": "submitted" if status in PASS_STATUSES else "submitted_not_passed",
+        "status": result_status,
         "ok": status in PASS_STATUSES,
         "submittedAt": utc_now(),
         "submissionId": submission_id,
@@ -653,9 +673,14 @@ def main() -> int:
         "approvalKind": str(approval.get("approvalKind") or ""),
         "statusValue": status,
     }
+    if qc_pending:
+        result["message"] = qc_pending_message(submission_id, args.poll_timeout)
     output = write_result(task_root, result)
     claim_release = release_finished_claim(task_root)
-    print(json.dumps({"status": result["status"], "ok": result["ok"], "submissionId": submission_id, "statusValue": status, "resultPath": str(output), "projectClaim": claim_release}, ensure_ascii=False, indent=2))
+    summary = {"status": result["status"], "ok": result["ok"], "submissionId": submission_id, "statusValue": status, "resultPath": str(output), "projectClaim": claim_release}
+    if qc_pending:
+        summary["message"] = result["message"]
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if result["ok"] else 1
 
 

@@ -2914,6 +2914,43 @@ class SubmitApprovalTests(unittest.TestCase):
                 )
 
 
+    def test_poll_checks_once_per_minute_and_stops_after_ten_minutes(self) -> None:
+        mod = self.submit_api
+        self.assertEqual(mod.QC_POLL_TIMEOUT_SECONDS, 600.0)
+        self.assertEqual(mod.QC_POLL_INTERVAL_SECONDS, 60.0)
+        clock = {"now": 0.0}
+        sleeps: list[float] = []
+        calls: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        def fake_request(*_args, **_kwargs):
+            calls.append(clock["now"])
+            return {"id": "42", "status": "SUBMITTED"}
+
+        with mock.patch.object(mod.time, "monotonic", side_effect=lambda: clock["now"]), \
+                mock.patch.object(mod.time, "sleep", side_effect=fake_sleep), \
+                mock.patch.object(mod, "request_json", side_effect=fake_request):
+            detail = mod.poll_submission("https://x", "c", "t", "42", 600.0)
+        self.assertTrue(detail["pollTimedOut"])
+        self.assertEqual(sleeps, [60.0] * 10)
+        self.assertEqual(calls, [60.0 * i for i in range(11)])
+        self.assertIn("不是通过", mod.qc_pending_message("42", 600.0))
+        self.assertIn("10 分钟", mod.qc_pending_message("42", 600.0))
+
+    def test_poll_returns_as_soon_as_qc_finishes(self) -> None:
+        mod = self.submit_api
+        statuses = iter(["SUBMITTED", "QC_PASSED"])
+        with mock.patch.object(mod.time, "sleep") as sleep, \
+                mock.patch.object(mod, "request_json", side_effect=lambda *a, **k: {"status": next(statuses)}):
+            detail = mod.poll_submission("https://x", "c", "t", "42", 600.0)
+        self.assertEqual(detail["status"], "QC_PASSED")
+        self.assertNotIn("pollTimedOut", detail)
+        self.assertEqual(sleep.call_count, 1)
+
+
 class ContainerLimitTests(unittest.TestCase):
     def test_device_config_limit_defaults_to_four(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

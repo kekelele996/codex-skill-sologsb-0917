@@ -60,7 +60,9 @@ python3 scripts/submit_api.py \
   --execute
 ```
 
-脚本会依次上传 A/B 轨迹和录屏，调用创建接口，轮询到 `SUBMITTED` 以外的质检终态。只有
+脚本会依次上传 A/B 轨迹和录屏，调用创建接口，每 1 分钟查询一次、最多等待 10 分钟（`--poll-timeout` 可调），
+轮询到 `SUBMITTED` 以外的质检终态。10 分钟内仍未出结果时先结束，结果记为 `submitted_qc_pending` 并附 `message`
+说明，汇报时必须交代“已提交、待质检、未出结果”，不得写成通过，也不得重复提交。只有
 `QC_PASSED` 才返回成功；`QC_REJECTED`、`QC_DISCARDED`、`QC_FAILED`、`PENDING_FIX`
 或超时均返回非零并保留原始响应到：
 

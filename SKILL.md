@@ -239,6 +239,8 @@ SOLO2 会话失效时，运行器会用配置里的账号密码自动重新登�
 13. 确认提交输出里的 `projectClaim.status` 为 `released`（或 `kept`，仅限 `PENDING_FIX`）。若为
     `release_failed`，运行 `release-claim --task-root ROOT --if-finished`；不要依赖 24 小时 TTL。
     提交接口已创建记录后若质检轮询中断，结果文件会先记为 `submitted_polling`，重跑 `submit` 会拒绝重复提交。
+    质检默认最多等待 10 分钟、每 1 分钟查询一次；超时仍为待质检时先结束，结果记为 `submitted_qc_pending`，
+    最终回复必须交代：已提交、submission id、质检尚未出结果（不是通过）、稍后去平台查看，不得重复提交。
 
 ## CLI
 
