@@ -46,6 +46,10 @@ FIELDS: dict[str, tuple[str | None, str]] = {
     "github.username": ("SOLOSB_GITHUB_USERNAME", ""),
     "github.proxyHttp": ("SOLOSB_GITHUB_PROXY", "127.0.0.1:17890"),
     "github.proxySocks": (None, "127.0.0.1:17891"),
+    # 定期状态推送（scripts/status_push.py）；Bark 地址含设备 key，按密钥处理
+    "notify.barkUrl": ("SOLOSB_BARK_URL", ""),
+    "notify.group": (None, "sologsb"),
+    "notify.intervalMinutes": ("SOLOSB_NOTIFY_INTERVAL", "30"),
 }
 
 # 这些字段在 show / 日志里必须脱敏
@@ -57,6 +61,7 @@ SECRET_FIELDS = {
     "solo2.cookie",
     "solo2.csrf",
     "github.token",
+    "notify.barkUrl",
 }
 
 

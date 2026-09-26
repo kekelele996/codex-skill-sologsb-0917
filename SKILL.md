@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.5.1`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.5.1`
-- 精确提交号：运行 `git rev-parse v1.5.1` 获取。
+- 全局版本号：`1.6.0`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.6.0`
+- 精确提交号：运行 `git rev-parse v1.6.0` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -188,6 +188,21 @@ python3 ~/.codex/skills/sologsb-0917/scripts/configure.py wizard
 SOLO2 会话失效时，运行器会用配置里的账号密码自动重新登录：读接口遇到 401 会重登后重试，
 提交前会先校验会话，因此不需要人工更换 Cookie。
 
+### 定期状态推送（可选）
+
+`scripts/status_push.py` 把本机状态推送到 Bark：SOLO2 账号（`solo2.username`）今日 / 总提交与状态分布、
+运行中任务（本机持有的项目占用锁）、容器用量 / 上限与候选排队（与容器限流同一账本）。
+每次推送都现取数据，平台不可达时回落到本机 GSB 历史缓存并注明缓存时间；标题带账号与设备名，多台设备互不混淆。
+
+```bash
+python3 scripts/configure.py set notify.barkUrl=https://api.day.app/<key>   # 每台设备一次
+python3 scripts/status_push.py show                  # 只打印
+python3 scripts/status_push.py install [--interval 30] # macOS 装 launchd，其它系统写 crontab
+python3 scripts/status_push.py uninstall
+```
+
+间隔默认读 `notify.intervalMinutes`（30），分组读 `notify.group`（sologsb）；日志在 `~/.codex/sologsb-0917/status-push.log`。
+
 ## 工作流
 
 1. 运行 `init` 接入平台项目、本地 ZIP 或源码目录。平台模式先拿全局选择锁并占用项目，
@@ -268,6 +283,7 @@ python3 scripts/sologsb.py approve-line-gate --task-root ROOT            # 仅�
 python3 scripts/sologsb.py submit --task-root ROOT --approval APPROVAL --execute
 python3 scripts/sologsb.py release-claim --task-root ROOT [--if-finished]  # 只释放项目锁，不删容器和文件
 python3 scripts/sologsb.py cleanup --task-root ROOT  # 同时释放平台项目占用锁
+python3 scripts/status_push.py install [--interval 30]  # 定期推送本机任务状态到 Bark
 python3 scripts/sologsb.py --version                                    # 打印统一全局版本号
 python3 scripts/sologsb.py version                                       # 打印版本 JSON
 ```

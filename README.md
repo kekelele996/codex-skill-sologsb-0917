@@ -1,6 +1,6 @@
 # sologsb-0917
 
-全局版本号 `1.5.1`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
+全局版本号 `1.6.0`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
 
 0917 期 Pair-wise GSB 的可复用 Codex Skill。详见 `SKILL.md`。
 
@@ -47,6 +47,13 @@
 ```bash
 git clone <本仓库地址> ~/.codex/skills/sologsb-0917
 python3 ~/.codex/skills/sologsb-0917/scripts/configure.py wizard   # 配置该设备凭据并联网验证
+```
+
+可选：定期把本机任务状态推送到 Bark（账号、提交、运行中任务、容器用量都从本机现取）：
+
+```bash
+python3 ~/.codex/skills/sologsb-0917/scripts/configure.py set notify.barkUrl=https://api.day.app/<key>
+python3 ~/.codex/skills/sologsb-0917/scripts/status_push.py install --interval 30
 ```
 
 ### 日常更新
