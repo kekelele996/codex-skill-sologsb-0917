@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.5.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.5.0`
-- 精确提交号：运行 `git rev-parse v1.5.0` 获取。
+- 全局版本号：`1.5.1`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.5.1`
+- 精确提交号：运行 `git rev-parse v1.5.1` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，

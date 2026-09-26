@@ -1,6 +1,6 @@
 # sologsb-0917
 
-全局版本号 `1.5.0`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
+全局版本号 `1.5.1`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
 
 0917 期 Pair-wise GSB 的可复用 Codex Skill。详见 `SKILL.md`。
 
