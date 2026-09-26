@@ -9,9 +9,15 @@ from typing import Any
 
 from common import SologsbError, sha256_file
 
+# 只识别模型网关或上游服务的故障，不把应用业务正常返回的 429/5xx
+# 当成网关错误。业务接口的 429 常用于表达额度耗尽。
 API_ERROR = re.compile(
-    r"\bapi error\b|\b429\b|\b5(?:02|03|04)\b|rate limit|overloaded|"
-    r"bad gateway|service unavailable|gateway time-?out",
+    r"\bapi error\b|"
+    r"\bmax_parallel_requests\b|"
+    r"\boverloaded(?:_error)?\b|"
+    r"\brate_limit_error\b|"
+    r"\b(?:429|502|503|504)\b[^\n]{0,60}\b(?:max_parallel_requests|overloaded|rate limit|bad gateway|service unavailable|gateway time-?out)\b|"
+    r"\b(?:bad gateway|service unavailable|gateway time-?out)\b",
     re.I,
 )
 PERMISSION = re.compile(r"askuserquestion|需要你确认|请确认|请提供更多信息|等待你的输入|权限询问", re.I)

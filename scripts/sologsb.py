@@ -30,7 +30,6 @@ from common import (
     read_json,
     run,
     safe_local_name,
-    safe_slug,
     save_state,
     sha256_file,
     skill_version,
@@ -46,7 +45,14 @@ from prompt_tools import install_prompt
 from project_claims import release_claim_if_finished, release_project_claim
 from recorder import prepare_recording, record_side, recording_isolation_ok, video_dimensions
 from semantic_review import ensure_packets
-from side_runner import DEFAULT_CANDIDATE_COUNT, MAX_ATTEMPTS, publish_sides, run_both, run_side
+from side_runner import (
+    DEFAULT_CANDIDATE_COUNT,
+    MAX_ATTEMPTS,
+    cleanup_task_containers,
+    publish_sides,
+    run_both,
+    run_side,
+)
 from source_ingest import ingest_source
 from trace_validator import validate_single_round
 
@@ -156,24 +162,32 @@ def cmd_run(args: argparse.Namespace) -> int:
     root = task_root_from_arg(args.task_root)
     if args.base_url:
         os.environ["SOLOSB_ANTHROPIC_BASE_URL"] = str(args.base_url).strip().rstrip("/")
-    if args.side == "both":
-        if args.force:
-            raise SologsbError("--force 只适用于 A 或 B；重跑请分别执行")
-        result = run_both(
-            root,
-            timeout=args.timeout,
-            live=args.live,
-            candidate_count=args.candidates,
-            attempts=args.attempts,
-        )
-    else:
-        result = run_side(
-            root,
-            args.side,
-            timeout=args.timeout,
-            live=args.live,
-            force=args.force,
-            attempts=args.attempts,
+    try:
+        if args.side == "both":
+            if args.force:
+                raise SologsbError("--force 只适用于 A 或 B；重跑请分别执行")
+            result = run_both(
+                root,
+                timeout=args.timeout,
+                live=args.live,
+                candidate_count=args.candidates,
+                attempts=args.attempts,
+            )
+        else:
+            result = run_side(
+                root,
+                args.side,
+                timeout=args.timeout,
+                live=args.live,
+                force=args.force,
+                attempts=args.attempts,
+            )
+    finally:
+        cleanup_result = cleanup_task_containers(root, reason="run-command-end")
+    if not cleanup_result.get("ok"):
+        raise SologsbError(
+            "本次任务容器清理未通过，拒绝按成功结束；详情见 "
+            f"{root / 'monitor' / 'container-cleanup.json'}: {cleanup_result}"
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -468,23 +482,20 @@ def cmd_release_claim(args: argparse.Namespace) -> int:
 
 def cmd_cleanup(args: argparse.Namespace) -> int:
     root = task_root_from_arg(args.task_root)
-    prefix = f"sologsb-{safe_slug(root.name)}-"
-    proc = run(["docker", "ps", "-a", "--format", "{{.Names}}"], check=False)
-    removed: list[str] = []
-    if proc.returncode == 0:
-        for name in proc.stdout.decode().splitlines():
-            if name.startswith(prefix):
-                run(["docker", "rm", "-f", name], check=False)
-                removed.append(name)
+    cleanup_result = cleanup_task_containers(root, reason="explicit-cleanup")
     verify_dir = root / "monitor" / "verify"
     if verify_dir.exists() and not args.keep_verify:
         shutil.rmtree(verify_dir)
-    claim_release = release_project_claim(root)
+    claim_release = (
+        release_project_claim(root)
+        if cleanup_result.get("ok")
+        else {"status": "kept", "reason": "container-cleanup-failed"}
+    )
     print(
         json.dumps(
             {
-                "status": "cleaned",
-                "removedContainers": removed,
+                "status": "cleaned" if cleanup_result.get("ok") else "cleanup_failed",
+                "containerCleanup": cleanup_result,
                 "projectClaim": claim_release,
                 "keptProducts": True,
             },
@@ -492,7 +503,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             indent=2,
         )
     )
-    return 0
+    return 0 if cleanup_result.get("ok") else 1
 
 
 def cmd_version(args: argparse.Namespace) -> int:
@@ -654,7 +665,7 @@ def build_parser() -> argparse.ArgumentParser:
     release_claim.add_argument("--if-finished", action="store_true", help="仅当已有非返修提交记录时释放")
     release_claim.set_defaults(func=cmd_release_claim)
 
-    cleanup = sub.add_parser("cleanup", help="清理临时容器和验证 clone")
+    cleanup = sub.add_parser("cleanup", help="清理本任务容器和验证 clone")
     cleanup.add_argument("--task-root", required=True)
     cleanup.add_argument("--keep-verify", action="store_true")
     cleanup.set_defaults(func=cmd_cleanup)

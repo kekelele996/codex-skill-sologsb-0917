@@ -39,6 +39,7 @@ from common import (
     safe_slug,
     save_state,
     sha256_file,
+    sha256_text,
     utc_now,
     write_json,
 )
@@ -375,18 +376,120 @@ def _clone_candidate(task_root: Path, state: dict[str, Any], candidate: str) -> 
 
 
 def _docker_exists(name: str) -> bool:
-    proc = run(["docker", "container", "inspect", name], check=False)
+    try:
+        proc = run(["docker", "container", "inspect", name], check=False, timeout=30)
+    except subprocess.TimeoutExpired:
+        return False
     return proc.returncode == 0
 
 
 def _docker_running(name: str) -> bool:
-    proc = run(["docker", "inspect", "-f", "{{.State.Running}}", name], check=False)
+    try:
+        proc = run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", name],
+            check=False,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return proc.returncode == 0 and proc.stdout.decode().strip() == "true"
 
 
 def _remove_container(name: str) -> None:
-    if name and _docker_exists(name):
-        run(["docker", "rm", "-f", name], check=False)
+    if not name:
+        return
+    try:
+        run(["docker", "rm", "-f", name], check=False, timeout=60)
+    except subprocess.TimeoutExpired:
+        return
+
+
+CONTAINER_TASK_LABEL = "sologsb.task-root"
+
+
+def _task_container_label(task_root: Path) -> str:
+    return sha256_text(str(task_root.resolve()))[:24]
+
+
+def _task_container_prefix(task_root: Path) -> str:
+    return f"sologsb-{safe_slug(task_root.name)}-"
+
+
+def _owned_container_names(task_root: Path) -> tuple[set[str], list[str]]:
+    """Return only containers created for this exact task root."""
+    names: set[str] = set()
+    errors: list[str] = []
+    label = f"{CONTAINER_TASK_LABEL}={_task_container_label(task_root)}"
+    queries = (
+        (["docker", "ps", "-a", "--filter", f"label={label}", "--format", "{{.Names}}"], False),
+        (["docker", "ps", "-a", "--format", "{{.Names}}"], True),
+    )
+    prefix = _task_container_prefix(task_root)
+    for cmd, prefix_filter in queries:
+        try:
+            proc = run(cmd, check=False, timeout=30)
+        except subprocess.TimeoutExpired:
+            errors.append("；".join(cmd) + ": timeout")
+            continue
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", errors="replace").strip()
+            errors.append("；".join(cmd) + f": rc={proc.returncode} {detail}")
+            continue
+        for raw in proc.stdout.decode("utf-8", errors="replace").splitlines():
+            name = raw.strip()
+            if name and (not prefix_filter or name.startswith(prefix)):
+                names.add(name)
+    return names, errors
+
+
+def cleanup_task_containers(task_root: Path, *, reason: str = "task-end") -> dict[str, Any]:
+    """Best-effort cleanup of containers belonging to one task root only.
+
+    The label catches new containers, while the task-name prefix catches
+    containers created by older skill versions.  The result is persisted so a
+    task cannot silently finish with residual containers.
+    """
+    root = task_root.expanduser().resolve()
+    removed: set[str] = set()
+    failures: list[str] = []
+    query_errors: list[str] = []
+    for round_no in range(2):
+        names, errors = _owned_container_names(root)
+        query_errors.extend(errors)
+        for name in sorted(names - removed):
+            try:
+                proc = run(["docker", "rm", "-f", name], check=False, timeout=60)
+            except subprocess.TimeoutExpired:
+                failures.append(f"{name}: remove timeout")
+                continue
+            detail = proc.stderr.decode("utf-8", errors="replace").strip()
+            if proc.returncode == 0 or "No such container" in detail:
+                removed.add(name)
+            elif detail:
+                failures.append(f"{name}: {detail}")
+            else:
+                failures.append(f"{name}: remove rc={proc.returncode}")
+        if round_no == 0:
+            time.sleep(1.0)
+    residual, final_errors = _owned_container_names(root)
+    query_errors.extend(final_errors)
+    result = {
+        "schemaVersion": 1,
+        "taskRoot": str(root),
+        "reason": str(reason),
+        "selector": {
+            "label": f"{CONTAINER_TASK_LABEL}={_task_container_label(root)}",
+            "namePrefix": _task_container_prefix(root),
+        },
+        "removedContainers": sorted(removed),
+        "removeFailures": list(dict.fromkeys(failures)),
+        "queryErrors": list(dict.fromkeys(query_errors)),
+        "residualContainers": sorted(residual),
+        "finishedAt": utc_now(),
+    }
+    result["ok"] = not result["removeFailures"] and not result["queryErrors"] and not result["residualContainers"]
+    write_json(root / "monitor" / "container-cleanup.json", result)
+    return result
 
 
 class CandidateCancelled(SologsbError):
@@ -834,6 +937,7 @@ def _start_container(
         "--name", container,
         "--label", "sologsb-0917=true",
         "--label", f"sologsb.run-pid={os.getpid()}",
+        "--label", f"{CONTAINER_TASK_LABEL}={_task_container_label(task_root)}",
     ]
     if project_code:
         cmd += ["--label", f"sologsb.project-code={project_code}"]
@@ -856,6 +960,7 @@ def _start_container(
         if not _docker_running(container):
             raise SologsbError(f"容器未运行: {container}")
     except Exception:
+        _remove_container(container)
         slot.release()
         raise
     return {
@@ -968,8 +1073,8 @@ def _diff_snapshot(repo: Path, initial_sha: str) -> dict[str, Any]:
 
 
 GENERATED_PATH_EXCLUDES = (
-    "node_modules/", "dist/", "build/", "coverage/", ".next/", ".nuxt/", ".vite/",
-    "target/", "vendor/", "__pycache__/", ".venv/", "venv/", ".cache/",
+    "node_modules/", "dist/", "build/", "coverage/", ".next/", ".nuxt/", ".output/",
+    ".vite/", ".svelte-kit/", "target/", "vendor/", "__pycache__/", ".venv/", "venv/", ".cache/",
 )
 # 锁文件不写进 .git/info/exclude：模型改了依赖清单时要随清单一起发布，
 # 没改清单时才在 stage 后撤回（见 _unstage_generated_paths）。
@@ -989,7 +1094,12 @@ def _install_generated_path_excludes(repo: Path) -> None:
     if marker in existing:
         # 旧版本把锁文件也写进了排除清单；去掉这些行，锁文件改由 stage 后按配对规则处理。
         kept = [line for line in existing.splitlines() if not is_lockfile(line.strip())]
-        text = "\n".join(kept) + "\n"
+        # 已存在 marker 时也要补齐后续新增的生成物规则，避免旧任务沿用不完整排除清单。
+        present = {line.strip() for line in kept}
+        missing = [item for item in GENERATED_PATH_EXCLUDES if item not in present]
+        if missing:
+            kept.extend(missing)
+        text = "\n".join(kept).rstrip() + "\n"
         if text != existing:
             exclude.write_text(text, encoding="utf-8")
         return
@@ -1961,7 +2071,7 @@ def run_candidates(
             "重复启动会清空任务状态并重建候选工作区，因此这里在任何改动之前直接退出。"
         )
     state = read_json(task_root / "monitor" / "state.json", {})
-    if state.get("status") not in {"prompt_ready", "candidates_running", "blocked", "attempt_invalid"}:
+    if state.get("status") not in {"prompt_ready", "candidates_running", "candidates_ready", "blocked", "attempt_invalid"}:
         raise SologsbError(
             f"当前状态 {state.get('status')} 不允许启动候选竞速；"
             "必须在 GitHub 上传前运行"

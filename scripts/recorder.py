@@ -2501,8 +2501,11 @@ def _terminal_command(plan: dict[str, Any], log_path: Path, script_path: Path, r
     ]
     if api_requests:
         block.append("  api_rc=0")
-        for item in api_requests:
+        api_pace_seconds = float(plan.get("apiPaceSeconds") or 0)
+        for index, item in enumerate(api_requests):
             block.append(f"  {_api_request_shell(item, timeout=api_timeout)} || api_rc=1")
+            if api_pace_seconds > 0 and index < len(api_requests) - 1:
+                block.append(f"  sleep {api_pace_seconds:g}")
         block.append('  if [ "$api_rc" -ne 0 ] || [ "$scenario_rc" -ne 0 ]; then scenario_rc=1; fi')
     block.extend(f"  {command} || true" for command in cleanup_commands)
     block.append('  exit "$scenario_rc"')
@@ -2758,7 +2761,11 @@ def _record_side_locked(
         )
         if focus_guard is not None:
             focus_guard.restore_final()
-    expected_app_failure = mode == "failed-start" or bool(draft.get("expectedBrowserFailure"))
+    expected_app_failure = (
+        mode == "failed-start"
+        or bool(draft.get("expectedBrowserFailure"))
+        or bool(draft.get("expectedAppFailure"))
+    )
     observed_app_failure = command_exit not in (None, 0)
     command_ok = recording_command_ok(command_exit, expected_app_failure)
     runtime_dir = task_root / "monitor" / "recording" / side.lower() / (WEB_RUNTIME_DIR if mode == "web" else TERMINAL_RUNTIME_DIR)

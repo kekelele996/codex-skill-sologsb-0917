@@ -80,7 +80,7 @@ REASON_NGRAM_BLOCK = float(os.environ.get("SOLOGBS_REASON_NGRAM_BLOCK", "0.45") 
 REASON_NGRAM_REVIEW = float(os.environ.get("SOLOGBS_REASON_NGRAM_REVIEW", "0.20") or "0.20")
 COMMIT_RE = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/commit/[0-9a-fA-F]{40}/?$")
 OBJECTIVE_EVIDENCE_RE = re.compile(
-    r"(?i)(?:[A-Za-z0-9_.-]+\.(?:go|ts|tsx|vue|py|js|json|ya?ml|md|sql|sh|css|html)|"
+    r"(?i)(?:[A-Za-z0-9_.-]+\.(?:go|ts|tsx|svelte|vue|py|js|json|ya?ml|md|sql|sh|css|html)|"
     r"`[^`]+`|(?:Exit code|HTTP|返回码|退出码|报错|错误|Exception|Error)\s*[:：]?\s*\S+)"
 )
 OBJECTIVE_CONSEQUENCE_RE = re.compile(
@@ -94,7 +94,7 @@ PROCESS_ACTION_RE = re.compile(
 PROCESS_LOCATOR_RE = re.compile(
     r"(?:第\s*[一二三四五六七八九十\d]+\s*(?:步|次|轮|阶段)|阶段|初始化|联调|验证|构建|启动|"
     r"迁移|数据库|脚本|文件|接口|服务|模块|路由|中间件|指标|功能|字段|页面|流程|逻辑|配置|模型|需求|用例|`[^`]+`|"
-    r"\.(?:go|js|cjs|mjs|ts|tsx|jsx|py|java|kt|rs|vue|json|ya?ml|toml|md|sql|sh|css|html|xml))"
+    r"\.(?:go|js|cjs|mjs|ts|tsx|jsx|py|java|kt|rs|svelte|vue|json|ya?ml|toml|md|sql|sh|css|html|xml))"
 )
 ARTIFACT_OUTCOME_RE = re.compile(
     r"(?:返回|输出|缺少|缺失|未实现|没有|失败|报错|异常|保留|仍然|仍含|写入|生成|创建|删除|更新|"
@@ -139,8 +139,8 @@ SOURCE_EXTENSIONS = {
     ".svelte", ".swift", ".ts", ".tsx", ".vue",
 }
 GENERATED_DIR_NAMES = {
-    "node_modules", "dist", "build", "coverage", ".next", ".nuxt", ".vite",
-    "target", "vendor", "__pycache__", ".venv", "venv", ".cache",
+    "node_modules", "dist", "build", "coverage", ".next", ".nuxt", ".output",
+    ".vite", ".svelte-kit", "target", "vendor", "__pycache__", ".venv", "venv", ".cache",
 }
 
 
@@ -820,6 +820,14 @@ def _normalize_prompt(value: str) -> str:
     return re.sub(r"[，。；：！？、,.!?;:\"'“”‘’（）()《》<>【】\[\]{}…—_-]", "", text)
 
 
+REASON_REQUIRED_BOILERPLATE_RE = re.compile(r"(?:这个任务最重要的是|a侧方案|b侧方案)")
+
+
+def _normalize_reason_for_dedup(value: str) -> str:
+    """Remove mandatory reason boilerplate before history similarity checks."""
+    return REASON_REQUIRED_BOILERPLATE_RE.sub("", _normalize_prompt(value))
+
+
 def _longest_common_substring(left: str, right: str) -> int:
     if not left or not right:
         return 0
@@ -893,7 +901,7 @@ def assess_prompt_dedup(candidate: str, history: dict) -> dict:
 
 
 def assess_gsb_reason_dedup(candidate: str, history: dict) -> dict:
-    normalized = _normalize_prompt(candidate)
+    normalized = _normalize_reason_for_dedup(candidate)
     if not normalized:
         return {
             "decision": "MISSING",
@@ -906,7 +914,7 @@ def assess_gsb_reason_dedup(candidate: str, history: dict) -> dict:
         }
     matches = []
     for item in history.get("items") or []:
-        other = _normalize_prompt(item.get("gsbReason") or "")
+        other = _normalize_reason_for_dedup(item.get("gsbReason") or "")
         if not other:
             continue
         similarity = difflib.SequenceMatcher(None, normalized, other).ratio()

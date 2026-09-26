@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.6.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.6.0`
-- 精确提交号：运行 `git rev-parse v1.6.0` 获取。
+- 全局版本号：`1.6.1`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.6.1`
+- 精确提交号：运行 `git rev-parse v1.6.1` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -41,6 +41,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   两种模式共用同一条进门规则：**运行中容器与预占位合计 `>=` 上限**时才等待；有容量时继续逐个放行。
 - Anthropic 兼容中转站地址取自设备配置 `claude.baseUrl`，可在 `run` 中传 `--base-url`，或通过 `SOLOSB_ANTHROPIC_BASE_URL` 覆盖；运行器会校验容器实际 Base URL。
 - 网关 429 `max_parallel_requests` 属于准入失败：正式候选运行前先等待最小 `/v1/messages` 探测成功；发生最终 429 后不要立即重启新容器，先等待 Key 恢复。恢复后仍按红线使用新容器、新 Claude home 和新 SessionID，实际尝试次数照记。
+- 任务结束、失败、中断或收到停止信号时，执行器都要清理本次任务自己创建的候选容器。新容器必须带由任务根目录计算出的 `sologsb.task-root` 标签，兜底匹配只允许使用该标签或 `sologsb-<唯一任务名>-` 名称前缀；禁止按全部 `sologsb-*` 容器通杀。清理结果写入 `monitor/container-cleanup.json`，有残留、删除失败或无法查询时不得把任务标成 `complete`，并必须在最终交付的未解决问题中写明。
 - pnpm fresh clone 固定按“安装失败留证 → `pnpm approve-builds --all` → 再次安装 → 构建”顺序处理。
 - Web 录屏先确认默认 Tab、当前用户和重复卡片选择器；同名操作按钮使用卡片范围或 `.last()`；同时清除 Chrome 登录/同步/密码/通知等浮层与终端多网卡干扰行。
 - 录屏画面内容红线：终端不得展示凭据、`.env`、环境变量或任务目录外文件，Chrome 只访问本地被测应用；原生弹窗（alert/confirm、文件选择、原生下拉、右键菜单）拍不到，关键验收步骤不得依赖它们，详见 `references/recording.md`「画面内容约束」。
@@ -52,7 +53,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 所有候选必须使用同一个 UTF-8 提示词文件，发送字节逐字一致。
 - 只允许 `困难`、`地狱`；任务类型不得选择 `代码理解`。
 - 提示词不得设计成低改动量任务。困难、地狱题建议每个 A/B 至少产生 30 行非测试业务代码改动并跨至少 3 个业务文件。发布阶段仍生成 A/B 产物快照并记录行数门禁失败，平台提交前再执行最终阻断。
-- 发布产物前必须排除 `node_modules`、构建目录、缓存和虚拟环境；锁文件随依赖清单发布：模型改了 `package.json`、`go.mod`、`Cargo.toml` 等依赖清单时，同目录（或工作区根目录）的锁文件一起进入产物 commit；`go.sum`、`go.work.sum` 改了就发布；清单没改时锁文件照旧撤回，否则干净检出后安装或构建会失败。提交预检必须从远端 commit 复算改动量并按平台 G11 口径阻断低改动或脏仓库。只有“任一侧业务代码少于 10 行”且这是唯一阻断项时，才允许 `change-volume-line-gate` 例外审批。
+- 发布产物前必须排除 `node_modules`、构建目录（包括 Nuxt 的 `.output`）、缓存和虚拟环境；锁文件随依赖清单发布：模型改了 `package.json`、`go.mod`、`Cargo.toml` 等依赖清单时，同目录（或工作区根目录）的锁文件一起进入产物 commit；`go.sum`、`go.work.sum` 改了就发布；清单没改时锁文件照旧撤回，否则干净检出后安装或构建会失败。提交预检必须从远端 commit 复算改动量并按平台 G11 口径阻断低改动或脏仓库。只有“任一侧业务代码少于 10 行”且这是唯一阻断项时，才允许 `change-volume-line-gate` 例外审批。
 - 例外审批必须绑定 payload 哈希、交付表哈希和改动量复核哈希，批准用户取自设备配置 `solo2.approver`；其他任何门禁失败都不能绕过。
 - 默认先拉取同一初始快照的 2 份独立候选源码，不使用 A/B 目录名，也不改名。
   固定目录为 `source/candidates/candidate-1..N`，每份源码各自使用独立容器、Claude home、
@@ -228,7 +229,11 @@ python3 scripts/status_push.py uninstall
    分别生成本地产物 commit，再通过 GitHub 原子 push 同时更新 A、B；任一审核失败或原子 push
    失败时不得发布。
 7. 根据项目真实入口填写 `monitor/verification-plan.json`，运行 `audit`。没有
-   可执行验证计划时不得进入 GSB。发布前由 `publish` 排除依赖和构建产物并记录少于 10 行的门禁失败，最终提交阶段再阻断。
+   可执行验证计划时不得进入 GSB。验证 clone 完成后，运行器会自动识别本次改动的 npm
+   清单与锁文件，并额外执行 `npm ci --dry-run --ignore-scripts --no-audit --no-fund`；
+   清单与锁文件不同步时，把真实 `EUSAGE`、缺少依赖和退出码记为产物失败证据，不能改用
+   `npm install` 掩盖。发布前由 `publish` 排除依赖和构建产物并记录少于 10 行的门禁失败，
+   最终提交阶段再阻断。
 8. 读取 `monitor/evidence.json` 和 `monitor/audit.json`，生成 `gsb-draft.json`。
    每侧必须分别提供 process/artifact claim，且两类 claim 的 `text` 都要原样进入理由；
    过程 claim 必须包含轨迹可核对的实际动作与文件、命令、步骤或需求定位点，
@@ -246,7 +251,7 @@ python3 scripts/status_push.py uninstall
    视频统一保存为 `<项目编号-项目名>-验证A产物.mp4` 和 `<项目编号-项目名>-验证B产物.mp4`。
    成功侧录成功链路，失败侧录真实失败链路；场景脚本必须执行到可观察的最终状态，不能因预期失败而提前停止或伪造成功。
    纯后端/API 题在 `apiRequests` 中模拟多步业务请求（可用 `extract` 提取 token 传给后续请求），断言失败按真实失败结果记录。
-10. 运行 `status` 复核所有产物。
+10. 运行 `status` 复核所有产物。`run` 命令无论正常结束、异常退出还是被中断，都会在 `finally` 中执行一次本任务容器兜底清理；显式收尾也可运行 `cleanup --task-root ROOT`。只清理带本任务标签或唯一任务名前缀的容器，清理记录供 `status` 和最终交付审计。
 11. `status=complete` 后直接运行 `submit --task-root ROOT --execute`，不再先做单独的人工 dry-run。提交命令会先执行完整预检、刷新历史文案缓存并对 `user_prompt` 与 `gsb_reason` 双重去重。
 12. 完整审核通过时，系统自动生成批准记录，`approvedBy` 为设备配置里的审批人，不使用人工审批文件；脚本通过 `/api/v1/submissions/upload` 上传四个文件，再调用 `/api/v1/gsb/submissions` 创建记录并轮询质检终态。
     - 如果预检状态为 `line_gate_approval_required`，确认低于 10 行是唯一阻断项后停止提交，等待设备配置里的审批人 在真实 TTY 中运行 `approve-line-gate --task-root ROOT`；审批后重新运行 `submit --task-root ROOT --execute`。
@@ -282,7 +287,7 @@ python3 scripts/sologsb.py submit --task-root ROOT --execute              # 完�
 python3 scripts/sologsb.py approve-line-gate --task-root ROOT            # 仅改动量单项失败时，由设备配置里的审批人在 TTY 中批准
 python3 scripts/sologsb.py submit --task-root ROOT --approval APPROVAL --execute
 python3 scripts/sologsb.py release-claim --task-root ROOT [--if-finished]  # 只释放项目锁，不删容器和文件
-python3 scripts/sologsb.py cleanup --task-root ROOT  # 同时释放平台项目占用锁
+python3 scripts/sologsb.py cleanup --task-root ROOT  # 清理本任务容器并释放平台项目占用锁
 python3 scripts/status_push.py install [--interval 30]  # 定期推送本机任务状态到 Bark
 python3 scripts/sologsb.py --version                                    # 打印统一全局版本号
 python3 scripts/sologsb.py version                                       # 打印版本 JSON

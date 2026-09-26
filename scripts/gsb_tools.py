@@ -42,7 +42,7 @@ def gsb_server() -> str:
     return value
 AUDIT_HUMAN = SOLO_SCRIPTS / "audit-human-writing.py"
 EXPECTED_FINGERPRINT = "954e9db2d25afeb4"
-FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+\.(?:go|js|cjs|mjs|ts|tsx|jsx|py|java|kt|rs|vue|json|ya?ml|toml|md|sql|sh|css|html|xml)")
+FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+\.(?:go|js|cjs|mjs|ts|tsx|jsx|py|java|kt|rs|svelte|vue|json|ya?ml|toml|md|sql|sh|css|html|xml)")
 ERROR_TOKEN = re.compile(r"(?:Error|ERROR|panic|PANIC|npm ERR!|failed|FAILED|报错|失败)[:：]?\s*[^\n，。；;]{1,120}")
 TEST_COUNT_PATTERN = re.compile(
     r"(?:(?:后端|前端|API|接口|测试|断言|用例)[^。；，]{0,12}?\d+\s*(?:个|项|条|步|轮)|"
@@ -551,6 +551,8 @@ def _request_json(path: str, *, timeout: int = 60) -> dict[str, Any]:
                 ) from retry_exc
         body = exc.read().decode("utf-8", errors="replace")
         raise SologsbError(f"只读请求 HTTP {exc.code}: {body[:1000]}") from exc
+    except urllib.error.URLError as exc:
+        raise SologsbError(f"只读请求网络错误: {exc}") from exc
 
 
 def load_official_schema(*, accept_change: bool = False) -> dict[str, Any]:

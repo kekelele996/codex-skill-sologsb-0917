@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -102,6 +103,90 @@ def _ready(url: str, timeout: float) -> bool:
 LOCAL_SCRIPT_PATH_RE = re.compile(r"(?:^|\s)(?:/tmp/|/private/|/Users/|/home/|~/|\$HOME|\$TASK_ROOT)|monitor/|workspace/|评审文件")
 LOCAL_AUTOMATION_RE = re.compile(r"(?:playwright|puppeteer|selenium|scenario|browser-result|recorder\.py)", re.I)
 SCRIPT_TOKEN_RE = re.compile(r"(?<![\w/.-])((?:\.{0,2}/)?[\w./-]+\.(?:sh|py|js|mjs|cjs|ts|rb|ps1))(?![\w.])")
+
+
+NPM_LOCKFILE_NAMES = ("package-lock.json", "npm-shrinkwrap.json")
+
+
+def _npm_lock_targets(repo: Path, changed: list[str]) -> list[tuple[str, str]]:
+    """Return (relative directory, lockfile relative path) for changed npm projects."""
+    candidate_dirs: set[str] = set()
+    for raw in changed:
+        path = Path(raw)
+        if path.name == "package.json" or path.name in NPM_LOCKFILE_NAMES:
+            candidate_dirs.add(path.parent.as_posix())
+    # Workspace-style repositories can keep the lockfile at the root while a
+    # nested package.json changes.
+    if any(Path(item).name == "package.json" for item in changed):
+        candidate_dirs.add(".")
+    targets: list[tuple[str, str]] = []
+    for directory in sorted(candidate_dirs):
+        root = repo if directory in {"", "."} else repo / directory
+        manifest = root / "package.json"
+        if not manifest.is_file():
+            continue
+        for lock_name in NPM_LOCKFILE_NAMES:
+            lock = root / lock_name
+            if lock.is_file():
+                relative = lock.relative_to(repo).as_posix()
+                targets.append((directory, relative))
+    return list(dict.fromkeys(targets))
+
+
+def _is_npm_lockfile_sync_failure(output: str) -> bool:
+    """Recognize npm's manifest/lock mismatch instead of network or tool failure."""
+    text = str(output or "")
+    markers = (
+        "can only install packages when your package.json and package-lock.json",
+        "can only install packages when your package.json and npm-shrinkwrap.json",
+    )
+    return any(marker in text for marker in markers) or (
+        "Missing:" in text and "from lock file" in text
+    )
+
+
+def _normalize_npm_lock_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep a real lockfile mismatch as observed product failure, not infra failure."""
+    if result.get("exitCode") and _is_npm_lockfile_sync_failure(str(result.get("outputPreview") or "")):
+        result.update(
+            {
+                "ok": True,
+                "observedFailure": True,
+                "expectedExit": result.get("exitCode"),
+                "error": "",
+            }
+        )
+    return result
+
+
+def _automatic_npm_lock_checks(
+    repo: Path,
+    initial_sha: str,
+    artifact_sha: str,
+) -> list[dict[str, Any]]:
+    """Build clean-checkout lockfile consistency checks for changed npm projects."""
+    proc = run(
+        ["git", "-C", str(repo), "diff", "--name-only", initial_sha, artifact_sha],
+        check=False,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        raise SologsbError("无法枚举 npm 锁文件检查目标")
+    changed = [line.strip() for line in proc.stdout.decode("utf-8", errors="replace").splitlines() if line.strip()]
+    checks: list[dict[str, Any]] = []
+    for directory, lockfile in _npm_lock_targets(repo, changed):
+        command_dir = "." if directory in {"", "."} else shlex.quote(directory)
+        checks.append(
+            {
+                "name": f"dependency-lockfile-sync-{Path(lockfile).parent.as_posix() or '.'}",
+                "command": f"cd {command_dir} && npm ci --dry-run --ignore-scripts --no-audit --no-fund",
+                "timeout": 300,
+                "expectedExit": 0,
+                "lockfile": lockfile,
+                "automatic": "npm-lockfile-sync",
+            }
+        )
+    return checks
 
 
 def run_probe(base_url: str, probe: dict[str, Any]) -> dict[str, Any]:
@@ -289,10 +374,40 @@ def verify_side(
         raise SologsbError(f"{side} 验证 clone 的 HEAD 与产物快照不一致")
     log_dir = task_root / "monitor" / "verify-logs" / side.lower()
     log_dir.mkdir(parents=True, exist_ok=True)
-    results = [
-        execute_check(check, cwd=verify_dir, log_dir=log_dir, index=index)
-        for index, check in enumerate(checks, 1)
-    ]
+    results: list[dict[str, Any]] = []
+    explicit_commands = [str(check.get("command") or "") for check in checks]
+    for check in _automatic_npm_lock_checks(verify_dir, str(state["initialSnapshot"]), sha):
+        target = str(check.get("lockfile") or "")
+        target_dir = str(Path(target).parent.as_posix()) if target else ""
+        if any(
+            "npm ci" in command
+            and (
+                (
+                    target_dir in {"", "."}
+                    and (
+                        "cd ." in command
+                        or bool(re.search(r"(?:^|&&\s*)npm ci\b", command))
+                    )
+                )
+                or (
+                    target_dir not in {"", "."}
+                    and bool(
+                        re.search(
+                            rf"(?:^|&&\s*)cd\s+{re.escape(shlex.quote(target_dir))}(?:\s|&&)",
+                            command,
+                        )
+                    )
+                )
+            )
+            for command in explicit_commands
+        ):
+            continue
+        result = execute_check(check, cwd=verify_dir, log_dir=log_dir, index=len(results) + 1)
+        results.append(_normalize_npm_lock_result(result))
+    results.extend(
+        execute_check(check, cwd=verify_dir, log_dir=log_dir, index=len(results) + 1)
+        for check in checks
+    )
     return {
         "side": side,
         "artifactSnapshot": sha,

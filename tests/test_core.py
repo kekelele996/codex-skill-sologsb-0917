@@ -39,6 +39,7 @@ from common import (  # noqa: E402
     write_json,
 )
 from gsb_tools import (
+    FILE_TOKEN,
     _validate_artifact_description,
     _validate_claim_evidence,
     _validate_low_value_noise_claims,
@@ -103,7 +104,13 @@ from recorder import (  # noqa: E402
     validate_recording_targets,
     video_dimensions,
 )
-from artifact_verifier import suggest_plan  # noqa: E402
+from artifact_verifier import (  # noqa: E402
+    _automatic_npm_lock_checks,
+    _is_npm_lockfile_sync_failure,
+    _normalize_npm_lock_result,
+    _npm_lock_targets,
+    suggest_plan,
+)
 from trace_validator import validate_single_round  # noqa: E402
 from sologsb import build_parser  # noqa: E402
 
@@ -2455,15 +2462,19 @@ class ChangeVolumeGateTests(unittest.TestCase):
             (repo / "package-lock.json").write_text('{"version":2}\n', encoding="utf-8")
             (repo / "node_modules").mkdir()
             (repo / "node_modules" / "dep.js").write_text("x\n" * 50, encoding="utf-8")
+            (repo / ".output" / "public").mkdir(parents=True)
+            (repo / ".output" / "public" / "index.html").write_text("x\n" * 50, encoding="utf-8")
             side_runner._install_generated_path_excludes(repo)
             self._git(repo, "add", "-A")
+            staged_before_unstage = self._git(repo, "diff", "--cached", "--name-only", initial)
             removed = side_runner._unstage_generated_paths(repo, initial)
             lines, files = side_runner._staged_business_change_lines(repo, initial)
 
             self.assertEqual(removed, ["package-lock.json"])
             self.assertEqual(lines, 12)
             self.assertEqual(files, ["app.ts"])
-            self.assertNotIn("node_modules/dep.js", self._git(repo, "diff", "--cached", "--name-only", initial))
+            self.assertNotIn("node_modules/dep.js", staged_before_unstage)
+            self.assertNotIn(".output/public/index.html", staged_before_unstage)
 
     def test_paired_lockfiles_follow_manifest_changes(self) -> None:
         from common import paired_lockfiles
@@ -2479,6 +2490,63 @@ class ChangeVolumeGateTests(unittest.TestCase):
         # 清单在别的目录，不配对
         self.assertEqual(paired_lockfiles(["backend/package.json", "frontend/package-lock.json"]), set())
         self.assertEqual(paired_lockfiles(["package-lock.json"]), set())
+
+    def test_npm_lock_targets_include_changed_nested_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            (repo / "backend").mkdir()
+            (repo / "backend" / "package.json").write_text('{"devDependencies":{}}\n', encoding="utf-8")
+            (repo / "backend" / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+            self.assertEqual(
+                _npm_lock_targets(repo, ["backend/package.json"]),
+                [("backend", "backend/package-lock.json")],
+            )
+
+    def test_npm_lockfile_sync_failure_classifier(self) -> None:
+        self.assertTrue(
+            _is_npm_lockfile_sync_failure(
+                "npm ERR! `npm ci` can only install packages when your package.json "
+                "and package-lock.json or npm-shrinkwrap.json are in sync.\n"
+                "npm ERR! Missing: sql.js@1.14.2 from lock file"
+            )
+        )
+        self.assertFalse(
+            _is_npm_lockfile_sync_failure("npm ERR! network request failed: ETIMEDOUT")
+        )
+        normalized = _normalize_npm_lock_result(
+            {
+                "exitCode": 1,
+                "expectedExit": 0,
+                "ok": False,
+                "error": "退出码 1，期望 0",
+                "outputPreview": "npm ERR! Missing: sql.js@1.14.2 from lock file",
+            }
+        )
+        self.assertTrue(normalized["ok"])
+        self.assertTrue(normalized["observedFailure"])
+        self.assertEqual(normalized["expectedExit"], 1)
+        self.assertEqual(normalized["error"], "")
+
+    def test_automatic_npm_lock_check_uses_artifact_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            self._git(repo, "init", "-b", "main")
+            self._git(repo, "config", "user.name", "tester")
+            self._git(repo, "config", "user.email", "tester@example.com")
+            (repo / "backend").mkdir()
+            (repo / "backend" / "package.json").write_text('{"devDependencies":{}}\n', encoding="utf-8")
+            (repo / "backend" / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+            self._git(repo, "add", "-A")
+            self._git(repo, "commit", "-m", "base")
+            initial = self._git(repo, "rev-parse", "HEAD")
+            (repo / "backend" / "package.json").write_text('{"devDependencies":{"sql.js":"1.14.2"}}\n', encoding="utf-8")
+            self._git(repo, "add", "-A")
+            self._git(repo, "commit", "-m", "stale lock")
+            head = self._git(repo, "rev-parse", "HEAD")
+            checks = _automatic_npm_lock_checks(repo, initial, head)
+            self.assertEqual(len(checks), 1)
+            self.assertIn("dependency-lockfile-sync-backend", checks[0]["name"])
+            self.assertIn("npm ci --dry-run", checks[0]["command"])
 
     def test_publish_keeps_lockfile_when_manifest_changed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2521,8 +2589,28 @@ class ChangeVolumeGateTests(unittest.TestCase):
             text = exclude.read_text(encoding="utf-8")
             self.assertIn("node_modules/", text)
             self.assertIn("dist/", text)
+            self.assertIn(".output/", text)
             self.assertNotIn("package-lock.json", text)
             self.assertNotIn("go.sum", text)
+            self.assertIn(".svelte-kit/", text)
+
+    def test_generated_path_excludes_include_sveltekit_cache(self) -> None:
+        self.assertIn(".svelte-kit/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertTrue(side_runner._is_generated_or_lock_path(".svelte-kit/ambient.d.ts"))
+
+    def test_generated_path_excludes_include_nuxt_output(self) -> None:
+        self.assertIn(".output/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertTrue(side_runner._is_generated_or_lock_path(".output/public/index.html"))
+        self.assertIn(".output", self.preflight.GENERATED_DIR_NAMES)
+        self.assertTrue(self.preflight._is_generated_or_lock_path(".output/server/index.mjs"))
+
+    def test_reason_file_token_recognizes_svelte_paths(self) -> None:
+        self.assertEqual(
+            FILE_TOKEN.findall("修改 src/routes/+page.svelte 后重新构建"),
+            ["page.svelte"],
+        )
+        self.assertTrue(self.preflight.PROCESS_LOCATOR_RE.search("编辑 page.svelte 后重新构建"))
+        self.assertIn(".svelte-kit", self.preflight.GENERATED_DIR_NAMES)
 
     def test_preflight_still_flags_unpaired_lockfile(self) -> None:
         self.assertTrue(self.preflight._is_generated_or_lock_path("frontend/package-lock.json"))
@@ -3275,8 +3363,74 @@ class ContainerImageTests(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("--entrypoint") + 2], side_runner.DEFAULT_IMAGE)
             self.assertIn("ANTHROPIC_BASE_URL=https://relay.example", cmd)
             self.assertIn("--cap-drop", cmd)
+            self.assertTrue(any(
+                part.startswith(side_runner.CONTAINER_TASK_LABEL + "=") for part in cmd
+            ))
             self.assertFalse(any("docker.sock" in part for part in cmd))
             self.assertEqual(info["image"], side_runner.DEFAULT_IMAGE)
+
+
+class ContainerCleanupTests(unittest.TestCase):
+    def test_cleanup_task_containers_only_matches_own_label_or_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "Task-A"
+            (root / "monitor").mkdir(parents=True)
+            own_label = "sologsb-Task-A-candidate-1-label"
+            own_prefix = "sologsb-Task-A-candidate-2-prefix"
+            other = "sologsb-Task-B-candidate-1-other"
+            alive = {own_label, own_prefix, other}
+
+            def fake_run(cmd, **kwargs):
+                if cmd[1:3] == ["ps", "-a"]:
+                    if any(str(item).startswith("label=") for item in cmd):
+                        names = [own_label] if own_label in alive else []
+                    else:
+                        names = sorted(alive)
+                    return subprocess.CompletedProcess(cmd, 0, ("\n".join(names) + "\n").encode(), b"")
+                if cmd[1:3] == ["rm", "-f"]:
+                    alive.discard(cmd[3])
+                    return subprocess.CompletedProcess(cmd, 0, b"", b"")
+                return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+            with mock.patch.object(side_runner, "run", side_effect=fake_run):
+                result = side_runner.cleanup_task_containers(root, reason="test-end")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["removedContainers"], sorted([own_label, own_prefix]))
+            self.assertEqual(result["residualContainers"], [])
+            self.assertIn(other, alive)
+            self.assertTrue((root / "monitor" / "container-cleanup.json").is_file())
+
+    def test_start_container_failure_removes_exact_container_and_releases_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "Task-A"
+            workspace = root / "ws"
+            attempt = root / "attempt"
+            workspace.mkdir(parents=True)
+            attempt.mkdir()
+            removed: list[list[str]] = []
+
+            def fake_run(cmd, **kwargs):
+                if cmd[1:3] == ["rm", "-f"]:
+                    removed.append(list(cmd))
+                    return subprocess.CompletedProcess(cmd, 0, b"", b"")
+                if cmd[1] == "run":
+                    raise subprocess.TimeoutExpired(cmd, 180)
+                return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+            slot = mock.Mock()
+            with mock.patch.object(side_runner, "run", side_effect=fake_run), \
+                    mock.patch.object(side_runner, "task_project_code", return_value=""), \
+                    mock.patch.object(side_runner._CONTAINER_LIMITER, "acquire", return_value=slot):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    side_runner._start_container(
+                        task_root=root, side="candidate-1", attempt_dir=attempt,
+                        workspace=workspace, secret="s", base_url="https://relay.example",
+                    )
+
+            self.assertEqual(len(removed), 1)
+            self.assertEqual(removed[0][1:3], ["rm", "-f"])
+            slot.release.assert_called_once()
 
 
 class VersionTests(unittest.TestCase):
