@@ -22,8 +22,8 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.7.2`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.7.2`
+- 全局版本号：`1.7.3`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.7.3`
 - 精确提交号：运行 `git rev-parse v1.7.2` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
@@ -46,7 +46,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - Web 录屏先确认默认 Tab、当前用户和重复卡片选择器；同名操作按钮使用卡片范围或 `.last()`；同时清除 Chrome 登录/同步/密码/通知等浮层与终端多网卡干扰行。
 - 录屏画面内容红线：终端不得展示凭据、`.env`、环境变量或任务目录外文件，Chrome 只访问本地被测应用；原生弹窗（alert/confirm、文件选择、原生下拉、右键菜单）拍不到，关键验收步骤不得依赖它们，详见 `references/recording.md`「画面内容约束」。
 - 录屏必须使用窗口级后台模式：先用 Quartz 定位 Terminal.app/Chrome 的数字 `CGWindowID`，再调用 ScreenCaptureKit 的 `SCContentFilter(desktopIndependentWindow:)` 和 `SCRecordingOutput` 采集；必须设置 `showsCursor=false`、`showMouseClicks=false`、`capturesAudio=false`。全程不激活、不置前、不最小化录制窗口。开录瞬间必须复核窗口仍在当前 Space 且 `ownerPid + ownerName` 未变化，找不到就停机。
-- 具体踩坑记录见 `references/lessons-learned-20260917.md`、`references/lessons-learned-20260925-terminal-app.md`（切换 Terminal.app）与 `references/lessons-learned-20260927-next-export.md`（Next 静态导出与 tsbuildinfo）。
+- 具体踩坑记录见 `references/lessons-learned-20260917.md`、`references/lessons-learned-20260925-terminal-app.md`（切换 Terminal.app）与 `references/lessons-learned-20260927-next-export.md`（Next 静态导出与 tsbuildinfo），以及 `references/lessons-learned-20260927-stencil-generated-artifacts.md`（Stencil 的 `.stencil` 缓存与 `www` 构建目录）。
 
 ## 固定红线
 

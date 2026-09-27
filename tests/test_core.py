@@ -2646,6 +2646,16 @@ class ChangeVolumeGateTests(unittest.TestCase):
                 [".angular/cache/vite/deps/chunk.js"],
             )
 
+    def test_generated_path_excludes_include_stencil_cache_and_www(self) -> None:
+        self.assertIn(".stencil/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertIn("www/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertTrue(side_runner._is_generated_or_lock_path(".stencil/cache/optimize.log"))
+        self.assertTrue(side_runner._is_generated_or_lock_path("www/index.html"))
+        self.assertIn(".stencil", self.preflight.GENERATED_DIR_NAMES)
+        self.assertIn("www", self.preflight.GENERATED_DIR_NAMES)
+        self.assertTrue(self.preflight._is_generated_or_lock_path(".stencil/cache/optimize.log"))
+        self.assertTrue(self.preflight._is_generated_or_lock_path("www/build/app-root.entry.js"))
+
     def test_reason_file_token_recognizes_svelte_paths(self) -> None:
         self.assertEqual(
             FILE_TOKEN.findall("修改 src/routes/+page.svelte 后重新构建"),

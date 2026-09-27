@@ -139,7 +139,7 @@ SOURCE_EXTENSIONS = {
     ".svelte", ".swift", ".ts", ".tsx", ".vue",
 }
 GENERATED_DIR_NAMES = {
-    "node_modules", "dist", "build", "coverage", ".next", "out", ".nuxt", ".output", ".angular",
+    "node_modules", "dist", "build", "coverage", ".next", "out", ".nuxt", ".output", ".angular", ".stencil", "www",
     ".vite", ".svelte-kit", "target", "vendor", "__pycache__", ".venv", "venv", ".cache",
 }
 

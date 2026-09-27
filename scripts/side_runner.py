@@ -1073,7 +1073,7 @@ def _diff_snapshot(repo: Path, initial_sha: str) -> dict[str, Any]:
 
 
 GENERATED_PATH_EXCLUDES = (
-    "node_modules/", "dist/", "build/", "coverage/", ".next/", "out/", ".nuxt/", ".output/", ".angular/",
+    "node_modules/", "dist/", "build/", "coverage/", ".next/", "out/", ".nuxt/", ".output/", ".angular/", ".stencil/", "www/",
     ".vite/", ".svelte-kit/", "target/", "vendor/", "__pycache__/", ".venv/", "venv/", ".cache/",
     "*.tsbuildinfo",
 )
