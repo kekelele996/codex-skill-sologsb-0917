@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.6.1`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.6.1`
-- 精确提交号：运行 `git rev-parse v1.6.1` 获取。
+- 全局版本号：`1.7.0`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.7.0`
+- 精确提交号：运行 `git rev-parse v1.7.0` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -286,6 +286,8 @@ python3 scripts/sologsb.py submit --task-root ROOT                         # 可
 python3 scripts/sologsb.py submit --task-root ROOT --execute              # 完整审核通过后直接提交，自动记录设备配置里的审批人
 python3 scripts/sologsb.py approve-line-gate --task-root ROOT            # 仅改动量单项失败时，由设备配置里的审批人在 TTY 中批准
 python3 scripts/sologsb.py submit --task-root ROOT --approval APPROVAL --execute
+python3 scripts/sologsb.py submit-deferred --base TASK_PARENT            # 当日超 100 条后暂存的任务：只看时间表
+python3 scripts/sologsb.py submit-deferred --base TASK_PARENT --execute  # 0 点后 10 小时内匀速提交，按状态表防重复、防漏提交
 python3 scripts/sologsb.py release-claim --task-root ROOT [--if-finished]  # 只释放项目锁，不删容器和文件
 python3 scripts/sologsb.py cleanup --task-root ROOT  # 清理本任务容器并释放平台项目占用锁
 python3 scripts/status_push.py install [--interval 30]  # 定期推送本机任务状态到 Bark

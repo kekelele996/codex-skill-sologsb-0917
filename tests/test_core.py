@@ -3532,3 +3532,241 @@ class DraftHistoryDedupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DailyQuotaTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "sologsb_daily_quota", ROOT / "submission" / "scripts" / "daily_quota.py"
+        )
+        cls.quota = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(cls.quota)
+
+    def test_flag_turns_true_at_limit_and_defers_to_pending_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            env = {
+                self.quota.FLAG_PATH_ENV: str(base / "quota.json"),
+                self.quota.DAILY_LIMIT_ENV: "2",
+            }
+            with mock.patch.dict(os.environ, env):
+                self.assertTrue(self.quota.reserve()["reserved"])
+                self.quota.release()
+                self.assertEqual(self.quota.read_state()["count"], 0)
+                self.assertTrue(self.quota.reserve()["reserved"])
+                second = self.quota.reserve()
+                self.assertTrue(second["reserved"])
+                self.assertTrue(self.quota.read_state()["limitReached"])
+                blocked = self.quota.reserve()
+                self.assertFalse(blocked["reserved"])
+                self.assertEqual(blocked["count"], 2)
+
+                task_root = base / "task-x"
+                payload = {"uploads": {"A-轨迹文件": {"path": "/tmp/a.jsonl"}}}
+                deferred = self.quota.defer(task_root, task_root / "p.json", payload, blocked, ["submit"])
+                folder = base / f"{blocked['date']}待提交"
+                self.assertEqual(Path(deferred["recordPath"]).parent, folder)
+                index = json.loads((folder / "清单.json").read_text(encoding="utf-8"))
+                self.assertEqual(index["total"], 1)
+                self.assertEqual(index["items"][0]["taskName"], "task-x")
+                self.assertTrue(Path(deferred["recordPath"]).is_file())
+                self.quota.clear_deferred(task_root)
+                index = json.loads((folder / "清单.json").read_text(encoding="utf-8"))
+                self.assertEqual(index["total"], 0)
+
+    def test_new_local_day_resets_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "quota.json"
+            path.write_text(json.dumps({"date": "2000-01-01", "count": 500, "limitReached": True}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {self.quota.FLAG_PATH_ENV: str(path)}):
+                state = self.quota.reserve()
+            self.assertTrue(state["reserved"])
+            self.assertEqual(state["count"], 1)
+            self.assertFalse(state["limitReached"])
+
+    def test_platform_count_is_merged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env = {self.quota.FLAG_PATH_ENV: str(Path(temp) / "quota.json"), self.quota.DAILY_LIMIT_ENV: "100"}
+            with mock.patch.dict(os.environ, env):
+                self.assertFalse(self.quota.reserve(lambda: 100)["reserved"])
+                self.assertTrue(self.quota.read_state()["limitReached"])
+
+
+class SubmitDeferredTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "sologsb_submit_deferred", ROOT / "submission" / "scripts" / "submit_deferred.py"
+        )
+        cls.drainer = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(cls.drainer)
+
+    def _park(self, base: Path, date: str, name: str) -> None:
+        folder = base / f"{date}待提交"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{name}.json").write_text(json.dumps({
+            "taskRoot": str(base / name), "taskName": name, "deferredAt": f"{date}T10:00:00Z",
+        }), encoding="utf-8")
+
+    def test_due_tasks_are_spread_evenly_over_window(self) -> None:
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            for i in range(4):
+                self._park(base, "2026-09-27", f"task-{i}")
+            self._park(base, "2026-09-28", "not-due")
+            clock = [datetime(2026, 9, 28, 0, 0, 5).astimezone()]
+            started: list[tuple[str, datetime, float]] = []
+
+            def fake_sleep(seconds: float) -> None:
+                clock[0] += timedelta(seconds=seconds)
+
+            def fake_runner(item: dict, poll: float) -> int:
+                started.append((item["taskName"], clock[0], poll))
+                clock[0] += timedelta(minutes=5)
+                return 0
+
+            env = {self.drainer.daily_quota.FLAG_PATH_ENV: str(base / "quota.json")}
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(self.drainer.daily_quota, "local_today", return_value="2026-09-28"):
+                summary = self.drainer.drain(base, 10.0, execute=True, now=lambda: clock[0],
+                                             sleep=fake_sleep, runner=fake_runner)
+            self.assertEqual([name for name, _, _ in started], [f"task-{i}" for i in range(4)])
+            gaps = [(b[1] - a[1]).total_seconds() for a, b in zip(started, started[1:])]
+            self.assertEqual(gaps, [9000.0, 9000.0, 9000.0])
+            self.assertEqual(started[0][2], 600.0)
+            self.assertLessEqual((started[-1][1] - started[0][1]).total_seconds(), 10 * 3600)
+            self.assertEqual(summary["status"], "done")
+            self.assertTrue((base / "待提交日志.jsonl").is_file())
+            self.assertFalse((base / "2026-09-28待提交" / "提交日志.jsonl").exists())
+
+    def test_stops_when_platform_quota_is_full(self) -> None:
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            for i in range(3):
+                self._park(base, "2026-09-27", f"task-{i}")
+            clock = [datetime(2026, 9, 28, 1, 0).astimezone()]
+            calls: list[str] = []
+
+            def fake_runner(item: dict, poll: float) -> int:
+                calls.append(item["taskName"])
+                return 3
+
+            env = {self.drainer.daily_quota.FLAG_PATH_ENV: str(base / "quota.json")}
+            with mock.patch.dict(os.environ, env):
+                summary = self.drainer.drain(
+                    base, 10.0, execute=True, now=lambda: clock[0],
+                    sleep=lambda s: clock.__setitem__(0, clock[0] + timedelta(seconds=s)), runner=fake_runner,
+                )
+            self.assertEqual(calls, ["task-0"])
+            self.assertEqual(summary["status"], "stopped_daily_limit")
+
+    def _write_result(self, task_root: Path, submission_id: str) -> None:
+        path = task_root / "workspace" / "评审文件" / "pre-submit" / "submission-api-result.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"submissionId": submission_id, "statusValue": "SUBMITTED",
+                                    "submittedAt": "2026-09-28T01:00:00+08:00"}), encoding="utf-8")
+
+    def _run(self, base: Path, runner, start):
+        from datetime import timedelta
+
+        clock = [start]
+        env = {self.drainer.daily_quota.FLAG_PATH_ENV: str(base / "quota.json"),
+               self.drainer.daily_quota.DEFERRED_DIR_ENV: str(base)}
+        with mock.patch.dict(os.environ, env):
+            return self.drainer.drain(
+                base, 10.0, execute=True, now=lambda: clock[0],
+                sleep=lambda s: clock.__setitem__(0, clock[0] + timedelta(seconds=s)), runner=runner,
+            )
+
+    def test_status_table_prevents_duplicates_and_records_submissions(self) -> None:
+        from datetime import datetime
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            for name in ("done-before", "fresh", "broken"):
+                self._park(base, "2026-09-27", name)
+            self._write_result(base / "done-before", "S-OLD")
+            calls: list[str] = []
+
+            def runner(item: dict, poll: float) -> int:
+                calls.append(item["taskName"])
+                if item["taskName"] == "fresh":
+                    self._write_result(base / "fresh", "S-NEW")
+                    return 0
+                return 2
+
+            self._run(base, runner, datetime(2026, 9, 28, 0, 1).astimezone())
+            self.assertEqual(sorted(calls), ["broken", "fresh"])
+            table = self.drainer.daily_quota.load_status_table(base)
+            self.assertEqual(table[str(base / "done-before")]["status"], "submitted")
+            self.assertEqual(table[str(base / "done-before")]["submissionId"], "S-OLD")
+            self.assertEqual(table[str(base / "fresh")]["submissionId"], "S-NEW")
+            self.assertEqual(table[str(base / "broken")]["status"], "failed")
+            folder = base / "2026-09-27待提交"
+            self.assertEqual(sorted(p.name for p in folder.glob("*.json") if p.name != "清单.json"), ["broken.json"])
+            csv_text = (base / "待提交状态表.csv").read_text(encoding="utf-8-sig")
+            self.assertIn("已提交", csv_text)
+            self.assertIn("提交失败待重试", csv_text)
+
+            # Second night: only the failed task is retried; nothing is submitted twice.
+            calls.clear()
+            self._run(base, lambda item, poll: calls.append(item["taskName"]) or 2,
+                      datetime(2026, 9, 29, 0, 1).astimezone())
+            self.assertEqual(calls, ["broken"])
+            self.assertEqual(table[str(base / "broken")]["attempts"] + 1,
+                             self.drainer.daily_quota.load_status_table(base)[str(base / "broken")]["attempts"])
+
+    def test_interrupted_submission_is_not_lost_or_repeated(self) -> None:
+        from datetime import datetime
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            for name in ("posted", "not-posted"):
+                self._park(base, "2026-09-27", name)
+                self.drainer.daily_quota.update_status(base, base / name, status="submitting",
+                                                       deferredDate="2026-09-27", attempts=1)
+            # The run died right after the POST for "posted": its result file exists.
+            self._write_result(base / "posted", "S-1")
+            calls: list[str] = []
+            self._run(base, lambda item, poll: calls.append(item["taskName"]) or 2,
+                      datetime(2026, 9, 28, 0, 1).astimezone())
+            self.assertEqual(calls, ["not-posted"])
+            table = self.drainer.daily_quota.load_status_table(base)
+            self.assertEqual(table[str(base / "posted")]["status"], "submitted")
+
+    def test_record_that_only_lives_in_the_table_is_still_submitted(self) -> None:
+        from datetime import datetime
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            self.drainer.daily_quota.update_status(base, base / "orphan", status="pending",
+                                                   deferredDate="2026-09-27")
+            calls: list[str] = []
+            self._run(base, lambda item, poll: calls.append(item["taskName"]) or 2,
+                      datetime(2026, 9, 28, 0, 1).astimezone())
+            self.assertEqual(calls, ["orphan"])
+
+
+class DeferredFolderDateTests(unittest.TestCase):
+    def test_folder_is_named_by_the_day_the_record_is_created(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "sologsb_daily_quota_date", ROOT / "submission" / "scripts" / "daily_quota.py"
+        )
+        quota = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(quota)
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            with mock.patch.dict(os.environ, {quota.DEFERRED_DIR_ENV: str(base)}), \
+                    mock.patch.object(quota, "local_today", return_value="2026-09-28"):
+                result = quota.defer(base / "task", base / "p.json", {}, {"date": "2026-09-27"}, ["x"])
+            self.assertEqual(Path(result["recordPath"]).parent.name, "2026-09-28待提交")
+            row = quota.load_status_table(base)[str(base / "task")]
+            self.assertEqual((row["status"], row["deferredDate"]), ("pending", "2026-09-28"))

@@ -263,6 +263,19 @@ def cmd_submit(args: argparse.Namespace) -> int:
     return proc.returncode
 
 
+def cmd_submit_deferred(args: argparse.Namespace) -> int:
+    """Submit parked <date>待提交 tasks after midnight, evenly paced over a window."""
+    script = Path(__file__).resolve().parent.parent / "submission" / "scripts" / "submit_deferred.py"
+    if not script.is_file():
+        raise SologsbError(f"缺少待提交脚本: {script}")
+    command = [sys.executable, str(script), "--hours", str(args.hours)]
+    if args.base:
+        command += ["--base", str(args.base.expanduser().resolve())]
+    if args.execute:
+        command.append("--execute")
+    return subprocess.run(command, check=False).returncode
+
+
 def cmd_approve_line_gate(args: argparse.Namespace) -> int:
     """Create the only allowed manual exception approval (approver from device config)."""
     root = task_root_from_arg(args.task_root)
@@ -634,6 +647,12 @@ def build_parser() -> argparse.ArgumentParser:
                         default=os.environ.get("SOLOSB_SOLO2_KEYCHAIN_SERVICE", "").strip())
     submit.add_argument("--poll-timeout", type=float, default=600.0, help="等待质检终态的秒数，默认 10 分钟，每分钟查询一次")
     submit.set_defaults(func=cmd_submit)
+
+    submit_deferred = sub.add_parser("submit-deferred", help="0 点后在指定小时内匀速提交 <日期>待提交 文件夹里的任务")
+    submit_deferred.add_argument("--base", type=Path, help="待提交文件夹所在目录（任务根目录的上一级），默认当前目录")
+    submit_deferred.add_argument("--hours", type=float, default=10.0, help="在多少小时内匀速提交完，默认 10")
+    submit_deferred.add_argument("--execute", action="store_true", help="真正提交；默认只打印时间表")
+    submit_deferred.set_defaults(func=cmd_submit_deferred)
 
     approve_line_gate = sub.add_parser(
         "approve-line-gate",

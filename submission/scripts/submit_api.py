@@ -30,6 +30,9 @@ for _parent in Path(__file__).resolve().parents:
 import device_config as _device_config  # noqa: E402
 from common import SologsbError, ensure_single_side_trace  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import daily_quota  # noqa: E402
+
 _device_config.load_and_apply()
 
 DEFAULT_SERVER = os.environ.get("SOLO2_SERVER", "").strip().rstrip("/")
@@ -447,6 +450,21 @@ def poll_submission(
     return last
 
 
+def platform_today_count(server: str, cookie: str, csrf: str) -> int:
+    """Count today's submissions the platform already holds for this account."""
+    params = {"user_id": "0", "leader_id": "0", "page": "1", "page_size": "200"}
+    payload = request_json(
+        "GET", f"{server}/api/v1/gsb/submissions?" + urllib.parse.urlencode(params), cookie, csrf, timeout=30,
+    )
+    today = daily_quota.local_today()
+    return sum(
+        1
+        for item in payload.get("items") or []
+        if isinstance(item, dict)
+        and daily_quota.local_date(str(item.get("submitted_at") or item.get("created_at") or "")) == today
+    )
+
+
 def qc_pending_message(submission_id: str, timeout: float) -> str:
     return (
         f"已提交（submission id {submission_id}），等待质检 {timeout / 60:g} 分钟仍未出结果，先结束本次等待；"
@@ -515,82 +533,14 @@ def run_preflight(task_root: Path, preflight_script: Path) -> dict[str, Any]:
     return result
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="审核并通过 Python API 提交 GSB")
-    parser.add_argument("--task-root", type=Path)
-    parser.add_argument("--payload", type=Path)
-    parser.add_argument("--approval", type=Path)
-    parser.add_argument("--preflight", type=Path, default=Path(__file__).with_name("preflight.py"))
-    parser.add_argument("--skip-preflight", action="store_true")
-    parser.add_argument("--server", default=DEFAULT_SERVER)
-    parser.add_argument("--keychain-service", default=DEFAULT_KEYCHAIN_SERVICE)
-    parser.add_argument("--execute", action="store_true", help="真正上传并提交；默认只做审核和 dry-run")
-    parser.add_argument("--force", action="store_true", help="忽略本地已有提交结果，允许重新提交")
-    parser.add_argument("--poll-timeout", type=float, default=QC_POLL_TIMEOUT_SECONDS)
-    args = parser.parse_args()
-
-    if args.execute and args.skip_preflight:
-        raise RuntimeError("真实提交禁止跳过 preflight；请先修复 G11 改动量或仓库洁净门禁")
-
-    task_root = find_task_root(args.task_root)
-    payload_path = (args.payload or task_root / "workspace" / "评审文件" / "pre-submit" / "submission-payload.json").expanduser().resolve()
-    approval_path = (args.approval or task_root / "workspace" / "评审文件" / "pre-submit" / "submission-approval.json").expanduser().resolve()
-
-    preflight_result: dict[str, Any] = {}
-    if not args.skip_preflight:
-        preflight_result = run_preflight(task_root, args.preflight.expanduser().resolve())
-    if not payload_path.is_file():
-        raise RuntimeError(f"submission payload 不存在: {payload_path}")
-    payload = load_json(payload_path)
-    verify_payload(payload)
-    if args.approval is None and str(payload.get("approvalPolicy") or "") == CHANGE_VOLUME_APPROVAL_SCOPE:
-        approval_path = task_root / "workspace" / "评审文件" / "pre-submit" / "change-volume-line-gate-approval.json"
-        approval_path = approval_path.expanduser().resolve()
-
-    plan = {
-        "taskRoot": str(task_root),
-        "payloadPath": str(payload_path),
-        "approvalPath": str(approval_path),
-        "server": args.server,
-        "execute": bool(args.execute),
-        "approvalPolicy": payload.get("approvalPolicy") or "legacy",
-        "preflightStatus": preflight_result.get("status") or "skipped",
-        "uploads": payload.get("uploads") or {},
-        "endpoint": args.server + "/api/v1/gsb/submissions",
-    }
-    if not args.execute:
-        print(json.dumps({"status": "dry_run", "ok": True, **plan}, ensure_ascii=False, indent=2))
-        return 0
-
-    approval = verify_approval(payload_path, payload, approval_path, preflight_result)
-    existing_api_result = task_root / "workspace" / "评审文件" / "pre-submit" / "submission-api-result.json"
-    existing_browser_result = task_root / "workspace" / "评审文件" / "pre-submit" / "submission-result.json"
-    if not args.force and existing_api_result.is_file():
-        raise RuntimeError(f"检测到已有 Python API 提交结果，拒绝重复提交；确认需要重提时加 --force: {existing_api_result}")
-    if not args.force and existing_browser_result.is_file():
-        old = load_json(existing_browser_result)
-        if old.get("submissionNo") or old.get("submitted"):
-            raise RuntimeError(f"检测到已有提交记录，拒绝重复提交；确认需要重提时加 --force: {existing_browser_result}")
-    cookie, csrf = credentials(args.keychain_service)
-    schema = fetch_schema(args.server, cookie, csrf)
-
-    existing_id = ""
-    existing_detail: dict[str, Any] = {}
-    if existing_api_result.is_file():
-        old_result = load_json(existing_api_result)
-        candidate_id = str(old_result.get("submissionId") or "").strip()
-        if candidate_id and str(old_result.get("statusValue") or "").strip() == "PENDING_FIX":
-            existing_detail = request_json(
-                "GET",
-                f"{args.server}/api/v1/gsb/submissions/{candidate_id}",
-                cookie,
-                csrf,
-                timeout=120,
-            )
-            if str(existing_detail.get("status") or "").strip() != "PENDING_FIX":
-                raise RuntimeError(f"提交 {candidate_id} 当前不是待返修状态，拒绝覆盖")
-            existing_id = candidate_id
-
+def _upload_and_create(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    schema: dict[str, Any],
+    cookie: str,
+    csrf: str,
+    existing_id: str,
+) -> tuple[str, dict[str, Any]]:
     uploaded: dict[str, Any] = {}
     # Always upload the current local attachments.  On a PENDING_FIX update this
     # is essential when only the recording was replaced: reusing remote URLs
@@ -637,6 +587,118 @@ def main() -> int:
         submission_id = str(create_result.get("id") or "")
     if not submission_id:
         raise RuntimeError("提交接口未返回 submission id: " + json.dumps(create_result, ensure_ascii=False))
+    return submission_id, create_result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="审核并通过 Python API 提交 GSB")
+    parser.add_argument("--task-root", type=Path)
+    parser.add_argument("--payload", type=Path)
+    parser.add_argument("--approval", type=Path)
+    parser.add_argument("--preflight", type=Path, default=Path(__file__).with_name("preflight.py"))
+    parser.add_argument("--skip-preflight", action="store_true")
+    parser.add_argument("--server", default=DEFAULT_SERVER)
+    parser.add_argument("--keychain-service", default=DEFAULT_KEYCHAIN_SERVICE)
+    parser.add_argument("--execute", action="store_true", help="真正上传并提交；默认只做审核和 dry-run")
+    parser.add_argument("--force", action="store_true", help="忽略本地已有提交结果，允许重新提交")
+    parser.add_argument("--poll-timeout", type=float, default=QC_POLL_TIMEOUT_SECONDS)
+    args = parser.parse_args()
+
+    if args.execute and args.skip_preflight:
+        raise RuntimeError("真实提交禁止跳过 preflight；请先修复 G11 改动量或仓库洁净门禁")
+
+    task_root = find_task_root(args.task_root)
+    payload_path = (args.payload or task_root / "workspace" / "评审文件" / "pre-submit" / "submission-payload.json").expanduser().resolve()
+    approval_path = (args.approval or task_root / "workspace" / "评审文件" / "pre-submit" / "submission-approval.json").expanduser().resolve()
+
+    preflight_result: dict[str, Any] = {}
+    if not args.skip_preflight:
+        preflight_result = run_preflight(task_root, args.preflight.expanduser().resolve())
+    if not payload_path.is_file():
+        raise RuntimeError(f"submission payload 不存在: {payload_path}")
+    payload = load_json(payload_path)
+    verify_payload(payload)
+    if args.approval is None and str(payload.get("approvalPolicy") or "") == CHANGE_VOLUME_APPROVAL_SCOPE:
+        approval_path = task_root / "workspace" / "评审文件" / "pre-submit" / "change-volume-line-gate-approval.json"
+        approval_path = approval_path.expanduser().resolve()
+
+    plan = {
+        "taskRoot": str(task_root),
+        "payloadPath": str(payload_path),
+        "approvalPath": str(approval_path),
+        "server": args.server,
+        "execute": bool(args.execute),
+        "approvalPolicy": payload.get("approvalPolicy") or "legacy",
+        "preflightStatus": preflight_result.get("status") or "skipped",
+        "uploads": payload.get("uploads") or {},
+        "endpoint": args.server + "/api/v1/gsb/submissions",
+        "dailyQuota": daily_quota.read_state(),
+    }
+    if not args.execute:
+        print(json.dumps({"status": "dry_run", "ok": True, **plan}, ensure_ascii=False, indent=2))
+        return 0
+
+    approval = verify_approval(payload_path, payload, approval_path, preflight_result)
+    existing_api_result = task_root / "workspace" / "评审文件" / "pre-submit" / "submission-api-result.json"
+    existing_browser_result = task_root / "workspace" / "评审文件" / "pre-submit" / "submission-result.json"
+    if not args.force and existing_api_result.is_file():
+        raise RuntimeError(f"检测到已有 Python API 提交结果，拒绝重复提交；确认需要重提时加 --force: {existing_api_result}")
+    if not args.force and existing_browser_result.is_file():
+        old = load_json(existing_browser_result)
+        if old.get("submissionNo") or old.get("submitted"):
+            raise RuntimeError(f"检测到已有提交记录，拒绝重复提交；确认需要重提时加 --force: {existing_browser_result}")
+    cookie, csrf = credentials(args.keychain_service)
+    schema = fetch_schema(args.server, cookie, csrf)
+
+    existing_id = ""
+    existing_detail: dict[str, Any] = {}
+    if existing_api_result.is_file():
+        old_result = load_json(existing_api_result)
+        candidate_id = str(old_result.get("submissionId") or "").strip()
+        if candidate_id and str(old_result.get("statusValue") or "").strip() == "PENDING_FIX":
+            existing_detail = request_json(
+                "GET",
+                f"{args.server}/api/v1/gsb/submissions/{candidate_id}",
+                cookie,
+                csrf,
+                timeout=120,
+            )
+            if str(existing_detail.get("status") or "").strip() != "PENDING_FIX":
+                raise RuntimeError(f"提交 {candidate_id} 当前不是待返修状态，拒绝覆盖")
+            existing_id = candidate_id
+
+    # 返修（PUT）不产生新提交，不占当日额度；新提交先在全局标志里预占一个名额。
+    reserved = False
+    if not existing_id:
+        quota = daily_quota.reserve(lambda: platform_today_count(args.server, cookie, csrf))
+        if not quota["reserved"]:
+            deferred = daily_quota.defer(
+                task_root, payload_path, payload, quota,
+                [sys.executable, str(Path(__file__).resolve()), "--task-root", str(task_root), "--execute"],
+            )
+            print(json.dumps({
+                "status": "deferred_daily_limit",
+                "ok": False,
+                "message": (
+                    f"今日（{quota['date']}）已提交 {quota['count']} 条，达到上限 {quota['limit']}，"
+                    "全局标志 limitReached=true；本条未上传、未提交，已登记到待提交文件夹，"
+                    f"{deferred['submitAfter']} 之后重跑 command 即可提交。"
+                ),
+                "flagPath": str(daily_quota.flag_path()),
+                "deferred": deferred,
+            }, ensure_ascii=False, indent=2))
+            return 3
+        reserved = True
+    try:
+        submission_id, create_result = _upload_and_create(args, payload, schema, cookie, csrf, existing_id)
+    except BaseException:
+        if reserved:
+            daily_quota.release()
+        raise
+    if reserved:
+        daily_quota.record_submission(submission_id)
+    daily_quota.clear_deferred(task_root)
+    daily_quota.note_submitted(task_root, submission_id, "SUBMITTED")
     # Record the submission before polling QC: if polling dies, a rerun must see
     # it and refuse to POST a duplicate instead of finding no result file.
     write_result(task_root, {
@@ -676,6 +738,7 @@ def main() -> int:
     if qc_pending:
         result["message"] = qc_pending_message(submission_id, args.poll_timeout)
     output = write_result(task_root, result)
+    daily_quota.note_submitted(task_root, submission_id, status or "SUBMITTED")
     claim_release = release_finished_claim(task_root)
     summary = {"status": result["status"], "ok": result["ok"], "submissionId": submission_id, "statusValue": status, "resultPath": str(output), "projectClaim": claim_release}
     if qc_pending:
