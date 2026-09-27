@@ -2464,17 +2464,26 @@ class ChangeVolumeGateTests(unittest.TestCase):
             (repo / "node_modules" / "dep.js").write_text("x\n" * 50, encoding="utf-8")
             (repo / ".output" / "public").mkdir(parents=True)
             (repo / ".output" / "public" / "index.html").write_text("x\n" * 50, encoding="utf-8")
+            (repo / "out" / "_next").mkdir(parents=True)
+            (repo / "out" / "_next" / "page.js").write_text("x\n" * 50, encoding="utf-8")
+            (repo / "tsconfig.tsbuildinfo").write_text("x\n" * 50, encoding="utf-8")
             side_runner._install_generated_path_excludes(repo)
             self._git(repo, "add", "-A")
+            # Explicit adds simulate a stale task or model that already staged generated files
+            # despite .git/info/exclude; the unstage guard must still remove them.
+            self._git(repo, "add", "-f", "out/_next/page.js", "tsconfig.tsbuildinfo")
             staged_before_unstage = self._git(repo, "diff", "--cached", "--name-only", initial)
             removed = side_runner._unstage_generated_paths(repo, initial)
+            staged_after_unstage = self._git(repo, "diff", "--cached", "--name-only", initial)
             lines, files = side_runner._staged_business_change_lines(repo, initial)
 
-            self.assertEqual(removed, ["package-lock.json"])
+            self.assertEqual(set(removed), {"package-lock.json", "out/_next/page.js", "tsconfig.tsbuildinfo"})
             self.assertEqual(lines, 12)
             self.assertEqual(files, ["app.ts"])
             self.assertNotIn("node_modules/dep.js", staged_before_unstage)
             self.assertNotIn(".output/public/index.html", staged_before_unstage)
+            self.assertNotIn("out/_next/page.js", staged_after_unstage)
+            self.assertNotIn("tsconfig.tsbuildinfo", staged_after_unstage)
 
     def test_paired_lockfiles_follow_manifest_changes(self) -> None:
         from common import paired_lockfiles
@@ -2590,6 +2599,8 @@ class ChangeVolumeGateTests(unittest.TestCase):
             self.assertIn("node_modules/", text)
             self.assertIn("dist/", text)
             self.assertIn(".output/", text)
+            self.assertIn("out/", text)
+            self.assertIn("*.tsbuildinfo", text)
             self.assertNotIn("package-lock.json", text)
             self.assertNotIn("go.sum", text)
             self.assertIn(".svelte-kit/", text)
@@ -2603,6 +2614,37 @@ class ChangeVolumeGateTests(unittest.TestCase):
         self.assertTrue(side_runner._is_generated_or_lock_path(".output/public/index.html"))
         self.assertIn(".output", self.preflight.GENERATED_DIR_NAMES)
         self.assertTrue(self.preflight._is_generated_or_lock_path(".output/server/index.mjs"))
+
+    def test_generated_path_excludes_include_next_export_and_tsbuildinfo(self) -> None:
+        self.assertIn("out/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertIn("*.tsbuildinfo", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertTrue(side_runner._is_generated_or_lock_path("out/index.html"))
+        self.assertTrue(side_runner._is_generated_or_lock_path("tsconfig.tsbuildinfo"))
+        self.assertIn("out", self.preflight.GENERATED_DIR_NAMES)
+        self.assertTrue(self.preflight._is_generated_or_lock_path("out/index.html"))
+        self.assertTrue(self.preflight._is_generated_or_lock_path("sub/tsconfig.tsbuildinfo"))
+
+    def test_generated_path_excludes_include_angular_cache(self) -> None:
+        self.assertIn(".angular/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertTrue(side_runner._is_generated_or_lock_path(".angular/cache/vite/deps/chunk.js"))
+        self.assertIn(".angular", self.preflight.GENERATED_DIR_NAMES)
+        self.assertTrue(self.preflight._is_generated_or_lock_path(".angular/cache/vite/deps/chunk.js"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            self._git(repo, "init", "-b", "main")
+            self._git(repo, "config", "user.name", "tester")
+            self._git(repo, "config", "user.email", "tester@example.com")
+            cache = repo / ".angular" / "cache" / "vite" / "deps"
+            cache.mkdir(parents=True)
+            (cache / "chunk.js").write_text("x\n", encoding="utf-8")
+            self._git(repo, "add", "-f", ".angular/cache/vite/deps/chunk.js")
+            self._git(repo, "commit", "-m", "dirty")
+            revision = self._git(repo, "rev-parse", "HEAD")
+            self.assertEqual(
+                side_runner._committed_generated_paths(repo, revision),
+                [".angular/cache/vite/deps/chunk.js"],
+            )
 
     def test_reason_file_token_recognizes_svelte_paths(self) -> None:
         self.assertEqual(

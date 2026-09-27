@@ -1073,8 +1073,9 @@ def _diff_snapshot(repo: Path, initial_sha: str) -> dict[str, Any]:
 
 
 GENERATED_PATH_EXCLUDES = (
-    "node_modules/", "dist/", "build/", "coverage/", ".next/", ".nuxt/", ".output/",
+    "node_modules/", "dist/", "build/", "coverage/", ".next/", "out/", ".nuxt/", ".output/", ".angular/",
     ".vite/", ".svelte-kit/", "target/", "vendor/", "__pycache__/", ".venv/", "venv/", ".cache/",
+    "*.tsbuildinfo",
 )
 # 锁文件不写进 .git/info/exclude：模型改了依赖清单时要随清单一起发布，
 # 没改清单时才在 stage 后撤回（见 _unstage_generated_paths）。
@@ -1107,10 +1108,25 @@ def _install_generated_path_excludes(repo: Path) -> None:
     exclude.write_text(text.lstrip("\n"), encoding="utf-8")
 
 
-def _is_generated_or_lock_path(path: str) -> bool:
+def _is_generated_path(path: str) -> bool:
     parts = [part for part in Path(path).parts if part not in {"", "."}]
-    generated_dirs = {item.rstrip("/") for item in GENERATED_PATH_EXCLUDES}
-    return any(part in generated_dirs for part in parts) or is_lockfile(path)
+    name = parts[-1] if parts else ""
+    generated_dirs = {item.rstrip("/") for item in GENERATED_PATH_EXCLUDES if not any(ch in item for ch in "*?[")}
+    return any(part in generated_dirs for part in parts) or name.endswith(".tsbuildinfo")
+
+
+def _is_generated_or_lock_path(path: str) -> bool:
+    return _is_generated_path(path) or is_lockfile(path)
+
+
+def _committed_generated_paths(repo: Path, revision: str) -> list[str]:
+    """Return generated/cache paths tracked in a commit, excluding lockfiles."""
+    proc = _git(repo, "ls-tree", "-r", "--name-only", revision, check=False)
+    return [
+        line.strip()
+        for line in proc.stdout.decode("utf-8", errors="replace").splitlines()
+        if line.strip() and _is_generated_path(line.strip())
+    ]
 
 
 def _unstage_generated_paths(repo: Path, initial_sha: str) -> list[str]:
@@ -1201,6 +1217,11 @@ def _commit_local(repo: Path, side: str, initial_sha: str) -> dict[str, Any]:
     _git(repo, "config", "user.email", identity["email"])
     current = _git(repo, "rev-parse", "HEAD").stdout.decode().strip()
     if current != initial_sha:
+        generated = _committed_generated_paths(repo, current)
+        if generated:
+            raise SologsbError(
+                f"{side} 已有产物提交包含缓存或构建目录，禁止复用: {generated[:20]}"
+            )
         parent_current = _git(repo, "rev-parse", "HEAD^").stdout.decode().strip()
         if parent_current != initial_sha:
             raise SologsbError(
@@ -1236,6 +1257,11 @@ def _commit_local(repo: Path, side: str, initial_sha: str) -> dict[str, Any]:
     )
     _git(repo, "commit", "--allow-empty", "-m", f"fix: model {side} first-round result", env=env)
     artifact_sha = _git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    generated = _committed_generated_paths(repo, artifact_sha)
+    if generated:
+        raise SologsbError(
+            f"{side} 产物提交包含缓存或构建目录，拒绝发布: {generated[:20]}"
+        )
     parent = _git(repo, "rev-parse", "HEAD^").stdout.decode().strip()
     if parent != initial_sha:
         raise SologsbError(f"{side} 产物父提交不是初始快照: {parent} != {initial_sha}")
@@ -1298,6 +1324,11 @@ def _atomic_publish(task_root: Path, state: dict[str, Any], sides: dict[str, dic
     env = _github_git_env(owner, token)
     sha_a = str(commits["A"]["artifactSnapshot"])
     sha_b = str(commits["B"]["artifactSnapshot"])
+    for side, repo, revision in (("A", _side_workspace(task_root, {**sides["A"], "side": "A"}), sha_a),
+                                 ("B", _side_workspace(task_root, {**sides["B"], "side": "B"}), sha_b)):
+        generated = _committed_generated_paths(repo, revision)
+        if generated:
+            raise SologsbError(f"{side} 推送前产物树仍含缓存或构建目录: {generated[:20]}")
     push = _git(
         origin,
         "push",
