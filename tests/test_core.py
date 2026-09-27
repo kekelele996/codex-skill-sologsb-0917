@@ -3072,6 +3072,29 @@ class SubmitApprovalTests(unittest.TestCase):
                 )
 
 
+    def test_platform_today_count_uses_overview_today_submitted(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fake_request(method, url, *_args, **_kwargs):
+            calls.append((method, url))
+            return {"today": {"submitted": 82, "passed": 82}, "by_date": [{"date": "2026-09-27", "count": 99}]}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake_request):
+            count = self.submit_api.platform_today_count("https://solo.example", "cookie", "csrf")
+
+        self.assertEqual(count, 82)
+        self.assertEqual(calls, [("GET", "https://solo.example/api/v1/gsb/overview")])
+
+    def test_platform_today_count_falls_back_to_by_date(self) -> None:
+        def fake_request(*_args, **_kwargs):
+            return {"today": {}, "by_date": [{"date": "2026-09-27", "count": 83}]}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake_request), \
+                mock.patch.object(self.submit_api.daily_quota, "local_today", return_value="2026-09-27"):
+            count = self.submit_api.platform_today_count("https://solo.example", "cookie", "csrf")
+
+        self.assertEqual(count, 83)
+
     def test_poll_checks_once_per_minute_and_stops_after_ten_minutes(self) -> None:
         mod = self.submit_api
         self.assertEqual(mod.QC_POLL_TIMEOUT_SECONDS, 600.0)
@@ -3644,6 +3667,25 @@ class DailyQuotaTests(unittest.TestCase):
             with mock.patch.dict(os.environ, env):
                 self.assertFalse(self.quota.reserve(lambda: 100)["reserved"])
                 self.assertTrue(self.quota.read_state()["limitReached"])
+
+    def test_platform_overview_can_clear_stale_limit_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "quota.json"
+            today = self.quota.local_today()
+            path.write_text(json.dumps({
+                "date": today, "count": 100, "limit": 100,
+                "limitReached": True, "submissionIds": [],
+            }), encoding="utf-8")
+            env = {self.quota.FLAG_PATH_ENV: str(path), self.quota.DAILY_LIMIT_ENV: "100"}
+            with mock.patch.dict(os.environ, env):
+                state = self.quota.reserve(lambda: 82)
+                saved = self.quota.read_state()
+
+        self.assertTrue(state["reserved"])
+        self.assertEqual(state["count"], 83)
+        self.assertFalse(state["limitReached"])
+        self.assertEqual(state["platformCount"], 82)
+        self.assertFalse(saved["limitReached"])
 
 
 class SubmitDeferredTests(unittest.TestCase):

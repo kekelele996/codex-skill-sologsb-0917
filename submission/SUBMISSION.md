@@ -82,7 +82,7 @@ $CODEX_HOME/cache/sologsb-0917/gsb-history-cache.json
 
 - 全局标志文件：`$CODEX_HOME/cache/sologsb-0917/daily-submit-quota.json`（`SOLOGSB_DAILY_QUOTA_PATH` 可改），本机所有任务共享，读写加文件锁。
 - 字段 `date / count / limit / limitReached`：当日新提交数达到上限（默认 `100`，`SOLOGSB_DAILY_SUBMIT_LIMIT` 可改）时 `limitReached=true`；本地日期变化（0 点）后自动清零、标志复位。
-- `--execute` 在上传前检查标志：未超限时先预占一个名额（同时读取平台当日提交数，取较大值）；上传或创建失败会退回名额。`PENDING_FIX` 返修走 PUT，不占名额。
+- `--execute` 在上传前检查标志：每次预占名额时都读取 `/api/v1/gsb/overview` 的 `today.submitted`（必要时回退到 `by_date` 当日数量）作为平台当日提交数。旧的 `limitReached=true` 不再是永久短路；如果 overview 显示仍未达到上限，会按平台值纠正旧计数并放行。未超限时再预占一个名额，上传或创建失败会退回名额。`PENDING_FIX` 返修走 PUT，不占名额。
 - 标志为 `true` 时不上传、不提交，返回退出码 `3`、状态 `deferred_daily_limit`，把任务登记到任务根目录上一级的日期文件夹 `<日期>待提交/<任务名>.json`（例如 `2026-09-28待提交`，日期为这条暂存记录实际产生的本地日期），并刷新汇总 `<日期>待提交/清单.json`（上一级目录可用 `SOLOGSB_DEFERRED_DIR` 改）。
 - 次日 0 点后用 `submit-deferred` 自动匀速提交（见下一节），也可以按记录里的 `command` 手动重跑；提交成功后自动从所有日期的待提交文件夹中移除。查看标志：`python3 scripts/daily_quota.py`。
 

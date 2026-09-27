@@ -101,20 +101,30 @@ def read_state() -> dict[str, Any]:
 def reserve(platform_count: Callable[[], int | None] | None = None) -> dict[str, Any]:
     """Reserve one submission slot for today.
 
-    Returns ``{"reserved": bool, ...state}``. When the flag is already true no
-    slot is taken. ``platform_count`` may report today's count seen by the
-    platform; the larger of it and the local counter wins, so submissions from
-    other devices are counted too.
+    Returns ``{"reserved": bool, ...state}``. The platform count is queried on
+    every reservation attempt, including when an older flag says the limit was
+    reached. This lets a stale overcount be corrected by the platform overview.
+    While the limit is not currently reached, the larger of the platform and
+    local values is kept so an in-flight local reservation is not discarded.
     """
     with _locked_state() as state:
-        if platform_count is not None and not state.get("limitReached"):
+        if platform_count is not None:
             try:
                 remote = platform_count()
             except Exception:  # noqa: BLE001 - platform outage must not block on its own
                 remote = None
             if remote is not None:
+                remote = max(0, int(remote))
+                local = max(0, int(state.get("count") or 0))
                 state["platformCount"] = remote
-                state["count"] = max(int(state.get("count") or 0), int(remote))
+                # A stale true flag may come from an older list-based counter.
+                # If the overview says there is room again, trust the platform
+                # value and clear the stale flag before reserving this slot.
+                if state.get("limitReached") and remote < int(state["limit"]):
+                    state["count"] = remote
+                    state["limitReached"] = False
+                else:
+                    state["count"] = max(local, remote)
         count = int(state.get("count") or 0)
         if state.get("limitReached") or count >= int(state["limit"]):
             state["limitReached"] = True

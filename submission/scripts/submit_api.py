@@ -451,18 +451,40 @@ def poll_submission(
 
 
 def platform_today_count(server: str, cookie: str, csrf: str) -> int:
-    """Count today's submissions the platform already holds for this account."""
-    params = {"user_id": "0", "leader_id": "0", "page": "1", "page_size": "200"}
-    payload = request_json(
-        "GET", f"{server}/api/v1/gsb/submissions?" + urllib.parse.urlencode(params), cookie, csrf, timeout=30,
-    )
+    """Return the platform overview count for the current local day.
+
+    The submissions list is affected by role/scope filters and pagination, so
+    its row count is not a reliable quota counter. The overview endpoint is
+    the source of truth used by the platform page and exposes ``today`` plus a
+    ``by_date`` breakdown.
+    """
+    payload = request_json("GET", f"{server}/api/v1/gsb/overview", cookie, csrf, timeout=30)
     today = daily_quota.local_today()
-    return sum(
-        1
-        for item in payload.get("items") or []
-        if isinstance(item, dict)
-        and daily_quota.local_date(str(item.get("submitted_at") or item.get("created_at") or "")) == today
-    )
+    today_info = payload.get("today")
+    if isinstance(today_info, dict):
+        for key in ("submitted", "count"):
+            value = today_info.get(key)
+            if isinstance(value, bool):
+                continue
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                continue
+            if count >= 0:
+                return count
+    for item in payload.get("by_date") or []:
+        if not isinstance(item, dict) or str(item.get("date") or "") != today:
+            continue
+        value = item.get("count")
+        if isinstance(value, bool):
+            continue
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count >= 0:
+            return count
+    raise RuntimeError("平台 overview 未返回今天的提交数量")
 
 
 def qc_pending_message(submission_id: str, timeout: float) -> str:
