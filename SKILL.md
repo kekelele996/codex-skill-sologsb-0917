@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.7.1`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.7.1`
-- 精确提交号：运行 `git rev-parse v1.7.1` 获取。
+- 全局版本号：`1.7.2`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.7.2`
+- 精确提交号：运行 `git rev-parse v1.7.2` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -159,6 +159,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - GSB 理由不堆测试或断言数量，改成“后端关键路径完整覆盖”“完整接口流程验证”等业务覆盖描述；`gsb_tools.py` 会直接阻断计数式写法。
 - 低价值环境/工具噪声不直接参与 GSB 评定：解释器或命令未找到、测试 PYTHONPATH 缺失、编辑工具替换文本未匹配、临时工作目录、重跑等，不能作为独立 claim、评分项或胜负依据。标记为 `evaluationExcluded` 的证据不得进入 GSB 理由正文。
 - 完整审核通过后必须直接执行 `submit --execute`，不需要人工审批文件，系统自动记录批准用户（取自设备配置 `solo2.approver`）；不带 `--execute` 只作人工诊断。只有改动量单项失败时才停止并等待设备配置里的审批人批准例外；确认必须重提时才使用 `--force`。
+- 每日提交量统一按平台总览接口 `GET /api/v1/gsb/overview` 的 `today.submitted` 取值（平台口径，含其它设备提交的记录）；本机全局标志只是同一份额度的本地缓存，接口异常时才回落到提交列表接口。`submit --execute` 的额度判断、Bark 状态推送的“今日提交”和 `submit-deferred` 的剩余额度都用这一个口径。
 - 禁止用浏览器模拟点击、Playwright 填表或文件选择器提交 GSB；统一调用 `submission/scripts/submit_api.py`。
 - 最终交付展示硬门禁：`status=complete` 后的最终回复及 SOLO2 推送后的最终回复，必须逐字遵守 `references/final-delivery-format.md`。固定八段顺序为“仓库与初始快照、A / B 会话、提交与轨迹、审核结论、GSB 文案、Excel 与字段说明、两段视频、SOLO2 推送结果、未解决问题”；不得增删二级标题、添加前言/结束语或改写标题。所有本地路径必须为绝对路径，视频必须内嵌，未提交时明确写“未执行（仅本地交付）”，无未解决问题时写“无”。
 

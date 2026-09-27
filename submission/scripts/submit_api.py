@@ -450,8 +450,23 @@ def poll_submission(
     return last
 
 
+def platform_overview(server: str, cookie: str, csrf: str) -> dict[str, Any]:
+    """平台 GSB 总览：当天提交量、总量和状态分布的权威来源。"""
+    return request_json("GET", server + "/api/v1/gsb/overview", cookie, csrf, timeout=30)
+
+
 def platform_today_count(server: str, cookie: str, csrf: str) -> int:
-    """Count today's submissions the platform already holds for this account."""
+    """Count today's submissions the platform already holds for this account.
+
+    以总览接口的当天提交量为准（平台口径，包含其它设备提交的记录）；
+    总览接口异常时回落到列表接口，按提交日期逐条统计。
+    """
+    try:
+        count = daily_quota.overview_today_count(platform_overview(server, cookie, csrf))
+    except Exception:  # noqa: BLE001 - 总览接口异常时回落到列表接口
+        count = None
+    if count is not None:
+        return count
     params = {"user_id": "0", "leader_id": "0", "page": "1", "page_size": "200"}
     payload = request_json(
         "GET", f"{server}/api/v1/gsb/submissions?" + urllib.parse.urlencode(params), cookie, csrf, timeout=30,

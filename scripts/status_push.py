@@ -11,7 +11,8 @@
 - SOLO2 账号、平台地址、Bark 地址来自设备配置（~/.codex/sologsb/config.json）；
 - 容器用量 / 上限 / 排队候选来自 side_runner 的容器名额账本（与技能限流同一口径）；
 - 运行中任务来自跨进程项目占用锁；
-- 平台提交来自 SOLO2 GSB 列表接口，平台不可达时回落到本机 GSB 历史缓存。
+- 平台提交来自 SOLO2 GSB 总览接口（当天提交量 / 总量 / 状态分布都是平台口径），
+  总览接口不可用时回落到列表接口，平台不可达时再回落到本机 GSB 历史缓存。
 Bark 地址用 `configure.py set notify.barkUrl=https://api.day.app/<key>` 配置。
 """
 from __future__ import annotations
@@ -39,8 +40,18 @@ import device_config as dc  # noqa: E402
 LAUNCHD_LABEL = "com.sologsb-0917.status-push"
 CRON_MARKER = "# sologsb-0917 status-push"
 LOG_PATH = Path.home() / ".codex" / "sologsb-0917" / "status-push.log"
+SUBMISSION_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "submission" / "scripts"
 SEND_ATTEMPTS = 4
 MAX_TASK_LINES = 6
+
+
+def _daily_quota():
+    """提交侧的每日额度模块：总览接口当天量的解析口径与它共用同一份。"""
+    if str(SUBMISSION_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SUBMISSION_SCRIPTS_DIR))
+    import daily_quota
+
+    return daily_quota
 
 
 def _device_name() -> str:
@@ -125,27 +136,59 @@ def _summarize_submissions(items: list[dict[str, Any]], total: int | None) -> li
     return lines
 
 
+def _summarize_overview(payload: dict[str, Any]) -> list[str]:
+    """总览接口的当天提交量 / 总量 / 状态分布；取不到当天量时返回空，交给列表兜底。"""
+    today_count = _daily_quota().overview_today_count(payload)
+    if today_count is None:
+        return []
+    total = payload.get("total")
+    lines = [f"今日提交 {today_count} · 总提交 {total if total is not None else '未知'}"]
+    statuses = Counter(
+        {
+            str(item.get("status_label") or item.get("status") or "未知"): int(item.get("count") or 0)
+            for item in payload.get("by_status") or []
+            if isinstance(item, dict)
+        }
+    )
+    if statuses:
+        lines.append("状态 " + " · ".join(f"{k} {v}" for k, v in statuses.most_common(4)))
+    return lines
+
+
+def _list_interface_lines(preflight: Any) -> list[str]:
+    """总览接口不可用时的回落：列表接口按提交日期数当天量。"""
+    params = {"user_id": "0", "leader_id": "0", "page": "1", "page_size": "200"}
+    payload = preflight._readonly_json("/api/v1/gsb/submissions?" + urllib.parse.urlencode(params), timeout=30)
+    items = [
+        {
+            "status": str(item.get("status_label") or item.get("status") or ""),
+            "submittedAt": str(item.get("submitted_at") or item.get("created_at") or ""),
+        }
+        for item in payload.get("items") or []
+        if isinstance(item, dict)
+    ]
+    total = (payload.get("meta") or {}).get("total")
+    return _summarize_submissions(items, int(total) if str(total or "").isdigit() else None)
+
+
 def platform_section() -> list[str]:
-    """SOLO2 GSB 提交；平台不可达时用技能本机的 GSB 历史缓存兜底。"""
+    """SOLO2 GSB 提交；当天提交量以总览接口为准，平台不可达时用本机历史缓存兜底。"""
     import gsb_tools
 
     preflight = gsb_tools._load_submission_preflight()
-    params = {"user_id": "0", "leader_id": "0", "page": "1", "page_size": "200"}
+    reason = ""
     try:
-        payload = preflight._readonly_json("/api/v1/gsb/submissions?" + urllib.parse.urlencode(params),
-                                           timeout=30)
-        items = [
-            {
-                "status": str(item.get("status_label") or item.get("status") or ""),
-                "submittedAt": str(item.get("submitted_at") or item.get("created_at") or ""),
-            }
-            for item in payload.get("items") or []
-            if isinstance(item, dict)
-        ]
-        total = (payload.get("meta") or {}).get("total")
-        return _summarize_submissions(items, int(total) if str(total or "").isdigit() else None)
+        payload = preflight._readonly_json("/api/v1/gsb/overview", timeout=30)
+        if isinstance(payload, dict):
+            lines = _summarize_overview(payload)
+            if lines:
+                return lines
     except Exception as exc:  # noqa: BLE001 - 平台故障不能影响本机状态推送
         reason = f"{type(exc).__name__}: {exc}"[:50]
+    try:
+        return _list_interface_lines(preflight)
+    except Exception as exc:  # noqa: BLE001 - 平台故障不能影响本机状态推送
+        reason = reason or f"{type(exc).__name__}: {exc}"[:50]
     try:
         cache = json.loads(preflight.gsb_history_cache_path().read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001

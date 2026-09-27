@@ -3593,6 +3593,88 @@ class DailyQuotaTests(unittest.TestCase):
                 self.assertFalse(self.quota.reserve(lambda: 100)["reserved"])
                 self.assertTrue(self.quota.read_state()["limitReached"])
 
+    def test_overview_today_count_uses_platform_today(self) -> None:
+        payload = {"total": 397, "today": {"submitted": 73, "passed": 73},
+                   "by_date": [{"date": "2000-01-01", "count": 5}]}
+        self.assertEqual(self.quota.overview_today_count(payload), 73)
+
+    def test_overview_today_count_falls_back_to_by_date(self) -> None:
+        today = self.quota.local_today()
+        payload = {"total": 397, "by_date": [{"date": today, "count": 94}]}
+        self.assertEqual(self.quota.overview_today_count(payload), 94)
+
+    def test_overview_today_count_is_none_without_today(self) -> None:
+        self.assertIsNone(self.quota.overview_today_count({"total": 397, "by_date": []}))
+        self.assertIsNone(self.quota.overview_today_count({"today": {"submitted": "未知"}}))
+        self.assertIsNone(self.quota.overview_today_count(None))
+
+    def test_merge_platform_count_keeps_the_larger_and_survives_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env = {self.quota.FLAG_PATH_ENV: str(Path(temp) / "quota.json"), self.quota.DAILY_LIMIT_ENV: "100"}
+            with mock.patch.dict(os.environ, env):
+                self.quota.reserve()
+                state = self.quota.merge_platform_count(lambda: 73)
+                self.assertEqual(state["count"], 73)
+                self.assertEqual(state["platformCount"], 73)
+                # 本机计数更大时不被平台值拉低，平台读不到时也不报错。
+                self.assertEqual(self.quota.merge_platform_count(lambda: 2)["count"], 73)
+
+                def boom() -> int:
+                    raise OSError("平台不可达")
+
+                self.assertEqual(self.quota.merge_platform_count(boom)["count"], 73)
+
+
+class PlatformTodayCountTests(unittest.TestCase):
+    """当天提交量以总览接口为准，接口异常才回落到列表接口。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "sologsb_submit_api_count", ROOT / "submission" / "scripts" / "submit_api.py"
+        )
+        cls.submit_api = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(cls.submit_api)
+
+    @staticmethod
+    def _now_utc() -> str:
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def test_overview_is_the_source_of_the_daily_count(self) -> None:
+        urls: list[str] = []
+
+        def fake(method, url, cookie, csrf, *, payload=None, timeout=120):
+            urls.append(url)
+            return {"total": 397, "today": {"submitted": 73, "passed": 73},
+                    "by_date": [{"date": "2026-09-26", "count": 94}]}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake):
+            self.assertEqual(self.submit_api.platform_today_count("https://solo2", "c", "x"), 73)
+        self.assertEqual(urls, ["https://solo2/api/v1/gsb/overview"])
+
+    def test_missing_today_falls_back_to_the_list_interface(self) -> None:
+        def fake(method, url, cookie, csrf, *, payload=None, timeout=120):
+            if url.endswith("/api/v1/gsb/overview"):
+                raise RuntimeError("GET .../overview 返回 HTTP 404")
+            return {"items": [{"submitted_at": self._now_utc()},
+                              {"submitted_at": "2020-01-01T00:00:00Z"}],
+                    "meta": {"total": 2}}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake):
+            self.assertEqual(self.submit_api.platform_today_count("https://solo2", "c", "x"), 1)
+
+    def test_overview_without_today_block_falls_back(self) -> None:
+        def fake(method, url, cookie, csrf, *, payload=None, timeout=120):
+            if url.endswith("/api/v1/gsb/overview"):
+                return {"total": 397, "by_date": []}
+            return {"items": [{"created_at": self._now_utc()}], "meta": {"total": 1}}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake):
+            self.assertEqual(self.submit_api.platform_today_count("https://solo2", "c", "x"), 1)
+
 
 class SubmitDeferredTests(unittest.TestCase):
     @classmethod
@@ -3666,6 +3748,29 @@ class SubmitDeferredTests(unittest.TestCase):
                 )
             self.assertEqual(calls, ["task-0"])
             self.assertEqual(summary["status"], "stopped_daily_limit")
+
+    def test_platform_count_leaves_only_the_remaining_slots(self) -> None:
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            for i in range(4):
+                self._park(base, "2026-09-27", f"task-{i}")
+            clock = [datetime(2026, 9, 28, 0, 0, 5).astimezone()]
+            started: list[str] = []
+
+            env = {self.drainer.daily_quota.FLAG_PATH_ENV: str(base / "quota.json"),
+                   self.drainer.daily_quota.DAILY_LIMIT_ENV: "100"}
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(self.drainer.daily_quota, "local_today", return_value="2026-09-28"):
+                summary = self.drainer.drain(
+                    base, 10.0, execute=True, now=lambda: clock[0],
+                    sleep=lambda s: clock.__setitem__(0, clock[0] + timedelta(seconds=s)),
+                    runner=lambda item, poll: started.append(item["taskName"]) or 0,
+                    platform_count=lambda: 98,
+                )
+            self.assertEqual(started, ["task-0", "task-1"])
+            self.assertEqual(summary["leftForNextDay"], ["task-2", "task-3"])
 
     def _write_result(self, task_root: Path, submission_id: str) -> None:
         path = task_root / "workspace" / "评审文件" / "pre-submit" / "submission-api-result.json"

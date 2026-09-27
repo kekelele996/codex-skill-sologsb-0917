@@ -84,6 +84,34 @@ class StatusPushTests(unittest.TestCase):
             lines = status_push.platform_section()
         self.assertTrue(lines[0].startswith("今日提交 1 · 总提交 7（平台不可达，缓存 "))
 
+    def test_platform_uses_overview_for_todays_count(self):
+        preflight = mock.Mock()
+        preflight._readonly_json.return_value = {
+            "total": 397, "today": {"submitted": 73, "passed": 73},
+            "by_status": [{"status_label": "质检通过", "count": 381},
+                          {"status_label": "待返修", "count": 16}],
+        }
+        fake_gsb = mock.Mock(_load_submission_preflight=lambda: preflight)
+        with mock.patch.dict(sys.modules, {"gsb_tools": fake_gsb}):
+            lines = status_push.platform_section()
+        self.assertEqual(lines[0], "今日提交 73 · 总提交 397")
+        self.assertEqual(lines[1], "状态 质检通过 381 · 待返修 16")
+        self.assertEqual(preflight._readonly_json.call_args.args[0], "/api/v1/gsb/overview")
+
+    def test_platform_overview_without_today_falls_back_to_list(self):
+        def fake(path, **kwargs):
+            if path == "/api/v1/gsb/overview":
+                return {"total": 397, "by_date": []}
+            return {"items": [{"submitted_at": _now_utc(), "status_label": "质检通过"}],
+                    "meta": {"total": 7}}
+
+        preflight = mock.Mock()
+        preflight._readonly_json.side_effect = fake
+        fake_gsb = mock.Mock(_load_submission_preflight=lambda: preflight)
+        with mock.patch.dict(sys.modules, {"gsb_tools": fake_gsb}):
+            lines = status_push.platform_section()
+        self.assertEqual(lines[0], "今日提交 1 · 总提交 7")
+
     def test_bark_url_required_and_masked(self):
         with self.assertRaises(device_config.ConfigError):
             status_push.bark_send("t", "b")

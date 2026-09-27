@@ -59,6 +59,32 @@ def next_local_midnight() -> str:
     return midnight.isoformat()
 
 
+def overview_today(payload: Any) -> dict[str, Any]:
+    """GSB 总览接口里的当天统计。
+
+    平台按自己的时区给出 ``today``，形如 ``{"submitted": 73, "passed": 73}``；
+    缺少该字段时按 ``by_date`` 里本机今天那条兜底。
+    """
+    if not isinstance(payload, dict):
+        return {}
+    today = payload.get("today")
+    if isinstance(today, dict):
+        return today
+    wanted = local_today()
+    for item in payload.get("by_date") or []:
+        if isinstance(item, dict) and str(item.get("date") or "") == wanted:
+            return {"submitted": item.get("count")}
+    return {}
+
+
+def overview_today_count(payload: Any) -> int | None:
+    """总览接口里的当天提交量；取不到返回 None，由调用方决定怎么回落。"""
+    try:
+        return int(overview_today(payload).get("submitted"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -127,6 +153,23 @@ def release() -> None:
     """Give back a reserved slot when the POST did not create a submission."""
     with _locked_state() as state:
         state["count"] = int(state.get("count") or 0) - 1
+
+
+def merge_platform_count(platform_count: Callable[[], int | None] | None) -> dict[str, Any]:
+    """把平台当天提交量并入本机计数（取较大值，平台含其它设备提交的记录）。
+
+    平台读不到时保持本机计数不变，不阻断调用方。
+    """
+    with _locked_state() as state:
+        if platform_count is not None and not state.get("limitReached"):
+            try:
+                remote = platform_count()
+            except Exception:  # noqa: BLE001 - 平台故障不能单独阻断
+                remote = None
+            if remote is not None:
+                state["platformCount"] = int(remote)
+                state["count"] = max(int(state.get("count") or 0), int(remote))
+        return dict(state)
 
 
 def record_submission(submission_id: str) -> None:
