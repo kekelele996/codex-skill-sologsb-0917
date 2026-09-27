@@ -824,7 +824,7 @@ def _normalize_prompt(value: str) -> str:
     return re.sub(r"[，。；：！？、,.!?;:\"'“”‘’（）()《》<>【】\[\]{}…—_-]", "", text)
 
 
-REASON_REQUIRED_BOILERPLATE_RE = re.compile(r"(?:这个任务最重要的是|a侧方案|b侧方案)")
+REASON_REQUIRED_BOILERPLATE_RE = re.compile(r"(?:这个任务最重要的是|因此选择Same|a侧方案|b侧方案)", re.I)
 
 
 def _normalize_reason_for_dedup(value: str) -> str:

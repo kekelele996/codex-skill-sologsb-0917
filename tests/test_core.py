@@ -2656,6 +2656,12 @@ class ChangeVolumeGateTests(unittest.TestCase):
         self.assertTrue(self.preflight._is_generated_or_lock_path(".stencil/cache/optimize.log"))
         self.assertTrue(self.preflight._is_generated_or_lock_path("www/build/app-root.entry.js"))
 
+    def test_reason_dedup_strips_mandatory_same_conclusion(self) -> None:
+        self.assertEqual(
+            self.preflight._normalize_reason_for_dedup("A 侧方案完成改动，因此选择Same。"),
+            "完成改动",
+        )
+
     def test_reason_file_token_recognizes_svelte_paths(self) -> None:
         self.assertEqual(
             FILE_TOKEN.findall("修改 src/routes/+page.svelte 后重新构建"),
