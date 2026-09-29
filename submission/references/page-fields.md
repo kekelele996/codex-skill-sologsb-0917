@@ -4,7 +4,8 @@
 
 ## 页面状态
 
-- 当前表单共 23 个字段，全部必填；官方 schema fingerprint 为 `954e9db2d25afeb4`。
+- 当前表单共 25 个字段，全部必填；官方 schema fingerprint 为 `9a410bc6e129339b`。
+  2026-09-29 起新增 `x_a_model_name` / `x_b_model_name`（A/B 模型名称，select，必填），取值由 state 里两侧的 model 自动写入。
 - 2026-09-23 删除了 `备注`，新增 A/B 两侧的 `交付完整性`（1~5 整数）与 `交付完整性描述`。
 - `环境可复现等级` 页面说明写了“选填”，但官方 schema 的 `is_required=true`；审核按必填处理。
 - 页面提示：`填写内容会自动存为本地草稿。`

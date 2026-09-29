@@ -25,6 +25,9 @@ FIELDS: dict[str, tuple[str | None, str]] = {
     "claude.apiKey": ("SOLOSB_CLAUDE_KEY", ""),
     "claude.baseUrl": ("SOLOSB_ANTHROPIC_BASE_URL", ""),
     "claude.model": ("SOLOSB_MODEL", "auto_model/urm"),
+    # 0917 fixed pairwise rule: only modelname differs between A and B.
+    "claude.modelA": ("SOLOSB_A_MODEL", "auto_model/urm"),
+    "claude.modelB": ("SOLOSB_B_MODEL", "ark/urm-03"),
     "claude.image": ("SOLOSB_DOCKER_IMAGE", "adminfather/benzhi-claude-code2:20260919"),
     "claude.contextWindow": ("SOLOSB_CONTEXT_WINDOW", "1000000"),
     # 容器上限由 side_runner 动态优先读取本字段；环境变量仅作为字段缺失时的回退。

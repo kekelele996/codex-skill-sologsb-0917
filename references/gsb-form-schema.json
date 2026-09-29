@@ -60,7 +60,7 @@
           "is_enabled": true,
           "is_required": true,
           "is_auto": false,
-          "is_locked_on_fix": true,
+          "is_locked_on_fix": false,
           "lark_field_name": "任务难度",
           "placeholder": "",
           "help_text": "从人类执行的视角判断。本期只收「困难」与「地狱」，简单与中等一律打回",
@@ -229,6 +229,28 @@
           "sort_order": 100
         },
         {
+          "field_key": "x_a_model_name",
+          "label": "A-模型名称",
+          "group": "第一次跑（A）",
+          "field_type": "select",
+          "side": "A",
+          "is_builtin": false,
+          "is_enabled": true,
+          "is_required": true,
+          "is_auto": false,
+          "is_locked_on_fix": false,
+          "lark_field_name": "",
+          "placeholder": "",
+          "help_text": "",
+          "max_length": 0,
+          "options": [
+            "auto_model/urm",
+            "ark/urm-03"
+          ],
+          "validation": {},
+          "sort_order": 101
+        },
+        {
           "field_key": "a_trace_file",
           "label": "A-轨迹文件",
           "group": "第一次跑（A）",
@@ -353,6 +375,28 @@
           "options": [],
           "validation": {},
           "sort_order": 140
+        },
+        {
+          "field_key": "x_b_model_name",
+          "label": "B-模型名称",
+          "group": "第二次跑（B）",
+          "field_type": "select",
+          "side": "B",
+          "is_builtin": false,
+          "is_enabled": true,
+          "is_required": true,
+          "is_auto": false,
+          "is_locked_on_fix": false,
+          "lark_field_name": "",
+          "placeholder": "B模型名称",
+          "help_text": "",
+          "max_length": 0,
+          "options": [
+            "auto_model/urm",
+            "ark/urm-03"
+          ],
+          "validation": {},
+          "sort_order": 141
         },
         {
           "field_key": "b_trace_file",
@@ -563,7 +607,7 @@
       "is_enabled": true,
       "is_required": true,
       "is_auto": false,
-      "is_locked_on_fix": true,
+      "is_locked_on_fix": false,
       "lark_field_name": "任务难度",
       "placeholder": "",
       "help_text": "从人类执行的视角判断。本期只收「困难」与「地狱」，简单与中等一律打回",
@@ -722,6 +766,28 @@
       "sort_order": 100
     },
     {
+      "field_key": "x_a_model_name",
+      "label": "A-模型名称",
+      "group": "第一次跑（A）",
+      "field_type": "select",
+      "side": "A",
+      "is_builtin": false,
+      "is_enabled": true,
+      "is_required": true,
+      "is_auto": false,
+      "is_locked_on_fix": false,
+      "lark_field_name": "",
+      "placeholder": "",
+      "help_text": "",
+      "max_length": 0,
+      "options": [
+        "auto_model/urm",
+        "ark/urm-03"
+      ],
+      "validation": {},
+      "sort_order": 101
+    },
+    {
       "field_key": "a_trace_file",
       "label": "A-轨迹文件",
       "group": "第一次跑（A）",
@@ -841,6 +907,28 @@
       "options": [],
       "validation": {},
       "sort_order": 140
+    },
+    {
+      "field_key": "x_b_model_name",
+      "label": "B-模型名称",
+      "group": "第二次跑（B）",
+      "field_type": "select",
+      "side": "B",
+      "is_builtin": false,
+      "is_enabled": true,
+      "is_required": true,
+      "is_auto": false,
+      "is_locked_on_fix": false,
+      "lark_field_name": "",
+      "placeholder": "B模型名称",
+      "help_text": "",
+      "max_length": 0,
+      "options": [
+        "auto_model/urm",
+        "ark/urm-03"
+      ],
+      "validation": {},
+      "sort_order": 141
     },
     {
       "field_key": "b_trace_file",
@@ -987,7 +1075,7 @@
       "sort_order": 190
     }
   ],
-  "fingerprint": "954e9db2d25afeb4",
+  "fingerprint": "9a410bc6e129339b",
   "attachment_max_mb": 27,
   "video_max_mb": 500
 }

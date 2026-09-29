@@ -4,7 +4,7 @@
 
 - 项目：`sologsb-1003 · 开源文档本地化翻译工作台`
 - 配置：`next.config.mjs` 使用 `output: 'export'`
-- A/B 已满足候选竞速、映射、语义审核和原子发布前置条件。
+- A/B 已满足固定模型对比、映射、语义审核和原子发布前置条件。
 - 远端 A/B commit 仍包含 `out/` 全部静态导出文件；A 还包含
   `tsconfig.tsbuildinfo`。发布结果却把 `out/` 记为业务代码并显示 `hardOk=true`。
 

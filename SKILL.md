@@ -1,9 +1,9 @@
 ---
 name: sologsb-0917
 description: >
-  运行 0917 期 Pair-wise GSB：同一道困难或地狱题使用完全相同的提示词并行跑 N 个
-  独立首轮候选（单 Key 默认 2 个），前两个干净完成者逻辑映射为 A/B，随后才上传源码并
-  初始化 GitHub 的 main/A/B 三个分支，
+  运行 0917 期 Pair-wise GSB：同一道困难或地狱题使用完全相同的提示词并行跑两个
+  独立首轮候选，仅切换 modelname：candidate-1=A=auto_model/urm，
+  candidate-2=B=ark/urm-03；随后才上传源码并初始化 GitHub 的 main/A/B 三个分支，
   在两侧都通过结构校验和语义完成审核后原子发布产物，再校验真实产物，
   生成证据约束的 GSB 结论、官方当前 schema Excel、字段填写说明和两段真实运行录屏。
   用于“sologsb-0917”“Pair-wise GSB”“A/B 两次跑”“GSB 0917”等任务；技能内置审核与
@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.7.4`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.7.4`
-- 精确提交号：运行 `git rev-parse v1.7.4` 获取。
+- 全局版本号：`1.7.9`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.7.9`
+- 精确提交号：运行 `git rev-parse v1.7.9` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -33,7 +33,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 ## 实测固定顺序
 
 - 困难题默认单 attempt 超时使用 7200 秒；先区分“仍在推进”与“已失败”，不要因自动重连次数频繁重启。
-- 单 Key 并发安全：`run` 默认全局最多同时 4 个 Claude 容器，按“两个任务、每个任务两个候选”共享名额。每次 `docker run` 前都必须调用 `_CONTAINER_LIMITER.acquire`；它在同一个主机级独占锁内完成“统计运行中容器 + 统计存活预占位 + 写入预占位”。运行中容器与预占位合计达到上限时，当前候选不启动并等待已有名额释放。数据库、验证 clone、监控台辅助容器等非任务容器一律不占名额。
+- 单 Key 并发安全：`run` 默认全局最多同时 4 个 Claude 容器，按“两个任务、每个任务两个固定模型候选”共享名额。每次 `docker run` 前都必须调用 `_CONTAINER_LIMITER.acquire`；它在同一个主机级独占锁内完成“统计运行中容器 + 统计存活预占位 + 写入预占位”。运行中容器与预占位合计达到上限时，当前候选不启动并等待已有名额释放。数据库、验证 clone、监控台辅助容器等非任务容器一律不占名额。
 - 上限不是写死的 4：若 `~/.codex/sologsb-0917/container-limit.json` 带 `managedBy`（调度监控台托管），其 `maxContainers` 最优先；否则动态读取设备配置 `~/.codex/sologsb/config.json` 的 `claude.maxContainers`，环境变量 `SOLOSB_MAX_CONTAINERS` 和兼容配置 `container-limit.json.maxContainers` 只作回退，默认 4，并受绝对硬顶 8 约束。候选按领号先后排队（同一任务的候选排在一起），排队期间每 5 秒重新读取一次上限：监控台调高后几秒内按号放入，调低后不再放新的；上限变化（包括高于以往的数值）属正常，不得据此判定超限或停止任务。实际生效值用 `python3 scripts/side_runner.py` 内部的 `_CONTAINER_LIMITER.status()` 读取，它返回 `limit / runningContainers / reservedSlots / advisoryReservedSlots / used / available / runningNames`；其中 `used = runningContainers + reservedSlots`，`available = limit - used`。
 - 调度模式由监控台 `automation.scheduleMode` 决定，执行器按提示词里的 `{{schedule_mode}}` 取值行动：
   - `容器优先`：保持运行中的候选容器数等于设定值，任务数可以少于上限；
@@ -57,16 +57,18 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 发布产物前必须排除 `node_modules`、构建目录（包括 Nuxt 的 `.output`）、缓存和虚拟环境；锁文件随依赖清单发布：模型改了 `package.json`、`go.mod`、`Cargo.toml` 等依赖清单时，同目录（或工作区根目录）的锁文件一起进入产物 commit；`go.sum`、`go.work.sum` 改了就发布；清单没改时锁文件照旧撤回，否则干净检出后安装或构建会失败。提交预检必须从远端 commit 复算改动量并按平台 G11 口径阻断低改动或脏仓库。只有“任一侧业务代码少于 10 行”且这是唯一阻断项时，才允许 `change-volume-line-gate` 例外审批。
 - 例外审批必须绑定 payload 哈希、交付表哈希和改动量复核哈希，批准用户取自设备配置 `solo2.approver`；其他任何门禁失败都不能绕过。
 - 默认先拉取同一初始快照的 2 份独立候选源码，不使用 A/B 目录名，也不改名。
-  固定目录为 `source/candidates/candidate-1..N`，每份源码各自使用独立容器、Claude home、
+  固定目录为 `source/candidates/candidate-1` 和 `source/candidates/candidate-2`，每份源码各自使用独立容器、Claude home、
   SessionID 和轨迹；默认用 `run --side both --candidates 2` 并行无头执行，需要观察时加 `--live`。
+  A/B 使用同一提示词、镜像、Base URL、上下文窗口、重试次数、超时和工具权限，唯一差异是
+  `ANTHROPIC_MODEL`：candidate-1 为 `auto_model/urm`，candidate-2 为 `ark/urm-03`。
 - 每个候选只发送一次提示词。只要出现追问、权限询问、重复真人输入、最终 API/网络失败、
   无最终 `end_turn` 或异常退出，就必须销毁该候选工作区和容器，从本地初始快照重新 clone，
   再用新容器、新 Claude home、新 SessionID 从提示词重新开始；每个候选最多六次实际尝试（含首次）。
   Claude Code 自动重连不算一次新尝试，也不能替代上述重启；默认允许自动重连十次。
-  已通过结构校验的候选结果保持 staged，不因其他候选失败或终止而作废。
-- 前两个通过结构校验的候选按完成顺序映射为代号 A、B；文件夹和候选编号永不改名，
-  映射写入 `monitor/state.json.candidateMapping`。一旦前两名产生，立即主动停止其余候选，
-  不等待它们完成。
+  已通过结构校验的候选结果保持 staged，不因另一侧失败或终止而作废。
+- A/B 不再是完成顺序竞速：candidate-1 固定映射为 A，candidate-2 固定映射为 B；
+  两侧都必须产生干净结果后才进入语义审核。文件夹和候选编号永不改名，
+  映射写入 `monitor/state.json.candidateMapping`，并同时记录两侧模型名。
 - 候选阶段绝不创建 GitHub 仓库、绝不 push。重复启动同一任务根时，`run_candidates` 会先只读探测候选任务锁，占用就直接退出，不再清空状态或重建正在使用的工作区；`_clone_candidate` 也不会删除仍被运行中容器挂载的目录。
 - GitHub 仓库名必须以平台项目标识开头，再跟 3–6 位小写字母数字唯一后缀，例如 `cy-291-a1b2`；平台项目拿不到 `projectCode` 时禁止创建仓库。
 - GitHub 网络红线：所有 GitHub 网络访问，包括 `gh api`、`gh repo view/create/delete`、`git clone/fetch/push/ls-remote`，必须经 Loon 代理。优先使用显式 `SOLOSB_GITHUB_PROXY`，否则自动探测 HTTP `127.0.0.1:17890`，再探测 SOCKS5 `127.0.0.1:17891`；两者不可用时停止作业，禁止裸网直连。
@@ -89,6 +91,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 录屏 `ok` 不能只看文件是否生成：`expectedAppFailure=false` 而浏览器/API 非零退出时必须写 `ok=false`、`observedAppFailure=true`，
   `record` 命令返回非零并把状态退回 `gsb_ready`；先归档失败片段，修正 scenario 或应用后重录，未通过前不得进入 `recorded/complete`。
 - 录屏窗口 ID 红线：任何必须录屏的步骤只能使用 `window-id`。Web 题必须分别打开或定位 Terminal.app 与 Chrome 窗口，并记录各自 `windowId`；API/CLI/失败题必须定位 Terminal.app 窗口 ID。窗口缺失时先打开，无法定位或 `windowId<=0` 时立即停止，禁止回退到整屏、裁切、iTerm2 或 headless。
+- Chrome 独立实例硬红线：录屏前必须快照用户已打开的 Chrome 进程和窗口；调试端口先取空闲端口；Chrome 必须用新的临时 `--user-data-dir` 启动，禁止复用、连接、驱动、采集或关闭任何用户已有 Chrome。发 CDP 指令前必须确认端口监听进程属于本次新实例，开录前必须确认被采集窗口 owner 属于本次新实例且其进程树的 Chrome 命令行带本次临时 profile。每条证据写 `chrome-instance.json`；清理只允许终止本次实例并按临时 profile 路径兜底，完成时写 `chrome-profile-cleanup.json` 并删除临时 profile。
 - 每个片段必须写 `<片段>-window-capture.json`，其中必须包含 `captureKind=window-id`、`captureBackend=screen-capture-kit`、`showsCursor=false`、`cursorCaptured=false`、目标 `windowId`、所属 PID、bounds、退出码和采集状态；窗口 ID 缺失、失效、后端不是 ScreenCaptureKit、鼠标排除标记不为 false 或采集状态非 `ok` 时该侧录屏失败。
 - 开录瞬间必须再次确认目标窗口仍在当前 Space、未被最小化，且 `ownerPid + ownerName` 与定位时一致；窗口不在 Terminal.app（本地化名如“终端”，按 bundle id `com.apple.Terminal` 判定）/Google Chrome 白名单内时立即停机。
 - ChatGPT 不属于录制目标。录制器不得最小化、激活、移动或恢复任何 ChatGPT 窗口，也不生成
@@ -135,7 +138,11 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   进程退出或崩溃时由内核自动释放，不因残留锁文件阻断后续任务。
 - 运行器开放 `TodoWrite` 供容器内 Claude Code 记录执行待办；TodoWrite 只用于进度可视化，
   不能替代轨迹校验、语义完成审核或产物证据。
-- 2026-09-23 官方表单（fingerprint `954e9db2d25afeb4`，23 个字段全部必填）删除了“备注”，新增 `A/B-交付完整性`（1~5 整数）和 `A/B-交付完整性描述`。草稿必须提供 `delivery.A/B.score/description/evidenceIds`，打分与写法见 `references/delivery-scoring.md`：只写完整性，两侧独立撰写，允许与 GSB 理由少量重合但不得照抄，A、B 两段之间和与历史数据之间都按 G12 查重。
+- 2026-09-23 官方表单（fingerprint `954e9db2d25afeb4`，23 个字段全部必填）删除了“备注”，新增 `A/B-交付完整性`（1~5 整数）和 `A/B-交付完整性描述`。草稿必须提供 `delivery.A/B.score/description/evidenceIds`，打分与写法见 `references/delivery-scoring.md`：只写完整性，两侧独立撰写，允许与 GSB 理由少量重合但不得照抄，A、B 两段之间和与历史数据之间都按 G12 查重。1.7.7 起交付完整性从严：默认 4 分，5 分需要至少 2 条本侧通过证据（构建或启动 + 功能级）、描述写明“逐条核对了”并给出一项边界处理的实测结果；结论分出胜负时禁止双满分，负方最高 4 分。另外每侧必评代码实现（1~5），写在 `delivery.<side>.quality.code`：交付完整性 5 分要求代码实现不低于 4 分，代码实现 2 分及以下时交付完整性最高 3 分，锚点见 `references/delivery-scoring.md`。美观度不参与评估（视觉识别易误判）。
+- 2026-09-29 G16 加固（1.7.9）：当天 `sologsb-1007` 的一条数据被平台按 G16 废弃，原因是题面只做了“在既有页面补一个对照视图 + 局部只读守卫 + 给草稿加一个字段”，而难度论证只是自由文字自证。从本版本起难度论证必须回指题面与真实语料，缺一项即阻断：`platformSignals`（三项信号逐项作答，`promptQuote` 必须是题面原句子串）、`crossObjectInvariant`（至少两个对象名必须出现在题面里，并写清不变量与背离后果）、`corpusEvidence`（`nearestDiscardedId` 必须是真实 G16 废弃样本、`nearestPassedId` 必须是质检通过样本，并写清差别与借鉴点）、`substantiveComplexity`（题面原句必须真的出现并发、失效重算、失败恢复、迁移兼容、权限边界、容量、离线合并或跨系统对账等信号）、以及命中中等形态时的 `mediumShapeDefense`。当天追加的 `#19600` 已加入废弃样本：审阅回合、批注去重、冲突提示和快照修订只算多步实现，不能再自证为困难或地狱。样本清单见 `references/g16-discarded-samples.json`，判定标准见 `references/difficulty-standard.md`。`MEDIUM_SHAPE_RE` 只是摩擦规则不是判难器：当日真实语料回归为 7 条 G16 废弃命中 3 条、40 条通过命中 10 条，命中只要求补写自辩，没命中也不代表题面够难。
+- 2026-09-29 A/B 模型分离（1.7.9）：A/B 必须换模型跑（默认 `claude.modelA=auto_model/urm`、`claude.modelB=ark/urm-03`）。`run` 开跑前会校验两者不同；提交预检新增 `ab-model-split`，两侧模型名相同直接阻断。同模型的两侧不构成模型对比，出现即报废重跑。
+- 官方表单 fingerprint 更新（1.7.9）：2026-09-29 起表单为 `9a410bc6e129339b`、25 个字段，新增必填 `A-模型名称` / `B-模型名称`（`x_a_model_name` / `x_b_model_name`），由 state 里两侧的 model 自动写入；本地快照 `references/gsb-form-schema.json` 已同步。
+- 临时约束（仅本地日期 2026-09-29 有效，次日自动失效并清除运行时判断，不写入任务状态）：必须根据真实产物独立评定，不得为了避开双满分而随意压分。若复核后 A、B 交付完整性仍同为 5 分，`validate_delivery`、`gsb` 导出和提交预检直接阻断，任务应丢弃，不得提交；只有本侧真实证据确实不支持 5 分时，才能据实下调评分。
 - 红线：A/B 交付完整性描述必须与本侧轨迹对应，不得出现对立意见。锚点必须在本侧原始轨迹中存在，分数和描述不得与本侧真实复核结果、引用证据、GSB 理由或 GSB 结论相反（详见 `references/delivery-scoring.md` 红线一）。本地（容器外）编写的任何测试和自动化脚本，包括验收、冒烟、Playwright、录制场景，都不参与交付完整性描述：不写进描述，不引用其证据，也不作为分数依据（红线二）。有页面的项目和之前一样引用录屏证据；纯后端 API 项目的录屏排除，改用验证计划的 `probe` 接口探活作为证据。描述和理由都直接写“请求了登录接口，返回404”这种主观直述，不写“从录屏来看”“根据编写的测试”。
 - GSB 理由不用先交代背景，开头直接写 A 侧方案做了什么；不得用“这次冲突在……”“本题冲突在……”等元描述开场。通顺度正反对照见 `references/reason-writing-rules.md` 的“2026-09-27 通顺度对照”。
 - GSB 理由与题目提示词都要写得像人话：理由按“一侧一段话”组织，相邻句不用同一称谓起头、每侧称谓最多 3 次；不写电报体，全文最多 6 句，结论前至少 2 处“结果”“导致”“但”“却”这类因果或转折衔接，不把两件事压成“先提交标题未更新”式短语，结论前必须点明判准和扣分点（2026-09-24 电报体打回后改为阻断）；句子不能以“检查”“核对”等动作直接起头而没有交代是哪一侧，两侧打平时结论统一写“因此选择Same”，不写“打平”，也不写“选A”“选B”（2026-09-25）；提示词像业务方交代需求，硬性措辞最多 3 处、分号最多 2 个，不用“刷新后……一致”式模板收尾。
@@ -178,6 +185,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 运行器按旧方式回退到 macOS 钥匙串与环境变量。容器上限 `claude.maxContainers` 是例外：
 它优先读取上述托管值或设备配置，排队等待期间每 5 秒重新读取，按领号顺序放行。
 
+A/B 模型名分别默认读取设备配置 `claude.modelA` 和 `claude.modelB`，默认值为
+`auto_model/urm` 与 `ark/urm-03`；旧字段 `claude.model` 只保留兼容用途，不参与本次 A/B 对比。
+
 新设备接入、更换任一凭据、或 `verify` 失败时，执行向导（会联网验证四项）：
 
 ```bash
@@ -212,16 +222,22 @@ python3 scripts/status_push.py uninstall
 2. 阅读 `source/origin` 和参考规范。**开始设计提示词前**先运行
    `$CODEX_HOME/skills/sologsb-0917/submission/scripts/prompt_dedup.py --task-root ROOT`
    拉取历史 GSB 的完整 `user_prompt` 列表，并排除当前任务自己的历史提交。基于历史列表设计
-   唯一提示词后，再运行同一脚本并传 `--candidate`；只有 `UNIQUE` 才能进入
-   `prompt --candidate ... --review ...`。提示词必须走固定版本 `ra-人话`。
-3. 运行 `run --side both --candidates 2`（只有独立 Key 且容量确认时才显式提高 N）。困难题单 attempt 默认 7200 秒；
-   运行器先建立本地初始快照并拉取 N 份隔离源码，再并行启动 N 个容器无头执行，每份分别写
-   原生 JSONL。每个候选中断、异常或没有最终 `end_turn` 时，只销毁该候选现场并重新 clone，
+   唯一提示词后，再运行同一脚本并传 `--candidate`；只有 `UNIQUE` 才能进入难度论证与
+   `prompt --candidate ... --review ... --difficulty-review ...`。困难/地狱题必须先在
+   `workspace/评审文件/难度论证.json` 说明多模块整合、关键设计取舍和复杂技术关注点；
+   `困难` 至少满足两项且其中一项必须是后两项之一，`地狱` 三项都必须满足，
+   并额外通过 `hellSignal` 证明开放方案判断、隐蔽约束、架构级取舍或多步深水调试；
+   `routineOnly=true` 直接阻断。1.7.9 起还要先读 `references/g16-discarded-samples.json`，并从当前历史缓存里挑真实样本填 `corpusEvidence`；同时补齐 `platformSignals`（每项都要引用题面原句）、`crossObjectInvariant`（对象名必须出现在题面里）、`substantiveComplexity`（题面必须真的出现并发、失效重算、失败恢复、迁移兼容、权限边界、容量、离线合并或跨系统对账等信号）和命中中等形态时的 `mediumShapeDefense`。审阅回合、批注去重、冲突提示和快照修订属于多步实现，不能单独作为困难或地狱证据；任何一项引不到题面都会在 `prompt` 阶段阻断。提示词必须走固定版本 `ra-人话`。
+3. 运行 `run --side both --candidates 2`。困难题单 attempt 默认 7200 秒；
+   运行器先建立本地初始快照并拉取两份隔离源码，再并行启动两个容器无头执行，每份分别写
+   原生 JSONL。candidate-1 固定使用 `auto_model/urm` 并映射 A，candidate-2 固定使用
+   `ark/urm-03` 并映射 B；除 `ANTHROPIC_MODEL` 外，两侧所有执行参数保持一致。
+   每个候选中断、异常或没有最终 `end_turn` 时，只销毁该候选现场并重新 clone，
    最多六次实际尝试，失败尝试之间指数退避（30 秒起、上限 300 秒）；自动重连不算新尝试。
-   竞速已有两名完成时，仍在排队等容器名额的候选立即取消；执行进程退出后遗留的候选容器会在下次申请名额时回收。
-   前两个 staged 候选按完成顺序映射 A/B，其余候选立即停止。此步骤不创建 GitHub 仓库、不上传源码。
+   只有两侧都 staged 才能进入语义审核；单侧失败时保留已 staged 的结果并阻断整题。
+   此步骤不创建 GitHub 仓库、不上传源码。
 4. 运行 `github-init`。只有 `candidateMapping` 已包含 A/B 时才允许创建公开仓库，并以原始源码
-   创建 `main/A/B` 三支；候选目录保持 `source/candidates/candidate-N` 原名，不复制、不改名为 A/B。
+   创建 `main/A/B` 三支；候选目录保持 `source/candidates/candidate-1` 和 `candidate-2` 原名，不复制、不改名为 A/B。
 5. 运行 `semantic --side A` 与 `semantic --side B`（或 `--side both`），读取映射后审核包并写
    `<side>.review.json`，逐条核对提示词要求、轨迹、最终回答和对应候选 diff；同时按 Solo2
    五维口径完成该侧初评；所有负面判断补上触发节点，只有两侧最终都满足
@@ -249,6 +265,7 @@ python3 scripts/status_push.py uninstall
    不对 ChatGPT 做任何窗口操作；先在后台打开 Terminal.app/Chrome 窗口并取得数字 `CGWindowID`，开录瞬间复核后只用
    ScreenCaptureKit 按窗口 ID 后台采集，不激活录制窗口。若开窗短暂抢到前台，只把用户原应用恢复；默认
    `pointerStrategy=none`，全程不操作鼠标，并强制 `showsCursor=false`，用户仍可正常操作鼠标。结束后检查前台采样、焦点恢复和服务清理。
+   Web 题必须使用独立 Chrome 实例：先快照已有 Chrome 进程/窗口，动态取空闲调试端口，再用新的临时 `--user-data-dir` 启动；禁止连接、驱动、采集或关闭用户已有 Chrome。端口监听进程和被采集窗口 owner 都必须属于本次新实例且命令行带本次临时 profile，证据写 `chrome-instance.json`；收尾按本次临时 profile 清理，绝不按 Chrome 进程名通杀。
    视频统一保存为 `<项目编号-项目名>-验证A产物.mp4` 和 `<项目编号-项目名>-验证B产物.mp4`。
    成功侧录成功链路，失败侧录真实失败链路；场景脚本必须执行到可观察的最终状态，不能因预期失败而提前停止或伪造成功。
    纯后端/API 题在 `apiRequests` 中模拟多步业务请求（可用 `extract` 提取 token 传给后续请求），断言失败按真实失败结果记录。
@@ -269,7 +286,7 @@ python3 scripts/status_push.py uninstall
 python3 scripts/sologsb.py init --workdir DIR --task-name NAME \
   [--source PATH | --package ZIP | --from-platform --project-code CODE]
 python3 scripts/sologsb.py prompt --task-root ROOT --task-type TYPE \
-  --difficulty 困难 --candidate FILE --review FILE
+  --difficulty 困难 --candidate FILE --review FILE --difficulty-review DIFFICULTY_REVIEW_FILE
 python3 scripts/sologsb.py run --task-root ROOT --side both --candidates 2 --attempts 6 --base-url https://<配置的 claude.baseUrl>
 python3 scripts/sologsb.py github-init --task-root ROOT  # 候选映射完成后才可执行
 python3 scripts/sologsb.py run --task-root ROOT --side A --force  # 重跑已映射候选
@@ -298,7 +315,10 @@ python3 scripts/sologsb.py version                                       # 打�
 
 ## 参考资料
 
-- `references/prompt-standard.md`：提示词、难度和查重门禁。
+- `references/prompt-standard.md`：提示词和查重门禁。
+- `references/difficulty-standard.md`：困难/地狱题的 G16/G17 判定、反例与强制难度论证。
+- `references/difficulty-review-template.json`：难度论证 JSON 模板（含 1.7.9 起强制的回指与实质复杂度字段）。
+- `references/g16-discarded-samples.json`：平台 G16 真实废弃题面样本，出题前必须逐条读。
 - `references/workspace-layout.md`：候选目录、映射状态和 GitHub 约定。
 - `references/trace-validation.md`：单轮轨迹硬校验和语义完成审核。
 - `references/semantic-review-template.json`：A/B 语义完成审核模板。
@@ -326,8 +346,8 @@ python3 scripts/sologsb.py version                                       # 打�
 只有 `status` 同时确认提示词哈希、Git 三支、两份干净轨迹、两个产物快照、
 两侧真实验证、A/B `lineGate` 记录、G11 仓库洁净门禁、150–240 字 GSB 理由、A/B 交付完整性打分与描述、官方 schema Excel、字段说明和两段
 1280x720、不超过 90 秒的视频，以及逐片段 `window-capture`、`cursor-guard` 报告、
-`frontmost-window-monitor.json`、`service-cleanup.json` 均存在且状态通过，
-并且 `recordingMetadata.activationPerformed=false`、`untouched=true`、焦点恢复有记录、服务无残留，
+`frontmost-window-monitor.json`、`service-cleanup.json`、`chrome-instance.json`、`chrome-profile-cleanup.json` 均存在且状态通过，
+并且 `recordingMetadata.activationPerformed=false`、`untouched=true`、Chrome 独立实例证据 `dedicatedInstance=true`、`reusedRunningChrome=false`、`userChromeTouched=false`、本次临时 profile 已删除、焦点恢复有记录、服务无残留，
 任务才可标为 `complete`。其中 A/B 任一侧可以是真实失败结果，但不能缺录屏；
 `lineGate` 可以是 `failed`，但必须已生成并记录；平台提交阶段再执行最终阻断或等待例外审批。结论、评分、轨迹、命令输出和视频必须相互一致。最终回复必须严格使用 `references/final-delivery-format.md` 的八段式模板；未提交时明确写“未执行（仅本地交付）”，提交后必须补全 submission id、质检终态和 API 结果路径。标题、顺序、绝对路径或视频内嵌任一缺失，均不得标记交付完成。
 

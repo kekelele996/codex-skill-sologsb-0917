@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "difficulty": "困难",
+  "signals": {
+    "multiModule": {
+      "passed": true,
+      "modules": [
+        "已有模块A",
+        "已有模块B",
+        "已有模块C"
+      ],
+      "crossModuleInvariant": "写清跨模块必须同时守住的数据或业务不变量",
+      "evidence": "写清源码或需求中哪几处共同参与该不变量"
+    },
+    "designTradeoff": {
+      "passed": true,
+      "conflict": "写清两条互相牵制的业务约束",
+      "decision": "写清必须选择的事实来源、事务边界、版本策略、回滚或补偿方式",
+      "whyNotRoutine": "写清为什么这不是字段校验或普通按钮状态",
+      "evidence": "写清可回指源码、数据模型、接口或需求的证据"
+    },
+    "complexConcern": {
+      "passed": false,
+      "kinds": [
+        "concurrency"
+      ],
+      "technicalRisk": "写清具体技术风险",
+      "observableFailure": "写清实现错误时会出现的可见失败结果",
+      "evidence": "写清可回指源码或需求的证据"
+    }
+  },
+  "platformSignals": {
+    "multiModule": {
+      "answer": "2026-09-29 G16 加固必填：逐项回答平台三项信号，至少 20 字",
+      "promptQuote": "必须逐字引用题面原句（至少 12 字），校验器会在题面里核对",
+      "ifViolated": "缺了它会出现什么可见错误，至少 12 字"
+    },
+    "designTradeoff": {
+      "answer": "逐项回答平台三项信号，至少 20 字",
+      "promptQuote": "必须逐字引用题面原句（至少 12 字）",
+      "ifViolated": "缺了它会出现什么可见错误，至少 12 字"
+    },
+    "complexConcern": {
+      "answer": "逐项回答平台三项信号，至少 20 字",
+      "promptQuote": "必须逐字引用题面原句（至少 12 字）",
+      "ifViolated": "缺了它会出现什么可见错误，至少 12 字"
+    }
+  },
+  "crossObjectInvariant": {
+    "objects": [
+      "题面里真实出现的业务对象名A",
+      "题面里真实出现的业务对象名B"
+    ],
+    "invariant": "这两个对象之间必须守住什么，至少 20 字",
+    "divergenceFailure": "两者不一致时会出现的可见后果，至少 12 字"
+  },
+  "corpusEvidence": {
+    "nearestDiscardedId": 19480,
+    "differenceFromDiscarded": "与真实 G16 废弃样本逐点写差别，至少 20 字",
+    "nearestPassedId": 18682,
+    "borrowedComplexity": "本题借鉴了通过样本里的哪类复杂度，至少 20 字"
+  },
+  "substantiveComplexity": {
+    "kinds": [
+      "state-invalidation"
+    ],
+    "promptQuote": "必须逐字引用题面中体现并发、失效重算、失败恢复、迁移兼容、权限边界、容量约束、离线合并或跨系统对账的原句",
+    "whyHard": "为什么这条原句形成实质复杂度，而不是多一步 CRUD 或流程串联，至少 20 字",
+    "visibleFailure": "实现错误时出现的可见后果，至少 12 字"
+  },
+  "mediumShapeDefense": "题面命中“在既有模块补视图/清单/预览/字段”的常见中等形态时必填：写清它不是只加一层，并给出题面依据，至少 20 字",
+  "routineOnly": false,
+  "verdict": "困难",
+  "reviewedBy": "Codex"
+}

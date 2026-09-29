@@ -1,6 +1,7 @@
 # 录屏规则
 
 - Web：最终画面只允许 Terminal.app 和完整 Chrome 窗口；Terminal.app 启动项目，Chrome 负责真实操作关键验收路径。
+- Chrome 独立实例红线：录制前快照用户已打开的 Chrome 进程和窗口；调试端口先取空闲端口；必须用新的临时 `--user-data-dir` 新起独立 Chrome。绝不允许连接、驱动、采集或关闭用户正在使用的 Chrome。发 CDP 指令前必须校验监听本次调试端口的进程属于本次新实例；开录前必须校验被采集窗口 owner 属于本次新实例，且进程树的 Chrome 命令行带本次临时 profile；结果写 `chrome-instance.json`。
 - API/CLI：最终画面只允许 Terminal.app，通过 AppleScript `do script` 在录制窗口里执行真实命令并展示输出。
 - 只允许 `terminalApp=terminal`（旧计划中的 `otty` 自动归一为 `terminal`，`targetApps` 中的 `Otty` 归一为 `Terminal`）；
   Web 题必须同时有 Terminal 和 Chrome，API/CLI/失败题只允许 Terminal。禁止 Otty、iTerm2、桌面模式和整屏采集。
@@ -122,6 +123,7 @@
 - Web 题的 Terminal 与 Chrome 分别按各自窗口 ID 采集，再拼接成最终视频。不得用同一窗口 ID、PID 粗匹配或标题猜测替代实际目标窗口 ID。
 - Web 题 Chrome 直接运行 `Google Chrome.app/Contents/MacOS/Google Chrome`（不经 `open`/LaunchServices，避免激活），带 `--no-startup-window`，
   再通过 CDP `Target.createTarget {newWindow:true, background:true}` 在后台创建 1440x810（16:9）录制窗口，2x 采集后正好铺满 1280x720，无黑边。
+- Web 题 Chrome 不得复用用户正在使用的实例。启动前先记录 `chrome-baseline.json`（已有 Chrome PID 和窗口），调用 `_find_free_debug_port()` 取空闲端口，再用 `tempfile.mkdtemp()` 创建独立临时 profile，并把它直接传给 `--user-data-dir`；端口监听 PID、窗口 owner PID 和命令行 profile 三项校验全部通过后才允许 CDP 和采集。
 - Web 题 Chrome 必须增加 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`；浏览器驱动传 `HUMAN_BROWSER_KEEP_FRONT=0`，默认值仍为保持旧行为的 `1`。
 - 录制期间每秒采样最前普通窗口并写 `frontmost-window-monitor.json`。录制窗口在最前的采样数必须为 0；非零时该侧 `ok=false`。
 
@@ -169,10 +171,9 @@
   录制开始前已存在的进程绝不终止。
 - 清理报告写 `service-cleanup.json`，包含 `baselineListeners`、`terminatedAppPortListeners` 和
   `residualAppPortListeners`。后者非空时该侧 `ok=false`。
-- 临时 `chrome-profile` 在 Chrome 退出后默认删除，并由 `chrome-profile-cleanup.json` 记录；设置
-  `SOLOSGB_0917_KEEP_CHROME_PROFILE=1` 可保留用于排障，证据文件不受影响。
+- `finally` 必须终止本次 Chrome 进程树，并按本次临时 profile 路径兜底清理；禁止使用 `pkill -f "Google Chrome"` 或任何按应用名通杀的清理方式。临时 profile 必须删除，删除结果写 `chrome-profile-cleanup.json`，状态非 `removed` 或 `existsAfter=true` 时该侧失败。`chrome-instance.json` 必须含 `status=ok`、`dedicatedInstance=true`、`reusedRunningChrome=false`、`userChromeTouched=false`、`recordingChromePid`、`preExistingChromePids`、`windowId`、`userDataDir`、`debugPort` 和 `path`。
 - `recordingMetadata` 必须写 `activationPerformed=false`、`untouched=true`、`userFrontmostAppAtStart`、
-  `focusRestores`、`frontmostSampling`、`serviceCleanup`、`residualAppPortListeners` 和 `chromeProfileCleanup`。
+  `focusRestores`、`frontmostSampling`、`serviceCleanup`、`residualAppPortListeners`、`chromeInstance` 和 `chromeProfileCleanup`；`status` 复核必须用与录制器相同的独立 Chrome 门禁，任一项不通过则该侧录屏失败、不能标 `complete`。
 
 ## 全局串行锁
 

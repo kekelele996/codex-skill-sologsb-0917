@@ -53,9 +53,9 @@
 - 主要状态：`prepared → prompt_ready → candidates_running → semantic_review_required`
   `→ repo_ready → ab_clean → verified → gsb_ready → recorded → complete`。
 - 候选独立记录 `running`、`attempt_invalid`、`cancelled`、`staged`、`blocked`；A/B 只记录
-  映射后的逻辑侧状态。单 Key 默认 N=2 个候选同时运行，最先 staged 的两个按完成顺序映射 A/B，
-  其余候选立即停止。
-- `candidateMapping.A/B` 保存 `candidateId`、`candidateFolder`、`workspacePath`、`completionOrder`。
+  映射后的逻辑侧状态。单 Key 固定运行 2 个候选：candidate-1 使用 auto_model/urm 映射 A，
+  candidate-2 使用 ark/urm-03 映射 B；两侧都必须 staged 才进入语义审核。
+- `candidateMapping.A/B` 保存 `candidateId`、`candidateFolder`、`workspacePath`、`completionOrder` 和实际 `model`；`state.modelPlan` 固定记录 A/B 模型，`state.pairExecution` 记录除模型名外两侧共用的执行参数。
   候选文件夹绝不因映射而改名；后续审核、提交和验证都必须按该映射读取原工作区。
 - Claude Code 自动重连默认最多十次，仍属于同一 attempt；每个候选实际失败后的全新启动最多六次
   （含首次）。跨多次 `--force` 调用必须人工累计，不能把每次 attempt-01 当成首次。
@@ -63,7 +63,7 @@
   `publish` 才分别在本地提交，并原子推送 A/B。低改动量不再阻止生成快照。
 - `publish` 为每侧写入 `lineGate`，并把汇总写到 `monitor/change-volume-line-gate.json`；
   少于 10 行的最终阻断发生在提交预检。
-- GitHub 上传必须晚于候选竞速和前两名映射；运行器在候选完成前不得创建仓库或 push。
+- GitHub 上传必须晚于固定 A/B 模型两侧的映射；运行器在两侧完成前不得创建仓库或 push。
 - `github-init` 以 `source/origin` 的初始快照创建公开仓库；仓库名必须是 `<projectCode>-<3–6位小写字母数字>`，例如 `cy-291-a1b2`。
 - 远端只允许 `main`、`A`、`B`。初始提交在 `main`，A/B 初始都指向初始 SHA。
 - A/B 产物 commit 分别来自映射候选目录，父提交必须等于初始 SHA，禁止 force push。

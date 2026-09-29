@@ -52,7 +52,20 @@ DEFAULT_IMAGE = os.environ.get(
     "SOLOSB_DOCKER_IMAGE",
     "adminfather/benzhi-claude-code2:20260919",
 )
-DEFAULT_MODEL = os.environ.get("SOLOSB_MODEL", "auto_model/urm")
+DEFAULT_A_MODEL = os.environ.get("SOLOSB_A_MODEL", "auto_model/urm").strip() or "auto_model/urm"
+DEFAULT_B_MODEL = os.environ.get("SOLOSB_B_MODEL", "ark/urm-03").strip() or "ark/urm-03"
+# 兼容旧调用点；A/B 首轮对比固定使用 DEFAULT_A_MODEL / DEFAULT_B_MODEL。
+DEFAULT_MODEL = os.environ.get("SOLOSB_MODEL", DEFAULT_A_MODEL).strip() or DEFAULT_A_MODEL
+
+
+def assert_model_split() -> None:
+    """2026-09-29：A/B 必须换模型跑，同模型的两侧无法做模型对比。"""
+    if DEFAULT_A_MODEL == DEFAULT_B_MODEL:
+        raise SologsbError(
+            "A/B 模型名相同，无法做 Pair-wise 对比："
+            f"SOLOSB_A_MODEL={DEFAULT_A_MODEL}，SOLOSB_B_MODEL={DEFAULT_B_MODEL}；"
+            "请在设备配置里把 claude.modelA / claude.modelB 设成不同模型"
+        )
 DEFAULT_ANTHROPIC_BASE_URL = ""
 DECLARED_CONTEXT_WINDOW = int(os.environ.get("SOLOSB_CONTEXT_WINDOW", "1000000"))
 MAX_ATTEMPTS = 6
@@ -69,6 +82,37 @@ CONTAINER_QUEUE_POLL_SECONDS = 5.0
 # 排队号每轮都会刷新；超过这个时间没刷新（线程已不在）的号不再挡住后面的候选。
 CONTAINER_TICKET_STALE_SECONDS = 120.0
 CONTAINER_TASK_RE = re.compile(r"^(sologsb-.+?)-candidate-\d+-")
+
+
+def model_for_side(side: str) -> str:
+    """Return the fixed modelname for the logical A/B side."""
+    key = str(side or "").strip().upper()
+    if key == "A":
+        return DEFAULT_A_MODEL
+    if key == "B":
+        return DEFAULT_B_MODEL
+    raise SologsbError("模型只允许映射到 A 或 B")
+
+
+def model_for_candidate(candidate: str, mapped_side: str = "") -> str:
+    """Return the model for a candidate, preferring the explicit A/B mapping."""
+    if mapped_side:
+        return model_for_side(mapped_side)
+    if candidate == "candidate-1":
+        return DEFAULT_A_MODEL
+    if candidate == "candidate-2":
+        return DEFAULT_B_MODEL
+    raise SologsbError(
+        f"模型对比固定为 candidate-1=A、candidate-2=B，不支持 {candidate}"
+    )
+
+
+def model_plan() -> dict[str, dict[str, str]]:
+    """Describe the fixed, auditable A/B model comparison."""
+    return {
+        "A": {"candidateId": "candidate-1", "model": DEFAULT_A_MODEL},
+        "B": {"candidateId": "candidate-2", "model": DEFAULT_B_MODEL},
+    }
 
 
 def anthropic_base_url() -> str:
@@ -804,7 +848,7 @@ class _ContainerLimiter:
         if self._container_is_excluded(container_name, project_code, excluded):
             return _ContainerReservation(None)
         if stop_event is not None and stop_event.is_set():
-            raise CandidateCancelled("已有两个候选先完成，放弃排队中的容器名额")
+            raise CandidateCancelled("固定 A/B 模型对比已取消，放弃排队中的容器名额")
         match = CONTAINER_TASK_RE.match(container_name)
         ticket_id = uuid.uuid4().hex
         ticket_path = self.queue_dir / f"{ticket_id}.json"
@@ -824,7 +868,7 @@ class _ContainerLimiter:
             while True:
                 limit, excluded, wait_seconds = self._settings()
                 if stop_event is not None and stop_event.is_set():
-                    raise CandidateCancelled("已有两个候选先完成，放弃排队中的容器名额")
+                    raise CandidateCancelled("固定 A/B 模型对比已取消，放弃排队中的容器名额")
                 if time.monotonic() - started_at >= wait_seconds:
                     raise SologsbError(
                         f"等待容器名额超时：非测试项目最多同时运行 {limit} 个容器，"
@@ -952,7 +996,7 @@ def _start_container(
     slot = _CONTAINER_LIMITER.acquire(project_code, container, stop_event)
     if stop_event is not None and stop_event.is_set():
         slot.release()
-        raise CandidateCancelled("已有两个候选先完成，不再启动新容器")
+        raise CandidateCancelled("固定 A/B 模型对比已取消，不再启动新容器")
     try:
         proc = run(cmd, env=env, check=False, timeout=180)
         if proc.returncode != 0:
@@ -974,12 +1018,24 @@ def _start_container(
     }
 
 
-def _runtime_info(container: str, secret: str, base_url: str) -> dict[str, Any]:
+def _runtime_info(
+    container: str,
+    secret: str,
+    base_url: str,
+    expected_model: str,
+) -> dict[str, Any]:
     env = os.environ.copy()
     env["ANTHROPIC_AUTH_TOKEN"] = secret
     command = 'claude --version; printf "MODEL=%s CONTEXT=%s BASE=%s" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$ANTHROPIC_BASE_URL"'
     proc = run(
-        ["docker", "exec", "-e", "ANTHROPIC_AUTH_TOKEN", "-e", f"ANTHROPIC_BASE_URL={base_url}", container, "bash", "-lc", command],
+        [
+            "docker", "exec",
+            "-e", "ANTHROPIC_AUTH_TOKEN",
+            "-e", f"ANTHROPIC_MODEL={expected_model}",
+            "-e", f"CLAUDE_CODE_MAX_CONTEXT_TOKENS={DECLARED_CONTEXT_WINDOW}",
+            "-e", f"ANTHROPIC_BASE_URL={base_url}",
+            container, "bash", "-lc", command,
+        ],
         env=env,
         check=False,
         timeout=60,
@@ -992,8 +1048,8 @@ def _runtime_info(container: str, secret: str, base_url: str) -> dict[str, Any]:
     model = match.group(1) if match else ""
     context = int(match.group(2)) if match else 0
     runtime_base_url = match.group(3) if match else ""
-    if model != DEFAULT_MODEL:
-        raise SologsbError(f"容器模型 {model} 不等于 {DEFAULT_MODEL}")
+    if model != expected_model:
+        raise SologsbError(f"容器模型 {model} 不等于 {expected_model}")
     if context != DECLARED_CONTEXT_WINDOW:
         raise SologsbError(f"容器上下文窗口 {context} 不等于 {DECLARED_CONTEXT_WINDOW}")
     if runtime_base_url.rstrip("/") != base_url.rstrip("/"):
@@ -1411,6 +1467,7 @@ def _run_candidate_attempt(
     secret = _claude_secret()
     base_url = anthropic_base_url()
     image_digest = _ensure_image(DEFAULT_IMAGE)
+    model = model_for_candidate(candidate, mapped_side)
     container = ""
     container_slot: _ContainerReservation | None = None
     try:
@@ -1430,12 +1487,12 @@ def _run_candidate_attempt(
         prompt = prompt_path.read_text(encoding="utf-8")
         if sha256_file(prompt_path) != str(state["promptSha256"]):
             raise SologsbError("提示词文件已变化，拒绝启动")
-        runtime_info = _runtime_info(container, secret, base_url)
+        runtime_info = _runtime_info(container, secret, base_url, model)
         harness_version = runtime_info["version"]
         command = _claude_command(session_id)
         env = os.environ.copy()
         env["ANTHROPIC_AUTH_TOKEN"] = secret
-        env["ANTHROPIC_MODEL"] = DEFAULT_MODEL
+        env["ANTHROPIC_MODEL"] = model
         env["ANTHROPIC_BASE_URL"] = base_url
         env["CLAUDE_CODE_MAX_RETRIES"] = CLAUDE_MAX_RETRIES
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(DECLARED_CONTEXT_WINDOW)
@@ -1455,6 +1512,7 @@ def _run_candidate_attempt(
             "harness": "Claude Code",
             "harnessVersion": harness_version,
             "model": runtime_info["model"],
+            "modelname": runtime_info["model"],
             "imageDigest": image_digest,
             "declaredContextWindow": runtime_info["contextWindow"],
             "baseUrl": runtime_info["baseUrl"],
@@ -1493,7 +1551,7 @@ def _run_candidate_attempt(
                 while True:
                     if stop_event is not None and stop_event.is_set():
                         stop_requested = True
-                        error = "候选竞速已完成，未进入前两名；执行被主动终止"
+                        error = "固定 A/B 模型对比已取消；执行被主动终止"
                         break
                     code = proc.poll()
                     if code is not None:
@@ -1797,7 +1855,7 @@ def _run_candidate_locked(
                 "mappedSide": mapped_side,
                 "attempt": attempt - 1,
                 "status": "cancelled",
-                "error": "已有两个候选先完成，未启动新的重试",
+                "error": "固定 A/B 模型对比已取消，未启动新的重试",
                 "finishedAt": utc_now(),
             }
             _record_candidate_state(task_root, candidate, canceled)
@@ -1808,6 +1866,8 @@ def _run_candidate_locked(
             {
                 "candidateId": candidate,
                 "mappedSide": mapped_side,
+                "model": model_for_candidate(candidate, mapped_side),
+                "modelname": model_for_candidate(candidate, mapped_side),
                 "status": "running",
                 "attempt": attempt,
                 "startedAt": utc_now(),
@@ -1923,6 +1983,17 @@ def _record_side_state(task_root: Path, side: str, record: dict[str, Any]) -> di
     def mutate(state: dict[str, Any]) -> dict[str, Any]:
         sides = state.setdefault("sides", {})
         sides[side] = record
+        if record.get("status") in {"staged", "clean"} and record.get("candidateId"):
+            state.setdefault("candidateMapping", {})[side] = {
+                "candidateId": record.get("candidateId"),
+                "candidateFolder": record.get("candidateFolder", ""),
+                "workspacePath": record.get("workspacePath", ""),
+                "completionOrder": record.get("completionOrder", 0),
+                "finishedAt": record.get("finishedAt", ""),
+                "model": record.get("model") or model_for_side(side),
+                "modelname": record.get("modelname") or record.get("model") or model_for_side(side),
+            }
+        state.setdefault("modelPlan", model_plan())
         statuses = {name: (sides.get(name) or {}).get("status") for name in SIDES}
         if any(value == "blocked" for value in statuses.values()):
             state["status"] = "blocked"
@@ -1959,7 +2030,7 @@ def _run_side_locked(
     if state.get("status") not in allowed:
         raise SologsbError(
             f"当前状态 {state.get('status')} 不允许续跑 {side}；"
-            "首轮竞速请先运行 run --side both"
+            "首轮固定模型对比请先运行 run --side both"
         )
     side_state = (state.get("sides") or {}).get(side) or {}
     candidate = str(side_state.get("candidateId") or (state.get("candidateMapping") or {}).get(side, {}).get("candidateId") or "")
@@ -2092,6 +2163,13 @@ def run_candidates(
     live: bool = False,
     attempts: int = MAX_ATTEMPTS,
 ) -> dict[str, Any]:
+    """Run the fixed A/B model pair with identical parameters except modelname."""
+    assert_model_split()
+    if candidate_count != 2:
+        raise SologsbError(
+            "A/B 模型对比固定为 2 个候选：candidate-1 使用 auto_model/urm，"
+            "candidate-2 使用 ark/urm-03；不得提高候选数"
+        )
     ids = candidate_ids(candidate_count)
     if attempts < 1:
         raise SologsbError("attempts 必须至少为 1")
@@ -2104,7 +2182,7 @@ def run_candidates(
     state = read_json(task_root / "monitor" / "state.json", {})
     if state.get("status") not in {"prompt_ready", "candidates_running", "candidates_ready", "blocked", "attempt_invalid"}:
         raise SologsbError(
-            f"当前状态 {state.get('status')} 不允许启动候选竞速；"
+            f"当前状态 {state.get('status')} 不允许启动候选对比；"
             "必须在 GitHub 上传前运行"
         )
     prompt_path = Path(str(state.get("promptPath") or ""))
@@ -2114,10 +2192,23 @@ def run_candidates(
     if not origin.is_dir() or not any(origin.iterdir()):
         raise SologsbError(f"原始源码目录为空: {origin}")
     initial_sha = _ensure_origin_commit(origin, "chore: initial environment snapshot")
+    plan = model_plan()
     state = read_json(task_root / "monitor" / "state.json", {})
     for record in (state.get("candidates") or {}).values():
         if isinstance(record, dict):
             _remove_container(str((record.get("container") or {}).get("name") or ""))
+    pair_execution = {
+        "promptSha256": str(state.get("promptSha256") or ""),
+        "image": DEFAULT_IMAGE,
+        "baseUrl": anthropic_base_url(),
+        "contextWindow": DECLARED_CONTEXT_WINDOW,
+        "claudeMaxRetries": CLAUDE_MAX_RETRIES,
+        "timeoutSeconds": float(timeout),
+        "maxAttempts": attempts,
+        "tools": "Bash,Read,Write,Edit,Glob,Grep,TodoWrite",
+        "safeMode": True,
+        "modelOnlyDifference": True,
+    }
     state.update(
         {
             "status": "candidates_running",
@@ -2127,12 +2218,14 @@ def run_candidates(
             "candidates": {},
             "candidateMapping": {},
             "sides": {},
+            "modelPlan": plan,
+            "pairExecution": pair_execution,
+            "comparisonRule": "fixed-ab-different-model-same-parameters",
             "candidateRaceStartedAt": utc_now(),
         }
     )
     save_state(task_root, state)
-    # Satisfy the fixed order strictly: materialize every isolated candidate
-    # workspace first, then start any model container.
+    # Materialize both isolated workspaces before starting either model.
     try:
         for candidate in ids:
             _clone_candidate(task_root, state, candidate)
@@ -2147,8 +2240,9 @@ def run_candidates(
     stop_event = threading.Event()
     completed: queue.Queue[tuple[str, dict[str, Any], float]] = queue.Queue()
     errors: dict[str, str] = {}
-    winners: list[tuple[float, str, dict[str, Any]]] = []
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=candidate_count, thread_name_prefix="sologsb-candidate")
+    results: dict[str, dict[str, Any]] = {}
+    finish_order: dict[str, int] = {}
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=candidate_count, thread_name_prefix="sologsb-paired-model")
     futures: dict[str, concurrent.futures.Future[Any]] = {}
     try:
         for candidate in ids:
@@ -2163,119 +2257,129 @@ def run_candidates(
                 completed=completed,
             )
         remaining = set(ids)
-        # Each worker only reports after all of its attempts, and may first
-        # queue for a container slot, so the race budget is the worst case of
-        # one worker, not a single attempt's timeout.
         _limit, _excluded, slot_wait = _CONTAINER_LIMITER._settings()
-        race_budget = attempts * (float(timeout) + ATTEMPT_BACKOFF_MAX_SECONDS) + slot_wait
-        race_deadline = time.monotonic() + race_budget
-        while remaining and len(winners) < 2:
+        pair_budget = attempts * (float(timeout) + ATTEMPT_BACKOFF_MAX_SECONDS) + slot_wait
+        deadline = time.monotonic() + pair_budget
+        while remaining:
             try:
                 candidate, result, finished_at = completed.get(
-                    timeout=max(1.0, race_deadline - time.monotonic())
+                    timeout=max(1.0, deadline - time.monotonic())
                 )
             except queue.Empty as exc:
-                raise SologsbError(f"候选竞速等待结果超时（总预算 {int(race_budget)} 秒）") from exc
+                raise SologsbError(f"固定 A/B 模型对比等待结果超时（总预算 {int(pair_budget)} 秒）") from exc
             remaining.discard(candidate)
-            if result.get("status") == "staged":
-                winners.append((finished_at, candidate, result))
-                if len(winners) == 2:
-                    stop_event.set()
-            else:
+            finish_order[candidate] = len(finish_order) + 1
+            results[candidate] = result
+            if result.get("status") != "staged":
                 errors[candidate] = str(result.get("error") or result.get("status") or "候选失败")
-        if len(winners) < 2:
-            stop_event.set()
-            for future in futures.values():
-                future.cancel()
-            pool.shutdown(wait=True)
-            failed = read_json(task_root / "monitor" / "state.json", {})
-            failed["status"] = "blocked"
-            failed["candidateRaceError"] = (
-                f"候选竞速必须至少产生 2 个干净结果，当前仅 {len(winners)} 个"
-            )
-            failed["candidateErrors"] = errors
-            save_state(task_root, failed)
-            raise SologsbError(failed["candidateRaceError"] + (f": {errors}" if errors else ""))
     finally:
-        # Any exceptional exit must stop sibling candidates too; never wait for
-        # another model to finish after this orchestrator has failed.
         stop_event.set()
         for future in futures.values():
             future.cancel()
         pool.shutdown(wait=True)
 
-    winners.sort(key=lambda item: (item[0], item[1]))
     state = read_json(task_root / "monitor" / "state.json", {})
     candidates = state.setdefault("candidates", {})
     sides: dict[str, dict[str, Any]] = {}
     mapping: dict[str, dict[str, Any]] = {}
-    for order, (finished_at, candidate, result) in enumerate(winners[:2], 1):
-        side = "A" if order == 1 else "B"
-        side_record = _side_record_from_candidate(
-            task_root=task_root,
-            side=side,
-            candidate=candidate,
-            result=result,
-            completion_order=order,
-        )
-        trace = Path(str(result.get("candidateTracePath") or result.get("tracePath") or ""))
-        if not trace.is_file():
-            raise SologsbError(f"{candidate} 完成但候选轨迹不存在: {trace}")
-        side_trace = task_root / "workspace" / "轨迹文件" / side.lower() / trace.name
-        atomic_copy(trace, side_trace)
-        side_record.update(
-            {
-                "tracePath": str(side_trace),
-                "traceSha256": sha256_file(side_trace),
-                "completionOrder": order,
-                "finishedAt": utc_now(),
+    fixed = (("candidate-1", "A"), ("candidate-2", "B"))
+    for candidate, side in fixed:
+        result = dict(results.get(candidate) or {})
+        candidate_model = model_for_candidate(candidate, side)
+        if result.get("status") == "staged":
+            side_record = _side_record_from_candidate(
+                task_root=task_root,
+                side=side,
+                candidate=candidate,
+                result=result,
+                completion_order=int(finish_order.get(candidate) or 0),
+            )
+            trace = Path(str(result.get("candidateTracePath") or result.get("tracePath") or ""))
+            if not trace.is_file():
+                raise SologsbError(f"{candidate} 完成但候选轨迹不存在: {trace}")
+            side_trace = task_root / "workspace" / "轨迹文件" / side.lower() / trace.name
+            atomic_copy(trace, side_trace)
+            side_record.update(
+                {
+                    "tracePath": str(side_trace),
+                    "traceSha256": sha256_file(side_trace),
+                    "finishedAt": utc_now(),
+                    "model": candidate_model,
+                    "modelname": candidate_model,
+                }
+            )
+            sides[side] = side_record
+            mapping[side] = {
+                "candidateId": candidate,
+                "candidateFolder": side_record["candidateFolder"],
+                "workspacePath": side_record["workspacePath"],
+                "completionOrder": finish_order.get(candidate, 0),
+                "finishedAt": side_record["finishedAt"],
+                "model": candidate_model,
+                "modelname": candidate_model,
             }
-        )
-        sides[side] = side_record
-        mapping[side] = {
-            "candidateId": candidate,
-            "candidateFolder": side_record["candidateFolder"],
-            "workspacePath": side_record["workspacePath"],
-            "completionOrder": order,
-            "finishedAt": side_record["finishedAt"],
-        }
-        candidate_record = dict(candidates.get(candidate) or result)
-        candidate_record.update(
-            {
-                "status": "staged",
+            candidate_record = dict(candidates.get(candidate) or result)
+            candidate_record.update(
+                {
+                    "status": "staged",
+                    "mappedSide": side,
+                    "completionOrder": finish_order.get(candidate, 0),
+                    "finishedAt": mapping[side]["finishedAt"],
+                    "model": candidate_model,
+                    "modelname": candidate_model,
+                }
+            )
+            candidates[candidate] = candidate_record
+            write_json(_candidate_runtime_root(task_root, candidate) / "result.json", candidate_record)
+            write_json(task_root / "monitor" / "runtime" / side.lower() / "result.json", side_record)
+        else:
+            failed_record = {
+                **result,
+                "candidateId": candidate,
                 "mappedSide": side,
-                "completionOrder": order,
-                "finishedAt": mapping[side]["finishedAt"],
+                "status": str(result.get("status") or "blocked"),
+                "error": str(result.get("error") or errors.get(candidate) or "候选未产生干净结果"),
+                "finishedAt": utc_now(),
+                "model": candidate_model,
+                "modelname": candidate_model,
             }
-        )
-        candidates[candidate] = candidate_record
-        write_json(_candidate_runtime_root(task_root, candidate) / "result.json", candidate_record)
-        write_json(task_root / "monitor" / "runtime" / side.lower() / "result.json", side_record)
+            sides[side] = failed_record
+            candidates[candidate] = failed_record
+            write_json(task_root / "monitor" / "runtime" / side.lower() / "result.json", failed_record)
+            errors[candidate] = str(failed_record["error"])
 
     state["candidates"] = candidates
     state["sides"] = sides
     state["candidateMapping"] = mapping
-    state["candidateWinners"] = [mapping["A"]["candidateId"], mapping["B"]["candidateId"]]
+    state["candidateWinners"] = [plan[side]["candidateId"] for side in ("A", "B") if side in mapping]
     state["candidateRaceFinishedAt"] = utc_now()
-    state["status"] = "semantic_review_required"
-    state["semanticPackets"] = {}
-    save_state(task_root, state)
-    packets = ensure_packets(task_root)
-    state = read_json(task_root / "monitor" / "state.json", {})
-    state["semanticPackets"] = packets
-    save_state(task_root, state)
+    state["modelPlan"] = plan
+    if len(mapping) == 2:
+        state["status"] = "semantic_review_required"
+        state["semanticPackets"] = {}
+        save_state(task_root, state)
+        packets = ensure_packets(task_root)
+        state = read_json(task_root / "monitor" / "state.json", {})
+        state["semanticPackets"] = packets
+        save_state(task_root, state)
+    else:
+        state["status"] = "blocked"
+        state["candidateRaceError"] = "固定 A/B 模型对比必须两侧都产生干净结果"
+        state["candidateErrors"] = errors
+        save_state(task_root, state)
+        packets = {}
+    if len(mapping) != 2:
+        raise SologsbError(state["candidateRaceError"] + (f": {errors}" if errors else ""))
     return {
         "status": "semantic_review_required",
-        "executionMode": "candidate-race-live" if live else "candidate-race-headless",
+        "executionMode": "paired-model-live" if live else "paired-model-headless",
         "candidateCount": candidate_count,
+        "modelPlan": plan,
+        "pairExecution": pair_execution,
         "candidateMapping": mapping,
         "sides": sides,
         "packets": packets,
-        "cancelledCandidates": [
-            candidate
-            for candidate, record in candidates.items()
-            if str((record or {}).get("status") or "") == "cancelled"
-        ],
+        "cancelledCandidates": [],
         "errors": errors,
     }
 
@@ -2288,13 +2392,16 @@ def run_both(
     candidate_count: int = DEFAULT_CANDIDATE_COUNT,
     attempts: int = MAX_ATTEMPTS,
 ) -> dict[str, Any]:
+    if candidate_count != 2:
+        raise SologsbError("A/B 模型对比固定为两个候选，不允许改变候选数")
     return run_candidates(
         task_root,
-        candidate_count=candidate_count,
+        candidate_count=2,
         timeout=timeout,
         live=live,
         attempts=attempts,
     )
+
 
 def publish_sides(
     task_root: Path,

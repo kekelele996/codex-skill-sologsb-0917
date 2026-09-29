@@ -500,6 +500,9 @@ def _normalize_history_item(item: dict) -> dict | None:
     return {
         "id": item_id,
         "status": str(item.get("status") or "manual"),
+        "qcHitRule": str(item.get("qcHitRule") or item.get("qc_hit_rule") or ""),
+        "qcConclusion": str(item.get("qcConclusion") or item.get("qc_conclusion") or ""),
+        "qcSummary": str(item.get("qcSummary") or item.get("qc_summary") or "")[:400],
         "submittedAt": str(item.get("submittedAt") or item.get("submitted_at") or ""),
         "userPrompt": prompt,
         "gsbReason": reason,
@@ -615,6 +618,9 @@ def _history_item_from_detail(item_id: int, detail: dict) -> dict | None:
     return {
         "id": item_id,
         "status": str(detail.get("status_label") or detail.get("status") or ""),
+        "qcHitRule": str(detail.get("qc_hit_rule") or ""),
+        "qcConclusion": str(detail.get("qc_conclusion") or ""),
+        "qcSummary": str(detail.get("qc_summary") or "")[:400],
         "submittedAt": str(detail.get("submitted_at") or detail.get("created_at") or ""),
         "userPrompt": prompt,
         "gsbReason": reason,
@@ -686,6 +692,10 @@ def _fetch_live_gsb_history(previous: dict | None = None) -> dict:
             if cached is not None:
                 cached = dict(cached)
                 cached["status"] = str(item.get("status_label") or item.get("status") or cached.get("status") or "")
+                cached["qcHitRule"] = str(item.get("qc_hit_rule") or cached.get("qcHitRule") or "")
+                if item.get("qc_conclusion") or item.get("qc_summary"):
+                    cached["qcConclusion"] = str(item.get("qc_conclusion") or cached.get("qcConclusion") or "")
+                    cached["qcSummary"] = str(item.get("qc_summary") or cached.get("qcSummary") or "")[:400]
             reused[item_id] = cached  # None：上次详情就是空的，同样不必重拉
             continue
         to_fetch.append(item_id)
@@ -1065,12 +1075,14 @@ def derived_expected(state: dict, draft: dict) -> dict[str, str]:
         "repro_level": str(draft.get("repro_level") or ""),
         "env_snapshot": str(state.get("initialSnapshotUrl") or ""),
         "a_session_id": str(a.get("sessionId") or ""),
+        "x_a_model_name": str(a.get("model") or ""),
         "a_trace_file": str(a.get("tracePath") or ""),
         "a_artifact_snapshot": str(a.get("artifactSnapshotUrl") or ""),
         "a_screencast": str((recordings.get("A") or {}).get("videoPath") or ""),
         "a_score_delivery": str(delivery_a.get("score") or ""),
         "a_desc_delivery": str(delivery_a.get("description") or "").strip(),
         "b_session_id": str(b.get("sessionId") or ""),
+        "x_b_model_name": str(b.get("model") or ""),
         "b_trace_file": str(b.get("tracePath") or ""),
         "b_artifact_snapshot": str(b.get("artifactSnapshotUrl") or ""),
         "b_screencast": str((recordings.get("B") or {}).get("videoPath") or ""),
@@ -1662,6 +1674,49 @@ def main() -> int:
         evidence={"ids": unresolved_history, "manualCachePath": prompt_history.get("manualCachePath", str(gsb_history_manual_cache_path()))},
     )
     add("prompt-history", bool(prompt_history), "历史 GSB 提示词列表已抽取", evidence={"path": str(history_path), "total": prompt_history.get("total", 0), "skippedCurrentSubmissions": prompt_history.get("skippedCurrentSubmissions", [])})
+    model_a = str((state.get("sides") or {}).get("A", {}).get("model") or "")
+    model_b = str((state.get("sides") or {}).get("B", {}).get("model") or "")
+    difficulty_review_path = Path(
+        str(state.get("difficultyReviewPath") or (task_root / "monitor" / "prompt" / "difficulty-review.json"))
+    )
+    if not difficulty_review_path.is_file():
+        add("difficulty-evidence", False, "缺少难度论证文件，无法复核题面回指证据", evidence={"path": str(difficulty_review_path)})
+    else:
+        review_doc = load_json(difficulty_review_path)
+        if "platformSignals" in review_doc:
+            try:
+                if str(SKILL_SCRIPTS_DIR) not in sys.path:
+                    sys.path.insert(0, str(SKILL_SCRIPTS_DIR))
+                from prompt_tools import validate_difficulty_review  # type: ignore
+
+                outcome = validate_difficulty_review(
+                    difficulty_review_path,
+                    str(state.get("difficulty") or ""),
+                    prompt_text=prompt_text,
+                    history_path=history_path,
+                )
+                add(
+                    "difficulty-evidence",
+                    bool(outcome.get("ok")),
+                    "难度论证回指题面与真实语料: " + ("通过" if outcome.get("ok") else "、".join(outcome.get("errors") or [])),
+                    evidence={"path": str(difficulty_review_path), "errors": outcome.get("errors") or []},
+                )
+            except Exception as exc:  # pragma: no cover - 依赖导入异常
+                add("difficulty-evidence", False, f"难度论证复核不可用: {exc}")
+        else:
+            add(
+                "difficulty-evidence",
+                True,
+                "该任务在 1.7.9 之前初始化，难度论证未含题面回指与实质复杂度字段；本次只提示不阻断",
+                severity="warning",
+                evidence={"path": str(difficulty_review_path)},
+            )
+    add(
+        "ab-model-split",
+        bool(model_a and model_b and model_a != model_b),
+        f"A/B 必须使用不同模型：A={model_a or '缺失'}，B={model_b or '缺失'}",
+        evidence={"modelA": model_a, "modelB": model_b},
+    )
     add("prompt-dedup", bool(prompt_dedup) and prompt_dedup.get("decision") == "UNIQUE", f"历史 GSB 提示词去重: {prompt_dedup.get('decision') or 'BLOCKED'}", evidence={"path": str(dedup_path), "decision": prompt_dedup.get("decision"), "matches": prompt_dedup.get("matches", []), "error": history_error})
     add("gsb-reason-history", bool(reason_history), "历史 GSB 理由列表已抽取", evidence={"path": str(reason_history_path), "total": reason_history.get("total", 0)})
     reason_decision = str(reason_dedup.get("decision") or "BLOCKED")

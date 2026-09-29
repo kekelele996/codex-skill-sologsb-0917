@@ -133,12 +133,18 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_prompt(args: argparse.Namespace) -> int:
     root = task_root_from_arg(args.task_root)
+    difficulty_review = (
+        args.difficulty_review.expanduser().resolve()
+        if args.difficulty_review
+        else (root / "workspace" / "评审文件" / "难度论证.json").resolve()
+    )
     result = install_prompt(
         root,
         candidate_path=args.candidate.expanduser().resolve(),
         review_path=args.review.expanduser().resolve(),
         task_type=args.task_type,
         difficulty=args.difficulty,
+        difficulty_review_path=difficulty_review,
         history_path=args.history.expanduser().resolve() if args.history else None,
         allow_over_170=args.allow_over_170,
     )
@@ -332,7 +338,9 @@ def _excel_errors(root: Path, state: dict[str, Any]) -> list[str]:
         values = dict(zip(headers, rows[1]))
         schema = json.loads(SCHEMA_FALLBACK.read_text(encoding="utf-8"))
         expected_columns = len(schema.get("fields") or [])
-        if len(headers) != expected_columns:
+        # 2026-09-29 官方 schema 新增 A/B 模型名称两列；本地 fallback 仍保留旧 23 列快照。
+        current_schema_columns = {"A-模型名称", "B-模型名称"}.issubset(set(headers))
+        if len(headers) != expected_columns and not (len(headers) == 25 and current_schema_columns):
             errors.append(f"Excel 列数不是 {expected_columns}，当前 {len(headers)}")
         for key in ("A-轨迹文件", "B-轨迹文件", "A-运行录屏", "B-运行录屏"):
             value = str(values.get(key) or "")
@@ -411,6 +419,8 @@ def build_status(root: Path) -> dict[str, Any]:
             guard_reports=cursor_reports,
             frontmost_report=recording_metadata.get("frontmostSampling"),
             service_cleanup=recording_metadata.get("serviceCleanup"),
+            chrome_instance=recording_metadata.get("chromeInstance"),
+            chrome_profile_cleanup=recording_metadata.get("chromeProfileCleanup"),
         ):
             errors.append(f"{side} 窗口录屏隔离门禁未通过")
         if recording_metadata.get("activationPerformed") is not False or recording_metadata.get("untouched") is not True:
@@ -424,6 +434,8 @@ def build_status(root: Path) -> dict[str, Any]:
             *(item.get("path") for item in cursor_reports),
             (recording_metadata.get("frontmostSampling") or {}).get("path"),
             (recording_metadata.get("serviceCleanup") or {}).get("path"),
+            (recording_metadata.get("chromeInstance") or {}).get("path"),
+            (recording_metadata.get("chromeProfileCleanup") or {}).get("reportPath"),
         ]
         if any(not Path(str(path or "")).is_file() for path in isolation_paths):
             errors.append(f"{side} 窗口录屏隔离报告缺失")
@@ -564,6 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     prompt.add_argument("--difficulty", required=True, choices=["困难", "地狱"])
     prompt.add_argument("--candidate", type=Path, required=True)
     prompt.add_argument("--review", type=Path, required=True)
+    prompt.add_argument("--difficulty-review", type=Path)
     prompt.add_argument("--history", type=Path)
     prompt.add_argument("--allow-over-170", action="store_true")
     prompt.set_defaults(func=cmd_prompt)
@@ -574,7 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     github.add_argument("--dry-run", action="store_true")
     github.set_defaults(func=cmd_github_init)
 
-    run_parser = sub.add_parser("run", help="并行运行 N 个候选并将前两名映射 A/B；默认无头")
+    run_parser = sub.add_parser("run", help="并行运行 A/B 固定模型对比；默认无头")
     run_parser.add_argument("--task-root", required=True)
     run_parser.add_argument("--side", required=True, choices=["A", "B", "both"])
     run_parser.add_argument("--timeout", type=float, default=7200, help="单 attempt 超时秒数，默认 7200")
@@ -582,7 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--candidates",
         type=int,
         default=DEFAULT_CANDIDATE_COUNT,
-        help="首轮并行候选数，单 Key 默认 2；前两名完成者映射为 A/B",
+        help="固定为 2：candidate-1=A(auto_model/urm)，candidate-2=B(ark/urm-03)",
     )
     run_parser.add_argument(
         "--attempts",

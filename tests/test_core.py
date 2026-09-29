@@ -57,7 +57,7 @@ from gsb_tools import (
     write_excel,
     write_field_guide,
 )  # noqa: E402
-from prompt_tools import check_history  # noqa: E402
+from prompt_tools import check_history, validate_difficulty_review  # noqa: E402
 from project_claims import (
     claim_release_reason,
     claimed_project_codes,
@@ -262,6 +262,166 @@ class PromptTests(unittest.TestCase):
             write_json(path, [{"id": "old", "prompt": "同一个完整提示词内容用于测试重复"}])
             errors = check_history("同一个完整提示词内容用于测试重复", path)
             self.assertTrue(errors)
+
+    def test_difficulty_review_blocks_routine_crud(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "difficulty.json"
+            write_json(
+                path,
+                {
+                    "schemaVersion": 1,
+                    "difficulty": "困难",
+                    "signals": {
+                        "multiModule": {
+                            "passed": True,
+                            "modules": ["标本清单", "组织取样", "列表统计"],
+                            "crossModuleInvariant": "组织样本必须跟着标本资格和保藏位置变化，只靠页面校验不足以守住状态",
+                            "evidence": "清单页、取样记录和统计都读取同一份标本状态，但这不是跨业务所有权冲突",
+                        },
+                        "designTradeoff": {"passed": False},
+                        "complexConcern": {"passed": False},
+                    },
+                    "routineOnly": True,
+                    "verdict": "困难",
+                    "reviewedBy": "Codex",
+                },
+            )
+            result = validate_difficulty_review(path, "困难")
+            self.assertFalse(result["ok"])
+            self.assertTrue(any("routineOnly" in error for error in result["errors"]))
+            self.assertTrue(any("至少满足" in error for error in result["errors"]))
+
+    def test_difficulty_review_requires_hard_concern_or_tradeoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = {
+                "schemaVersion": 1,
+                "difficulty": "困难",
+                "signals": {
+                    "multiModule": {
+                        "passed": True,
+                        "modules": ["采集登记", "鉴定工作流", "保藏位置"],
+                        "crossModuleInvariant": "采集、鉴定和保藏必须围绕同一标本保持一致，不能各自保留一份独立状态",
+                        "evidence": "三个已有页面和各自数据表共同参与标本主记录的生命周期",
+                    },
+                    "designTradeoff": {"passed": False},
+                    "complexConcern": {"passed": False},
+                },
+                "routineOnly": False,
+                "verdict": "困难",
+                "reviewedBy": "Codex",
+            }
+            path = Path(temp) / "difficulty.json"
+            write_json(path, base)
+            result = validate_difficulty_review(path, "困难")
+            self.assertFalse(result["ok"])
+            self.assertTrue(any("至少满足" in error for error in result["errors"]))
+
+    def test_difficulty_review_accepts_two_strong_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "difficulty.json"
+            write_json(
+                path,
+                {
+                    "schemaVersion": 1,
+                    "difficulty": "困难",
+                    "signals": {
+                        "multiModule": {"passed": False},
+                        "designTradeoff": {
+                            "passed": True,
+                            "conflict": "离线修改与馆内正式编目冲突时必须决定哪个版本先保留",
+                            "decision": "保留两版并按字段来源合并，比较后再决定正式状态",
+                            "whyNotRoutine": "这不是普通字段校验，而是事实来源和版本保存策略的取舍",
+                            "evidence": "需求同时约束离线批次、编目主记录和鉴定状态的合并结果",
+                        },
+                        "complexConcern": {
+                            "passed": True,
+                            "kinds": ["concurrency", "failure-recovery"],
+                            "technicalRisk": "网络恢复后的并发合并和部分失败重试可能丢记录",
+                            "observableFailure": "合并后只剩后到版本，前面修改的鉴定结果不可查",
+                            "evidence": "需求要求原调查批次在失败时保留并可重试，另行合并",
+                        },
+                    },
+                    "routineOnly": False,
+                    "verdict": "困难",
+                    "reviewedBy": "Codex",
+                },
+            )
+            result = validate_difficulty_review(path, "困难")
+            self.assertTrue(result["ok"], result["errors"])
+            self.assertEqual(result["signalsPassed"], 2)
+
+    def test_hell_requires_explicit_hell_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "difficulty.json"
+            write_json(
+                path,
+                {
+                    "schemaVersion": 1,
+                    "difficulty": "地狱",
+                    "signals": {
+                        "multiModule": {
+                            "passed": True,
+                            "modules": ["排程段", "观测夜", "设备分配"],
+                            "crossModuleInvariant": "替补安排必须同时满足设备占用、可见窗口和原段追溯",
+                            "evidence": "排程、观测夜和设备视图共同读取同一批替补安排",
+                        },
+                        "designTradeoff": {
+                            "passed": True,
+                            "conflict": "原段保留与替补安排需要同时成立",
+                            "decision": "需要确定事务边界和重复提交策略",
+                            "whyNotRoutine": "跨观测夜写入会造成恢复困难",
+                            "evidence": "需求要求整批写入并保留批次关系",
+                        },
+                        "complexConcern": {
+                            "passed": True,
+                            "kinds": ["transaction", "idempotency"],
+                            "technicalRisk": "部分写入或重复提交会造成跨夜计划不一致",
+                            "observableFailure": "原段已取消但没有替补安排，或重复生成设备计划",
+                            "evidence": "需求明确要求整批原子写入和重复提交拦截",
+                        },
+                    },
+                    "routineOnly": False,
+                    "verdict": "地狱",
+                    "reviewedBy": "Codex",
+                },
+            )
+            result = validate_difficulty_review(path, "地狱")
+            self.assertFalse(result["ok"])
+            self.assertTrue(any("hellSignal" in error for error in result["errors"]))
+
+    def test_hell_requires_all_three_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "difficulty.json"
+            write_json(
+                path,
+                {
+                    "schemaVersion": 1,
+                    "difficulty": "地狱",
+                    "signals": {
+                        "multiModule": {"passed": False},
+                        "designTradeoff": {
+                            "passed": True,
+                            "conflict": "离线修改与馆内正式编目冲突时必须决定哪个版本先保留",
+                            "decision": "保留两版并按字段来源合并，比较后再决定正式状态",
+                            "whyNotRoutine": "这不是普通字段校验，而是事实来源和版本保存策略的取舍",
+                            "evidence": "需求同时约束离线批次、编目主记录和鉴定状态的合并结果",
+                        },
+                        "complexConcern": {
+                            "passed": True,
+                            "kinds": ["concurrency"],
+                            "technicalRisk": "网络恢复后的并发合并可能覆盖最后写入记录",
+                            "observableFailure": "合并后只剩后到版本，前面修改的鉴定结果不可查",
+                            "evidence": "需求要求冲突时两版都保留，不能只接受后到覆盖",
+                        },
+                    },
+                    "routineOnly": False,
+                    "verdict": "地狱",
+                    "reviewedBy": "Codex",
+                },
+            )
+            result = validate_difficulty_review(path, "地狱")
+            self.assertFalse(result["ok"])
+            self.assertTrue(any("地狱题" in error for error in result["errors"]))
 
 
 class ExcelTests(unittest.TestCase):
@@ -764,8 +924,10 @@ class DeliveryFieldTests(unittest.TestCase):
     def _draft(self, verdict: str = "B 更好", **delivery) -> dict:
         base = {
             "A": {"score": 2, "description": self.DESC_A, "evidenceIds": ["A-artifact-check-01"]},
-            "B": {"score": 5, "description": self.DESC_B, "evidenceIds": ["B-artifact-check-02"]},
+            "B": {"score": 5, "description": self.DESC_B, "evidenceIds": ["B-artifact-check-01", "B-artifact-check-02"]},
         }
+        base["A"]["quality"] = {"code": {"score": 3, "note": "frontend/src/api.ts里把接口前缀硬编码成两层，登录请求拼接逻辑没有复用统一配置。"}}
+        base["B"]["quality"] = {"code": {"score": 4, "note": "src/diary.service.ts按草稿与发布拆分职责，发布前有状态校验，个别方法偏长。"}}
         for side, patch in delivery.items():
             base[side] = {**base[side], **patch}
         return {"verdict": verdict, "reason": self.REASON, "delivery": base}
@@ -791,6 +953,80 @@ class DeliveryFieldTests(unittest.TestCase):
         self.assertTrue(any("核对依据" in item for item in vague), vague)
         contradictory = self._errors(self._draft(B={"description": "逐条核对了存草稿和发布两项需求，构建通过，但成员离队后的只读限制还没有实现，缺少对应校验。"}))
         self.assertTrue(any("分数与描述矛盾" in item for item in contradictory), contradictory)
+
+    def test_full_score_needs_build_and_functional_evidence(self) -> None:
+        only_build = self._errors(self._draft(B={"evidenceIds": ["B-artifact-check-01"]}))
+        self.assertTrue(any("至少引用 2 条" in item for item in only_build), only_build)
+        self.assertTrue(any("功能级通过证据" in item for item in only_build), only_build)
+        only_readback = self._errors(self._draft(B={"evidenceIds": ["B-artifact-check-02"]}))
+        self.assertTrue(any("构建或启动通过" in item for item in only_readback), only_readback)
+
+    def test_full_score_needs_explicit_basis_and_edge_case(self) -> None:
+        no_basis = self._errors(self._draft(B={"description": "选择行程、存草稿、发起人发布和冻结标题四项需求都能用，构建和启动都通过，刷新后状态一致。"}))
+        self.assertTrue(any("逐条核对了" in item for item in no_basis), no_basis)
+        no_edge = self._errors(self._draft(B={"description": "逐条核对了选择行程、存草稿、发起人发布和冻结标题四项需求，构建和启动都通过，发布状态一致。"}))
+        self.assertTrue(any("隐性需求或边界处理" in item for item in no_edge), no_edge)
+
+    def test_quality_is_required_and_anchored(self) -> None:
+        draft = self._draft()
+        draft["delivery"]["A"].pop("quality")
+        errors = self._errors(draft)
+        self.assertTrue(any("A.quality.code 必填" in item for item in errors), errors)
+        other_file = {"code": {"score": 3, "note": "src/diary.service.ts里的前缀硬编码成两层，请求拼接逻辑没有复用统一配置。"}}
+        errors = self._errors(self._draft(A={"quality": other_file}))
+        self.assertTrue(any("diary.service.ts 在本侧轨迹中不存在" in item for item in errors), errors)
+        vague_low = {"code": {"score": 3, "note": "frontend/src/api.ts整体写得一般，和预期相比还有不少差距需要打磨。"}}
+        errors = self._errors(self._draft(A={"quality": vague_low}))
+        self.assertTrue(any("必须写出具体问题" in item for item in errors), errors)
+
+    def test_code_full_score_needs_strengths(self) -> None:
+        thin = {"code": {"score": 5, "note": "src/diary.service.ts写得很好，整体看起来非常不错，没有什么问题。"}}
+        errors = self._errors(self._draft(B={"quality": thin}))
+        self.assertTrue(any("至少两项具体长处" in item for item in errors), errors)
+        hardcoded = {"code": {"score": 5, "note": "src/diary.service.ts分层清楚、有校验，但发布人ID写死在常量里。"}}
+        errors = self._errors(self._draft(B={"quality": hardcoded}))
+        self.assertTrue(any("分数与说明矛盾" in item for item in errors), errors)
+
+    def test_low_code_quality_caps_delivery(self) -> None:
+        weak = {"code": {"score": 3, "note": "src/diary.service.ts里的发布逻辑大段重复，错误分支直接吞异常返回成功。"}}
+        errors = self._errors(self._draft(B={"quality": weak}))
+        self.assertTrue(any("代码实现低于 4 分时交付完整性最高 4 分" in item for item in errors), errors)
+        stub = {"code": {"score": 2, "note": "src/diary.service.ts的发布接口直接返回写死的假数据，没有读写存储。"}}
+        errors = self._errors(self._draft(B={"score": 4, "quality": stub}))
+        self.assertTrue(any("交付完整性最高 3 分" in item for item in errors), errors)
+
+    def test_aesthetics_is_not_evaluated(self) -> None:
+        web = {"id": "B-recording", "side": "B", "type": "artifact", "polarity": "positive",
+               "artifact": {"ok": True, "observedFailure": False, "recordingMode": "web"}}
+        result = validate_delivery(self._draft(), self._evidence(extra=[web]), self.REASON)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["quality"]["B"], {"code": 4})
+        quality = {"code": self._draft()["delivery"]["B"]["quality"]["code"],
+                   "aesthetics": {"score": 4, "note": "日记列表页卡片间距统一、层级清楚。", "evidenceIds": ["B-recording"]}}
+        errors = self._errors(self._draft(B={"quality": quality}), self._evidence(extra=[web]))
+        self.assertTrue(any("美观度不参与评估" in item for item in errors), errors)
+
+    def test_double_full_score_temporary_discard_then_long_term_rule(self) -> None:
+        self.trace_a.write_text(self._edit_event("/workspace/frontend/src/api.ts"), encoding="utf-8")
+        desc_a = "逐项核对了登录、日记列表和发布三项需求，npm run build通过，非法密码会被拒绝，重复发布不会多出记录。"
+        a_full = {"score": 5, "description": desc_a, "evidenceIds": ["A-artifact-check-02", "A-artifact-check-04"],
+                  "quality": {"code": {"score": 4, "note": "frontend/src/api.ts统一封装请求前缀和错误处理，个别函数命名偏泛。"}}}
+        readback = self._check("A-artifact-check-04", "A", "列表回读", "curl localhost:3000/api/diary", True)
+        evidence = self._evidence(extra=[readback])
+        evidence["evidence"] = [item for item in evidence["evidence"] if item["id"] != "A-artifact-check-01"]
+        result = validate_delivery(
+            self._draft("B 更好", A=a_full),
+            evidence,
+            self.REASON,
+            today="2026-09-30",
+        )
+        self.assertTrue(any("负方 A 最高 4 分" in item for item in result["errors"]), result)
+        result = validate_delivery(self._draft("Same", A=a_full), evidence, self.REASON, today="2026-09-29")
+        self.assertTrue(any("临时约束" in item and "丢弃" in item for item in result["errors"]), result)
+        result = validate_delivery(self._draft("Same", A=a_full), evidence, self.REASON, today="2026-09-30")
+        self.assertFalse(any("最高 4 分" in item for item in result["errors"]), result)
+        self.assertFalse(any("临时约束" in item for item in result["errors"]), result)
+        self.assertTrue(any("两侧都给 5 分" in item for item in result["warnings"]), result)
 
     def test_low_score_needs_location_and_consequence(self) -> None:
         errors = self._errors(self._draft(A={"description": "这一侧整体完成度一般，很多地方做得比较粗糙，和题目的要求相比还有不小的差距需要继续打磨。"}))
@@ -1003,8 +1239,10 @@ class DeliveryFieldTests(unittest.TestCase):
                 "repoUrl": "https://github.com/o/r", "initialSnapshot": "a" * 40,
                 "sides": {
                     "A": {"tracePath": str(trace_a), "sessionId": "s1", "harnessVersion": "2.1.197",
+                          "model": "auto_model/urm",
                           "artifactSnapshotUrl": "https://github.com/o/r/commit/" + "b" * 40},
                     "B": {"tracePath": str(trace_b), "sessionId": "s2",
+                          "model": "ark/urm-03",
                           "artifactSnapshotUrl": "https://github.com/o/r/commit/" + "c" * 40},
                 },
             })
@@ -1432,10 +1670,44 @@ class VideoTests(unittest.TestCase):
             {"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6457, "ownerPid": 768, "ownerName": "终端", "ownerBundleId": "com.apple.Terminal"},
             {"status": "ok", "captureKind": "window-id", "captureBackend": "screen-capture-kit", "showsCursor": False, "cursorCaptured": False, "windowId": 6458, "ownerPid": 769, "ownerName": "Chrome"},
         ]
+        chrome_instance = {
+            "status": "ok",
+            "dedicatedInstance": True,
+            "reusedRunningChrome": False,
+            "userChromeTouched": False,
+            "recordingChromePid": 769,
+            "preExistingChromePids": [500],
+            "recordingChromeProcessTree": [769, 770],
+            "windowId": 6458,
+            "windowOwnerPid": 769,
+            "debugPort": 9333,
+            "debugPortOwnerPids": [769],
+            "userDataDir": "/tmp/sologsb-0917-test-chrome-profile",
+            "profileCommandLineVerified": True,
+            "debugPortOwnerVerified": True,
+            "path": "/tmp/sologsb-0917-test-chrome-instance.json",
+        }
+        chrome_profile_cleanup = {
+            "status": "removed",
+            "removed": True,
+            "existsAfter": False,
+            "path": "/tmp/sologsb-0917-test-chrome-profile",
+        }
         self.assertTrue(
             recording_isolation_ok(
                 mode="web",
                 window_capture_reports=web_captures,
+                guard_reports=guards,
+                frontmost_report=frontmost,
+                service_cleanup=service_cleanup,
+                chrome_instance=chrome_instance,
+                chrome_profile_cleanup=chrome_profile_cleanup,
+            )
+        )
+        self.assertFalse(
+            recording_isolation_ok(
+                mode="web",
+                window_capture_reports=captures,
                 guard_reports=guards,
                 frontmost_report=frontmost,
                 service_cleanup=service_cleanup,
@@ -1444,7 +1716,7 @@ class VideoTests(unittest.TestCase):
         self.assertFalse(
             recording_isolation_ok(
                 mode="web",
-                window_capture_reports=captures,
+                window_capture_reports=web_captures,
                 guard_reports=guards,
                 frontmost_report=frontmost,
                 service_cleanup=service_cleanup,
@@ -1981,7 +2253,7 @@ class ParallelRunTests(unittest.TestCase):
             self.assertEqual(side_runner.anthropic_base_url(), "https://custom.example")
         self.assertEqual(semantic_a.side, "A")
 
-    def test_candidate_race_maps_first_two_by_finish_order_without_rename(self) -> None:
+    def test_candidate_pair_fixes_models_and_waits_for_both(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "monitor").mkdir(parents=True)
@@ -1992,27 +2264,19 @@ class ParallelRunTests(unittest.TestCase):
             prompt.write_text("prompt", encoding="utf-8")
             write_json(root / "monitor" / "state.json", {
                 "status": "prompt_ready",
-                "taskName": "candidate-race",
+                "taskName": "paired-model",
                 "promptPath": str(prompt),
                 "promptSha256": sha256_file(prompt),
             })
+            calls: list[str] = []
 
             def fake_candidate(task_root, candidate, **kwargs):
-                stop_event = kwargs["stop_event"]
+                calls.append(candidate)
                 workspace = task_root / "source" / "candidates" / candidate
                 self.assertTrue((workspace / ".git").is_dir())
                 (workspace / "result.txt").write_text(candidate, encoding="utf-8")
                 if candidate == "candidate-1":
-                    time.sleep(0.08)
-                elif candidate == "candidate-2":
-                    stop_event.wait(timeout=5)
-                    return {
-                        "candidateId": candidate,
-                        "status": "cancelled",
-                        "error": "stopped after first two",
-                    }
-                elif candidate == "candidate-3":
-                    time.sleep(0.01)
+                    time.sleep(0.05)
                 trace = task_root / "workspace" / "轨迹文件" / "candidates" / candidate / f"{candidate}.jsonl"
                 trace.parent.mkdir(parents=True, exist_ok=True)
                 session = f"s-{candidate}"
@@ -2034,16 +2298,43 @@ class ParallelRunTests(unittest.TestCase):
 
             with mock.patch.object(side_runner, "_ensure_image", return_value="image"):
                 with mock.patch.object(side_runner, "_run_candidate_locked", side_effect=fake_candidate):
-                    result = side_runner.run_both(root, timeout=10, live=False, candidate_count=3)
+                    result = side_runner.run_both(root, timeout=10, live=False, candidate_count=2)
 
-            self.assertEqual(result["candidateMapping"]["A"]["candidateId"], "candidate-3")
-            self.assertEqual(result["candidateMapping"]["B"]["candidateId"], "candidate-1")
-            self.assertIn("candidate-2", result["cancelledCandidates"])
-            for candidate in ("candidate-1", "candidate-2", "candidate-3"):
-                self.assertTrue((root / "source" / "candidates" / candidate).is_dir())
-            self.assertTrue((root / "workspace" / "轨迹文件" / "a" / "candidate-3.jsonl").is_file())
-            self.assertTrue((root / "workspace" / "轨迹文件" / "a").is_dir())
-            self.assertTrue((root / "workspace" / "轨迹文件" / "b").is_dir())
+            self.assertEqual(sorted(calls), ["candidate-1", "candidate-2"])
+            self.assertEqual(result["candidateMapping"]["A"]["candidateId"], "candidate-1")
+            self.assertEqual(result["candidateMapping"]["B"]["candidateId"], "candidate-2")
+            self.assertEqual(result["candidateMapping"]["A"]["model"], "auto_model/urm")
+            self.assertEqual(result["candidateMapping"]["B"]["model"], "ark/urm-03")
+            self.assertEqual(result["modelPlan"]["A"]["model"], "auto_model/urm")
+            self.assertEqual(result["modelPlan"]["B"]["model"], "ark/urm-03")
+            self.assertTrue(result["pairExecution"]["modelOnlyDifference"])
+            self.assertEqual(result["pairExecution"]["promptSha256"], sha256_file(prompt))
+            self.assertTrue((root / "workspace" / "轨迹文件" / "a" / "candidate-1.jsonl").is_file())
+            self.assertTrue((root / "workspace" / "轨迹文件" / "b" / "candidate-2.jsonl").is_file())
+            with self.assertRaisesRegex(SologsbError, "固定为两个候选"):
+                side_runner.run_both(root, timeout=10, live=False, candidate_count=3)
+
+    def test_side_retry_restores_fixed_mapping_and_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_json(root / "monitor" / "state.json", {
+                "status": "b_staged",
+                "sides": {},
+                "candidateMapping": {},
+            })
+            side_runner._record_side_state(root, "B", {
+                "side": "B",
+                "candidateId": "candidate-2",
+                "candidateFolder": "source/candidates/candidate-2",
+                "workspacePath": str(root / "source" / "candidates" / "candidate-2"),
+                "completionOrder": 2,
+                "finishedAt": "2026-09-29T00:00:00Z",
+                "status": "staged",
+            })
+            state = json.loads((root / "monitor" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["candidateMapping"]["B"]["model"], "ark/urm-03")
+            self.assertEqual(state["modelPlan"]["A"]["model"], "auto_model/urm")
+            self.assertEqual(state["modelPlan"]["B"]["model"], "ark/urm-03")
 
     def test_candidate_uses_six_actual_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2150,7 +2441,7 @@ class ParallelRunTests(unittest.TestCase):
             (root / "source" / "origin").mkdir(parents=True)
             (root / "source" / "origin" / "README.md").write_text("base", encoding="utf-8")
             write_json(root / "monitor" / "state.json", {"status": "prompt_ready", "taskName": "gate"})
-            with self.assertRaisesRegex(SologsbError, "候选竞速"):
+            with self.assertRaisesRegex(SologsbError, "固定 A/B 模型对比"):
                 init_github_repo(root, dry_run=True)
 
     def test_github_repo_base_uses_platform_project_code(self) -> None:
@@ -3414,6 +3705,28 @@ class ContainerImageTests(unittest.TestCase):
                 self.assertEqual(reloaded.DEFAULT_IMAGE, dc.FIELDS["claude.image"][1])
             finally:
                 importlib.reload(side_runner)
+
+    def test_runtime_info_injects_and_verifies_the_expected_model(self) -> None:
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            captured.append(list(cmd))
+            output = b"2.1.197\nMODEL=ark/urm-03 CONTEXT=1000000 BASE=https://relay.example"
+            return subprocess.CompletedProcess(cmd, 0, output, b"")
+
+        with mock.patch.object(side_runner, "run", side_effect=fake_run):
+            info = side_runner._runtime_info("container-1", "s", "https://relay.example", "ark/urm-03")
+        self.assertEqual(info["model"], "ark/urm-03")
+        self.assertIn("ANTHROPIC_MODEL=ark/urm-03", captured[0])
+        self.assertIn("CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000", captured[0])
+
+        def wrong_model(cmd, **_kwargs):
+            output = b"2.1.197\nMODEL=auto_model/urm CONTEXT=1000000 BASE=https://relay.example"
+            return subprocess.CompletedProcess(cmd, 0, output, b"")
+
+        with mock.patch.object(side_runner, "run", side_effect=wrong_model):
+            with self.assertRaisesRegex(SologsbError, "不等于 ark/urm-03"):
+                side_runner._runtime_info("container-1", "s", "https://relay.example", "ark/urm-03")
 
     def test_start_container_does_not_depend_on_image_entrypoint_or_base_url(self) -> None:
         # 新镜像的 entrypoint 放宽了 /workspace 非空检查，并内置了自己的 ANTHROPIC_BASE_URL；

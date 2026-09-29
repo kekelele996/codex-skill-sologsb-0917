@@ -11,6 +11,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ def gsb_server() -> str:
         )
     return value
 AUDIT_HUMAN = SOLO_SCRIPTS / "audit-human-writing.py"
-EXPECTED_FINGERPRINT = "954e9db2d25afeb4"
+EXPECTED_FINGERPRINT = "9a410bc6e129339b"
 FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+\.(?:go|js|cjs|mjs|ts|tsx|jsx|py|java|kt|rs|svelte|vue|json|ya?ml|toml|md|sql|sh|css|html|xml)")
 ERROR_TOKEN = re.compile(r"(?:Error|ERROR|panic|PANIC|npm ERR!|failed|FAILED|报错|失败)[:：]?\s*[^\n，。；;]{1,120}")
 TEST_COUNT_PATTERN = re.compile(
@@ -456,6 +457,30 @@ DELIVERY_PROCESS_DIMENSION_RE = re.compile(
     r"(?:任务规划|规划能力|推理|思考过程|工具调用|ToolCall|TodoWrite|指令遵循|边界感|执行能力)", re.I
 )
 DELIVERY_VERIFY_RE = re.compile(r"(?:核对|验证|复跑|跑通|构建|启动|回读|通过|正常|一致)")
+# 5 分从严（1.7.6）：必须写明逐条核对，并点出至少一项隐性需求或边界处理的实测结果。
+DELIVERY_FULL_BASIS_RE = re.compile(r"(?:逐条核对|逐项核对|逐一核对|核对了)")
+DELIVERY_EDGE_RE = re.compile(
+    r"(?:边界|异常|隐性|空值|空输入|空列表|非法|越权|权限|重复提交|重复|并发|冲突|回滚|刷新后|重启后|超长|上限|下限|校验|分页末|零值)"
+)
+DELIVERY_FULL_MIN_PASSING = 2
+# 临时约束：只在 2026-09-29 生效，使用本地日期等值判断；次日自动失效，
+# 不需要运行期删除或继续保留任何阻断状态。2026-09-30 后可整体移除这段判断。
+TEMPORARY_DOUBLE_FULL_SCORE_DISCARD_DATE = "2026-09-29"
+DELIVERY_TEMP_DOUBLE_FULL_SCORE_ERROR = (
+    "2026-09-29 临时约束：按真实产物评定时 A、B 两侧不得同时为 5 分。"
+    "当前双侧满分，应丢弃这个任务，不得提交；只有本侧证据确实不支持 5 分时才能据实下调评分。"
+)
+# 代码实现（1.7.6）：内部评估项，写在 draft.delivery.<side>.quality，不进官方表单，
+# 但约束交付完整性分数上限。美观度不参与评估（页面识别易误判）。
+QUALITY_NOTE_MIN = 20
+QUALITY_NOTE_MAX = 120
+QUALITY_CODE_STRENGTH_RE = re.compile(
+    r"(?:分层|拆分|复用|校验|错误处理|异常处理|事务|幂等|类型|命名|边界|注释|测试|接口约定|状态管理|职责)"
+)
+QUALITY_CODE_ISSUE_RE = re.compile(
+    r"(?:硬编码|写死|假数据|mock|桩|吞掉|吞异常|重复代码|大段重复|死代码|未使用|绕过|跳过校验|SQL拼接|注入|明文|any类型|全局变量|魔法值)",
+    re.I,
+)
 DELIVERY_UNRESOLVED_RE = re.compile(r"(?:未实现|没有实现|无法运行|无法启动|报错|缺少|缺失|遗漏|虚假成功)")
 # 口语化的客观后果：“进不了”“没法验证”“返回404”也算写出了后果。
 DELIVERY_CONSEQUENCE_RE = re.compile(r"(?:没法|进不了|打不开|用不了|跑不起来|不能|返回\s*[45]\d\d|读回为空|丢失)")
@@ -495,6 +520,15 @@ DELIVERY_CHANGED_RE = re.compile(r"(?:修改了|改了|改动了|重写了|新�
 EDIT_TOOL_NAMES = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 DELIVERY_CLAIMED_RE = re.compile(r"(?:宣称|声称|称已|自称|回复说|总结里说|最终回复)")
 DELIVERY_ACTUAL_RE = re.compile(r"(?:实际|diff|提交里|代码里|改动里|并未|没有改)", re.I)
+
+
+def _local_today() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d")
+
+
+def _temporary_double_full_score_discard_active(today: str | None = None) -> bool:
+    """临时约束只覆盖生效当天的本地日期，过期后自动失效。"""
+    return (today or _local_today()) == TEMPORARY_DOUBLE_FULL_SCORE_DISCARD_DATE
 
 
 def _keychain_secret(service: str) -> str:
@@ -1082,6 +1116,16 @@ def _is_runnability_check(item: dict[str, Any]) -> bool:
     return bool(DELIVERY_RUNNABILITY_RE.search(text))
 
 
+def _is_functional_check(item: dict[str, Any]) -> bool:
+    """功能级证据：接口 probe、页面录屏，或不属于构建/启动类的真实复核命令。"""
+    artifact = item.get("artifact") or {}
+    if isinstance(artifact, dict) and artifact.get("probe"):
+        return True
+    if _is_recording(item):
+        return _recording_mode(item) == "web"
+    return not _is_runnability_check(item)
+
+
 def _evidence_failed(item: dict[str, Any]) -> bool:
     artifact = item.get("artifact") or {}
     if isinstance(artifact, dict) and ("ok" in artifact or "observedFailure" in artifact):
@@ -1162,6 +1206,20 @@ def delivery_trace_consistency_errors(
             )
     if score == 5 and any(_evidence_failed(item) for item in cited):
         errors.append(f"{label}给 5 分却引用了本侧失败证据，分数与证据对立")
+    if score == 5:
+        passing = [item for item in cited if item.get("type") == "artifact" and not _evidence_failed(item)]
+        if len({str(item.get("id")) for item in passing}) < DELIVERY_FULL_MIN_PASSING:
+            errors.append(
+                f"{label}给 5 分至少引用 {DELIVERY_FULL_MIN_PASSING} 条本侧通过的真实复核证据；"
+                "只有一条通过证据时按 4 分处理"
+            )
+        if not any(_is_runnability_check(item) for item in passing):
+            errors.append(f"{label}给 5 分必须引用一条本侧构建或启动通过的证据，证明“一次性跑通”")
+        if not any(_is_functional_check(item) for item in passing):
+            errors.append(
+                f"{label}给 5 分必须引用一条本侧功能级通过证据（接口回读、probe 探活或页面录屏），"
+                "只有构建和启动通过时最高 4 分"
+            )
 
     # 与 GSB 理由里本侧的产物结论对立。
     negative_artifact = [
@@ -1183,10 +1241,66 @@ def delivery_trace_consistency_errors(
     return errors
 
 
+def _quality_score(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 5:
+        return 0
+    return value
+
+
+def delivery_quality_errors(
+    side: str,
+    entry: dict[str, Any],
+    delivery_score: int,
+    evidence_doc: dict[str, Any],
+) -> tuple[list[str], dict[str, int]]:
+    """代码实现评估：每侧必填，只看本侧 diff 与文件；分数约束交付完整性上限。美观度不参与。"""
+    errors: list[str] = []
+    scores: dict[str, int] = {}
+    quality = entry.get("quality")
+    code = quality.get("code") if isinstance(quality, dict) and isinstance(quality.get("code"), dict) else None
+    if code is None:
+        return [f"draft.delivery.{side}.quality.code 必填：需要代码实现评分与说明"], scores
+    if isinstance(quality, dict) and "aesthetics" in quality:
+        errors.append(f"draft.delivery.{side}.quality.aesthetics 不再使用：美观度不参与评估，删除该字段")
+    trace_text = _side_trace_text(evidence_doc, side)
+    score = _quality_score(code.get("score"))
+    note = str(code.get("note") or "").strip()
+    if not score:
+        errors.append(f"{side}-代码实现必须是 1~5 的整数，当前 {code.get('score')!r}")
+    if not QUALITY_NOTE_MIN <= text_non_whitespace_len(note) <= QUALITY_NOTE_MAX:
+        errors.append(f"{side}-代码实现说明必须为 {QUALITY_NOTE_MIN}–{QUALITY_NOTE_MAX} 个非空白字符")
+    files = sorted(set(FILE_TOKEN.findall(note)))
+    if not files:
+        errors.append(f"{side}-代码实现说明必须点名至少一个本侧改动的文件")
+    elif trace_text:
+        for token in files:
+            if token not in trace_text and Path(token).name not in trace_text:
+                errors.append(f"{side}-代码实现说明提到的文件 {token} 在本侧轨迹中不存在")
+    issue = QUALITY_CODE_ISSUE_RE.search(note)
+    if score == 5:
+        if issue:
+            errors.append(f"{side}-代码实现给 5 分却写了问题“{issue.group(0)}”，分数与说明矛盾")
+        if len(set(QUALITY_CODE_STRENGTH_RE.findall(note))) < 2:
+            errors.append(f"{side}-代码实现给 5 分必须写出至少两项具体长处（如分层、校验、错误处理、事务），否则按 4 分处理")
+    elif score and score <= 3 and not issue:
+        errors.append(f"{side}-代码实现给 {score} 分必须写出具体问题，例如硬编码、吞异常、大段重复、桩实现")
+    if not score:
+        return errors, scores
+    scores["code"] = score
+    # 代码实现约束交付完整性上限。
+    if delivery_score == 5 and score < 4:
+        errors.append(f"{side}-交付完整性给 5 分，但代码实现只有 {score} 分；代码实现低于 4 分时交付完整性最高 4 分")
+    if score <= 2 and delivery_score > 3:
+        errors.append(f"{side}-代码实现 {score} 分（桩实现、假数据或硬编码冒充逻辑），交付完整性最高 3 分")
+    return errors, scores
+
+
 def validate_delivery(
     draft: dict[str, Any],
     evidence_doc: dict[str, Any],
     reason: str,
+    *,
+    today: str | None = None,
 ) -> dict[str, Any]:
     """Validate A/B 交付完整性打分与描述（官方字段 a/b_score_delivery、a/b_desc_delivery）。
 
@@ -1205,6 +1319,7 @@ def validate_delivery(
     }
     scores: dict[str, int] = {}
     descriptions: dict[str, str] = {}
+    quality_scores: dict[str, dict[str, int]] = {}
     for side in ("A", "B"):
         label = _delivery_label(side)
         entry = delivery.get(side)
@@ -1234,6 +1349,13 @@ def validate_delivery(
         if score == 5:
             if not DELIVERY_VERIFY_RE.search(description):
                 errors.append(f"{label}给 5 分必须写出核对依据：逐条核对了哪些需求、跑过什么验证及结论")
+            elif not DELIVERY_FULL_BASIS_RE.search(description):
+                errors.append(f"{label}给 5 分必须写明“逐条核对了”哪些需求，只写“通过”“正常”按 4 分处理")
+            if not DELIVERY_EDGE_RE.search(description):
+                errors.append(
+                    f"{label}给 5 分必须写出至少一项隐性需求或边界处理的实测结果"
+                    "（如非法输入、重复提交、权限、刷新后状态）；找不到就按 4 分处理"
+                )
             unresolved = DELIVERY_UNRESOLVED_RE.search(description)
             if unresolved:
                 errors.append(f"{label}给 5 分却写了未解决问题“{unresolved.group(0)}”，分数与描述矛盾")
@@ -1265,6 +1387,8 @@ def validate_delivery(
         errors.extend(
             delivery_trace_consistency_errors(side, score, description, ids, draft, evidence_doc)
         )
+        quality_errors, quality_scores[side] = delivery_quality_errors(side, entry, score, evidence_doc)
+        errors.extend(quality_errors)
         copied = longest_common_fragment(description, reason)
         if copied >= DELIVERY_REASON_COPY_FRAGMENT:
             errors.append(
@@ -1291,8 +1415,24 @@ def validate_delivery(
             errors.append("GSB 结论为 B 更好，但 B 的交付完整性低于 A，结论与打分对立")
         if verdict == "Same" and abs(scores["A"] - scores["B"]) >= 2:
             errors.append("GSB 结论为 Same，但两侧交付完整性相差 2 分以上，结论与打分对立")
+        # 双满分从严（1.7.6）：分出胜负说明负方至少有一处可指认的差距，负方最高 4 分。
+        if scores["A"] == 5 and scores["B"] == 5:
+            if _temporary_double_full_score_discard_active(today):
+                errors.append(DELIVERY_TEMP_DOUBLE_FULL_SCORE_ERROR)
+            elif verdict in {"A 更好", "B 更好"}:
+                loser = "B" if verdict == "A 更好" else "A"
+                errors.append(
+                    f"两侧交付完整性都给 5 分，但结论为 {verdict}；负方 {loser} 最高 4 分，"
+                    "描述里写清它比胜方少了哪一项核对或边界处理。两侧产物确实都无缺口时结论应为 Same"
+                )
+            else:
+                warnings.append("两侧都给 5 分属于少数情况，提交前逐条复查两侧是否真有隐性需求或边界处理的实测结果")
+    if len(quality_scores) == 2 and verdict in {"A 更好", "B 更好"}:
+        loser = "B" if verdict == "A 更好" else "A"
+        if quality_scores["A"].get("code") == 5 and quality_scores["B"].get("code") == 5:
+            errors.append(f"两侧代码实现都给 5 分，但结论为 {verdict}；负方 {loser} 的代码实现最高 4 分，写清它差在哪里")
     errors = list(dict.fromkeys(errors))
-    return {"ok": not errors, "errors": errors, "warnings": warnings, "scores": scores}
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "scores": scores, "quality": quality_scores}
 
 
 def validate_draft(draft: dict[str, Any], task_root: Path, *, review_path: Path) -> dict[str, Any]:
@@ -1501,6 +1641,11 @@ def build_values(task_root: Path, draft: dict[str, Any], schema: dict[str, Any])
         "gsb_reason": draft.get("reason", ""),
     }
     allowed = {str(field.get("field_key")): field for field in schema.get("fields") or []}
+    # 2026-09-29 官方 schema 新增两侧模型名称必填项；从原生运行状态读取实际模型。
+    if "x_a_model_name" in allowed:
+        values["x_a_model_name"] = str(side_a.get("model") or "")
+    if "x_b_model_name" in allowed:
+        values["x_b_model_name"] = str(side_b.get("model") or "")
     unknown = set(values) - set(allowed)
     if unknown:
         raise SologsbError(f"内部值映射包含未知字段: {sorted(unknown)}")

@@ -39,6 +39,245 @@ PROMPT_MAX_SEMICOLONS = 2
 PROMPT_TEMPLATE_TAIL_RE = re.compile(r"(?:刷新|并发|重复)[^。！？]{0,24}(?:一致|不乱|只生效一次|仍能读回)[。！？]?$")
 PROMPT_TEMPLATE_WORD_RE = re.compile(r"(?:整次|任一步失败全部回滚|保持不动)")
 
+# 2026-09-29 G16 加固：平台在本日把“在既有模块里加一层”的题面批量判为中等。
+# 光靠自由作文式的难度论证挡不住，所以难度论证必须回指题面原句和真实历史样本。
+PLATFORM_SIGNAL_KEYS = ("multiModule", "designTradeoff", "complexConcern")
+PLATFORM_SIGNAL_LABELS = {
+    "multiModule": "多模块整合",
+    "designTradeoff": "关键设计取舍",
+    "complexConcern": "复杂技术关注点",
+}
+# 平台列出的“直接判为中等”形态里最常见的一种：在既有页面上补一个视图/清单/预览/字段。
+# 这是摩擦规则不是判难器：命中只要求补写 mediumShapeDefense，没命中也不代表题面就够难。
+# 2026-09-29 在真实语料上回归：7 条 G16 废弃命中 3 条、40 条通过命中 10 条，
+# 所以它只用来触发一次强制自辩，不能当作难度分类器。
+MEDIUM_SHAPE_VERB = r"(?:新增|补一个|补上|补一份|补一套|补|加一个|增加|加一套|做一个|做一套)"
+MEDIUM_SHAPE_NOUN = (
+    r"(?:视图|页面|面板|弹窗|预览|清单|列表|统计|导出|字段|按钮|标签|卡片|入口|台账|"
+    r"工作台|对照台|看板|报表|图表|记录|模式|区|栏|包|回合|批注|意见|修订|版本|流程|规则)"
+)
+MEDIUM_SHAPE_RE = re.compile(
+    r"(?:" + MEDIUM_SHAPE_VERB + r"[^。；！？]{0,14}(?:" + MEDIUM_SHAPE_NOUN + r"))"
+    r"|(?:(?:" + MEDIUM_SHAPE_NOUN + r")[^。；！？]{0,10}" + MEDIUM_SHAPE_VERB + r")"
+)
+# 这些词只用于给难度论证降噪提示，不单独作为阻断依据：真实语料里通过与被废弃的题面都会命中。
+PROMPT_SIGNAL_HINTS = {
+    "concurrency": re.compile(r"(并发|同时(编辑|保存|提交|校对)|多标签|抢占|接管|交接|竞态|分叉|签出|冲突)"),
+    "invalidation": re.compile(r"(失效|过期|作废|退回待|重新确认|级联|连带|不再有效|重算)"),
+    "atomicity": re.compile(r"(原子|整批|一起写入|回滚|补偿|幂等|重复(提交|导入)不|去重|不新增)"),
+    "migration": re.compile(r"(迁移|升级|旧数据|旧草稿|旧稿|兼容|版本链|快照|历史版本)"),
+    "permission": re.compile(r"(权限|角色|越权|租户|授权|审批|审计)"),
+    "recovery": re.compile(r"(离线|断网|恢复|重试|降级|超时|异常|失败后|重连|崩溃|白屏)"),
+    "capacity": re.compile(r"(性能|容量|限流|吞吐|大批量|超长|内存|耗时)"),
+}
+
+# 2026-09-29 G16 二次加固：之前的 platformSignals/crossObjectInvariant 仍可被
+# “审阅回合、批注去重、冲突提示、冻结快照修订”这类多步工作流绕过。平台实测把
+# 这种题判为中等，所以难度论证还必须在题面原句里出现真正的实质复杂度信号。
+SUBSTANTIVE_COMPLEXITY_PATTERNS = {
+    "concurrency": re.compile(r"(并发|同时(?:编辑|保存|提交|修改)|多标签.{0,12}(?:覆盖|冲突)|竞态|抢占|租约|加锁)"),
+    "failure-recovery": re.compile(r"(失败后.{0,12}(?:恢复|重试|回滚|补偿)|崩溃.{0,12}(?:恢复|找回)|异常.{0,12}(?:恢复|补偿)|断网.{0,12}(?:恢复|重试))"),
+    "migration": re.compile(r"((?:旧数据|旧稿|历史数据|已有数据).{0,12}(?:迁移|升级|兼容|回填)|(?:迁移|升级).{0,12}(?:回退|兼容|历史数据))"),
+    "permission-boundary": re.compile(r"(越权|租户|角色.{0,8}(?:权限|边界)|权限.{0,8}(?:拒绝|隔离))"),
+    "capacity": re.compile(r"((?:大批量|超长|超时|容量|性能|限流).{0,12}(?:拒绝|降级|排队|分批)|(?:拒绝|降级|排队|分批).{0,12}(?:大批量|超长|容量))"),
+    "offline-merge": re.compile(r"((?:离线|断网).{0,15}(?:合并|同步|恢复|冲突)|(?:网络恢复|重新连接).{0,15}(?:合并|同步|冲突))"),
+    "state-invalidation": re.compile(r"((?:一变|变化|改动|修改|更新).{0,12}(?:失效|重算|重新确认|作废)|(?:失效|过期).{0,12}(?:拒绝|重新确认|重算))"),
+    "cross-system-reconciliation": re.compile(r"(对账|跨系统|两套.{0,8}(?:一致|冲突)|外部系统.{0,12}(?:返回|同步|不一致))"),
+}
+
+
+def _history_records(history_path: Path | None) -> list[dict[str, Any]]:
+    if history_path is None or not history_path.is_file():
+        return []
+    data = read_json(history_path, [])
+    if isinstance(data, list):
+        records = data
+    elif isinstance(data, dict):
+        records = data.get("items") or data.get("prompts") or []
+    else:
+        records = []
+    return [item for item in records if isinstance(item, dict)]
+
+
+def _history_discard_kind(item: dict[str, Any]) -> str:
+    rule = str(item.get("qcHitRule") or item.get("qc_hit_rule") or "").strip().upper()
+    if rule:
+        return rule
+    status = str(item.get("status") or item.get("status_label") or "")
+    if "废弃" in status or "DISCARD" in status.upper():
+        return "DISCARDED"
+    return ""
+
+
+def _history_passed(item: dict[str, Any]) -> bool:
+    status = str(item.get("status") or item.get("status_label") or "")
+    return "质检通过" in status or status.upper() in {"QC_PASSED", "PASSED"}
+
+
+def difficulty_signal_hints(prompt_text: str) -> dict[str, Any]:
+    """记录题面里能识别到的复杂信号，只作提示与留痕，不参与判定。"""
+    return {
+        "families": sorted(
+            name for name, pattern in PROMPT_SIGNAL_HINTS.items() if pattern.search(prompt_text)
+        ),
+        "mediumShapeMatched": bool(MEDIUM_SHAPE_RE.search(prompt_text)),
+    }
+
+
+def validate_difficulty_evidence(
+    data: dict[str, Any],
+    *,
+    prompt_text: str,
+    history_path: Path | None,
+    difficulty: str = "困难",
+) -> list[str]:
+    """把难度论证钉在题面原句和真实历史样本上（2026-09-29 G16 加固）。"""
+    errors: list[str] = []
+    clean_prompt = _normalize(prompt_text)
+    if not clean_prompt:
+        return ["难度证据校验缺少题面原文，无法核对难度论证是否落在题面上"]
+    if history_path is None or not Path(history_path).is_file():
+        errors.append(
+            "缺少历史 GSB 缓存，无法核对 corpusEvidence；先运行 "
+            "submission/scripts/prompt_dedup.py --task-root ROOT 再安装提示词"
+        )
+
+    signals = data.get("platformSignals")
+    if not isinstance(signals, dict):
+        errors.append(
+            "难度论证缺少 platformSignals：逐项回答平台 G16 的多模块整合、关键设计取舍、"
+            "复杂技术关注点，并给出题面原句和缺失时的可见后果"
+        )
+        signals = {}
+    for key in PLATFORM_SIGNAL_KEYS:
+        label = PLATFORM_SIGNAL_LABELS[key]
+        entry = signals.get(key)
+        if not isinstance(entry, dict):
+            errors.append(f"platformSignals 缺少 {key}（{label}）")
+            continue
+        if not _nonempty_text(entry.get("answer"), 20):
+            errors.append(f"platformSignals.{key}.answer 至少 20 字")
+        quote = _normalize(str(entry.get("promptQuote") or ""))
+        if len(quote) < 12:
+            errors.append(f"platformSignals.{key}.promptQuote 至少引用 12 字题面原句")
+        elif quote not in clean_prompt:
+            errors.append(
+                f"platformSignals.{key}.promptQuote 不是题面原句，无法核对：{entry.get('promptQuote')}"
+            )
+        if not _nonempty_text(entry.get("ifViolated"), 12):
+            errors.append(f"platformSignals.{key}.ifViolated 至少 12 字，写清缺了它会出现什么可见错误")
+
+    invariant = data.get("crossObjectInvariant")
+    if not isinstance(invariant, dict):
+        errors.append(
+            "难度论证缺少 crossObjectInvariant：至少两个业务对象名必须同时出现在题面里，"
+            "并写清它们必须守住的不变量和背离时的可见后果"
+        )
+        invariant = {}
+    objects = [str(item).strip() for item in (invariant.get("objects") or []) if str(item).strip()]
+    if len(objects) < 2:
+        errors.append("crossObjectInvariant.objects 至少列出 2 个业务对象")
+    for name in objects:
+        if _normalize(name) not in clean_prompt:
+            errors.append(f"crossObjectInvariant.objects 里的“{name}”没有出现在题面原文里")
+    if not _nonempty_text(invariant.get("invariant"), 20):
+        errors.append("crossObjectInvariant.invariant 至少 20 字")
+    if not _nonempty_text(invariant.get("divergenceFailure"), 12):
+        errors.append("crossObjectInvariant.divergenceFailure 至少 12 字，写清两者不一致时的可见后果")
+
+    corpus = data.get("corpusEvidence")
+    if not isinstance(corpus, dict):
+        errors.append(
+            "难度论证缺少 corpusEvidence：必须核对真实历史语料，写出最近的 G16 废弃样本、"
+            "最近的通过样本，以及本题面与它们的差别"
+        )
+        corpus = {}
+    records = _history_records(history_path)
+    by_id = {int(item.get("id") or 0): item for item in records}
+    if not records and history_path is not None and Path(history_path).is_file():
+        errors.append("历史 GSB 缓存为空，无法证明 corpusEvidence 引用的是真实样本")
+    discarded_id = corpus.get("nearestDiscardedId")
+    try:
+        discarded_id_int = int(discarded_id or 0)
+    except (TypeError, ValueError):
+        discarded_id_int = 0
+    if discarded_id_int <= 0:
+        errors.append("corpusEvidence.nearestDiscardedId 必须是历史 G16 废弃样本的真实编号")
+    elif records:
+        item = by_id.get(discarded_id_int)
+        if item is None:
+            errors.append(f"corpusEvidence.nearestDiscardedId={discarded_id_int} 在历史缓存里不存在")
+        elif _history_discard_kind(item) not in {"G16", "DISCARDED"}:
+            errors.append(
+                f"corpusEvidence.nearestDiscardedId={discarded_id_int} 不是被废弃的样本，"
+                "必须挑一条真实的 G16 难度废弃记录"
+            )
+    if not _nonempty_text(corpus.get("differenceFromDiscarded"), 20):
+        errors.append("corpusEvidence.differenceFromDiscarded 至少 20 字，逐点写清与废弃样本的差别")
+    passed_id = corpus.get("nearestPassedId")
+    try:
+        passed_id_int = int(passed_id or 0)
+    except (TypeError, ValueError):
+        passed_id_int = 0
+    if passed_id_int <= 0:
+        errors.append("corpusEvidence.nearestPassedId 必须是历史质检通过样本的真实编号")
+    elif records:
+        item = by_id.get(passed_id_int)
+        if item is None:
+            errors.append(f"corpusEvidence.nearestPassedId={passed_id_int} 在历史缓存里不存在")
+        elif not _history_passed(item):
+            errors.append(f"corpusEvidence.nearestPassedId={passed_id_int} 不是质检通过的样本")
+    if not _nonempty_text(corpus.get("borrowedComplexity"), 20):
+        errors.append("corpusEvidence.borrowedComplexity 至少 20 字，说明本题借鉴了通过样本里的哪类复杂度")
+
+    substantive = data.get("substantiveComplexity")
+    if not isinstance(substantive, dict):
+        errors.append(
+            "难度论证缺少 substantiveComplexity：题面必须出现并发、失效重算、失败恢复、迁移兼容、"
+            "权限边界、容量约束、离线合并或跨系统对账等实质复杂度信号"
+        )
+        substantive = {}
+    kinds = [str(item).strip() for item in (substantive.get("kinds") or []) if str(item).strip()]
+    if not kinds:
+        errors.append("substantiveComplexity.kinds 至少提供一项实质复杂度类型")
+    unknown = sorted(set(kinds) - set(SUBSTANTIVE_COMPLEXITY_PATTERNS))
+    if unknown:
+        errors.append("substantiveComplexity.kinds 含未知类型: " + "、".join(unknown))
+    supported = [
+        kind for kind in kinds
+        if kind in SUBSTANTIVE_COMPLEXITY_PATTERNS and SUBSTANTIVE_COMPLEXITY_PATTERNS[kind].search(prompt_text)
+    ]
+    if not supported:
+        errors.append(
+            "substantiveComplexity 没有任何类型能由题面原句支撑；审阅回合、去重、冲突提示和快照修订"
+            "属于多步实现，不能单独作为困难或地狱信号"
+        )
+    if difficulty == "地狱" and len(supported) < 2:
+        errors.append("地狱题至少需要两类由题面原句支撑的实质复杂度信号")
+    quote = str(substantive.get("promptQuote") or "").strip()
+    if len(_normalize(quote)) < 12:
+        errors.append("substantiveComplexity.promptQuote 至少引用 12 字题面原句")
+    elif _normalize(quote) not in clean_prompt:
+        errors.append("substantiveComplexity.promptQuote 不是题面原句")
+    elif not any(
+        pattern.search(quote)
+        for kind, pattern in SUBSTANTIVE_COMPLEXITY_PATTERNS.items()
+        if kind in kinds
+    ):
+        errors.append("substantiveComplexity.promptQuote 没有体现所声明的实质复杂度")
+    if not _nonempty_text(substantive.get("whyHard"), 20):
+        errors.append("substantiveComplexity.whyHard 至少 20 字")
+    if not _nonempty_text(substantive.get("visibleFailure"), 12):
+        errors.append("substantiveComplexity.visibleFailure 至少 12 字，写清实现错误时的可见后果")
+
+    if MEDIUM_SHAPE_RE.search(prompt_text):
+        if not _nonempty_text(data.get("mediumShapeDefense"), 20):
+            errors.append(
+                "题面命中平台“直接判为中等”的常见形态（在既有模块补视图/清单/预览/字段…），"
+                "必须在 mediumShapeDefense 里写清它不是只加一层，并给出题面依据"
+            )
+    return errors
+
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", "", text).strip()
@@ -83,12 +322,156 @@ def check_history(candidate: str, history_path: Path | None) -> list[str]:
     return errors
 
 
+TECHNICAL_CONCERN_KINDS = {
+    "concurrency",
+    "idempotency",
+    "transaction",
+    "permission",
+    "compatibility",
+    "migration",
+    "performance",
+    "failure-recovery",
+    "state-machine",
+    "security",
+    "offline-sync",
+}
+
+# 2026-09-29 G17：三项信号全部通过也不再自动等于“地狱”。
+# 平台会把“多模块 + 事务/幂等 + 确定性排布”判回困难，只有额外证明题面存在
+# 开放方案判断、隐蔽约束、架构级取舍或多步深水调试，才允许填写地狱。
+HELL_SIGNAL_KINDS = {
+    "open-ended",
+    "hidden-constraints",
+    "architecture-level",
+    "multi-step-debugging",
+    "cross-system-recovery",
+}
+
+
+def _nonempty_text(value: Any, minimum: int = 12) -> bool:
+    return len(_normalize(str(value or ""))) >= minimum
+
+
+def validate_difficulty_review(
+    path: Path,
+    difficulty: str,
+    *,
+    prompt_text: str = "",
+    history_path: Path | None = None,
+) -> dict[str, Any]:
+    """Validate the structured difficulty proof required by platform G16.
+
+    ``困难`` needs at least two of the three platform signals, with design
+    tradeoff or a complex technical concern among them. ``地狱`` needs all
+    three. This deliberately rejects multi-file CRUD and ordinary validation.
+    """
+    if not path.is_file():
+        return {"ok": False, "errors": [f"缺少困难/地狱难度论证文件: {path}"]}
+    try:
+        data = read_json(path, {})
+    except Exception as exc:
+        return {"ok": False, "errors": [f"难度论证文件不可解析: {exc}"]}
+    if not isinstance(data, dict):
+        return {"ok": False, "errors": ["难度论证文件顶层必须是 JSON 对象"]}
+
+    errors: list[str] = []
+    if data.get("schemaVersion") != 1:
+        errors.append("难度论证 schemaVersion 必须是 1")
+    if str(data.get("difficulty") or "") != difficulty:
+        errors.append(f"难度论证 difficulty 必须与命令行一致: {difficulty}")
+
+    signals = data.get("signals")
+    if not isinstance(signals, dict):
+        errors.append("难度论证缺少 signals 对象")
+        signals = {}
+
+    multi = signals.get("multiModule") if isinstance(signals.get("multiModule"), dict) else {}
+    tradeoff = signals.get("designTradeoff") if isinstance(signals.get("designTradeoff"), dict) else {}
+    concern = signals.get("complexConcern") if isinstance(signals.get("complexConcern"), dict) else {}
+    passed = {
+        "multiModule": bool(multi.get("passed")),
+        "designTradeoff": bool(tradeoff.get("passed")),
+        "complexConcern": bool(concern.get("passed")),
+    }
+
+    modules = multi.get("modules")
+    if passed["multiModule"]:
+        if not isinstance(modules, list) or len([item for item in modules if str(item).strip()]) < 3:
+            errors.append("multiModule 通过时 modules 至少列出 3 个已有业务模块或边界上下文")
+        if not _nonempty_text(multi.get("crossModuleInvariant"), 20):
+            errors.append("multiModule 缺少至少 20 字的 crossModuleInvariant")
+        if not _nonempty_text(multi.get("evidence"), 20):
+            errors.append("multiModule 缺少至少 20 字的 evidence")
+
+    if passed["designTradeoff"]:
+        for key in ("conflict", "decision", "whyNotRoutine", "evidence"):
+            if not _nonempty_text(tradeoff.get(key), 20):
+                errors.append(f"designTradeoff 缺少至少 20 字的 {key}")
+
+    if passed["complexConcern"]:
+        kinds = concern.get("kinds")
+        if not isinstance(kinds, list) or not kinds:
+            errors.append("complexConcern 通过时 kinds 必须是非空数组")
+        else:
+            unknown = sorted({str(item) for item in kinds if str(item) not in TECHNICAL_CONCERN_KINDS})
+            if unknown:
+                errors.append("complexConcern.kinds 含未知类型: " + "、".join(unknown))
+        for key in ("technicalRisk", "observableFailure", "evidence"):
+            if not _nonempty_text(concern.get(key), 20):
+                errors.append(f"complexConcern 缺少至少 20 字的 {key}")
+
+    if data.get("routineOnly") is not False:
+        errors.append("routineOnly 必须明确为 false；常规 CRUD、单模块字段或表单校验不能标困难")
+    passed_count = sum(1 for value in passed.values() if value)
+    if passed_count < 2:
+        errors.append("困难/地狱题至少满足多模块整合、关键设计取舍、复杂技术关注点中的两项")
+    if not (passed["designTradeoff"] or passed["complexConcern"]):
+        errors.append("至少满足关键设计取舍或复杂技术关注点之一，不能只靠多模块堆文件")
+    if difficulty == "地狱" and passed_count < 3:
+        errors.append("地狱题必须同时满足三项难度特征")
+    if difficulty == "地狱":
+        hell = data.get("hellSignal") if isinstance(data.get("hellSignal"), dict) else {}
+        if hell.get("passed") is not True:
+            errors.append("地狱题还必须提供 hellSignal.passed=true，证明题目存在开放方案判断、隐蔽约束、架构级取舍或多步深水调试")
+        kinds = hell.get("kinds")
+        if not isinstance(kinds, list) or not kinds:
+            errors.append("hellSignal.kinds 必须是非空数组")
+        else:
+            unknown = sorted({str(item) for item in kinds if str(item) not in HELL_SIGNAL_KINDS})
+            if unknown:
+                errors.append("hellSignal.kinds 含未知类型: " + "、".join(unknown))
+        for key in ("reason", "evidence"):
+            if not _nonempty_text(hell.get(key), 20):
+                errors.append(f"hellSignal 缺少至少 20 字的 {key}")
+    if prompt_text:
+        errors.extend(
+            validate_difficulty_evidence(
+                data,
+                prompt_text=prompt_text,
+                history_path=history_path,
+                difficulty=difficulty,
+            )
+        )
+    if str(data.get("verdict") or "") != difficulty:
+        errors.append(f"难度论证 verdict 必须是 {difficulty}")
+    if not str(data.get("reviewedBy") or "").strip():
+        errors.append("难度论证缺少 reviewedBy")
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "passed": passed,
+        "signalsPassed": passed_count,
+    }
+
+
 def validate_candidate(
     candidate_path: Path,
     review_path: Path,
     *,
     task_type: str,
     difficulty: str,
+    difficulty_review_path: Path | None = None,
     history_path: Path | None = None,
     allow_over_170: bool = False,
 ) -> dict[str, Any]:
@@ -104,7 +487,13 @@ def validate_candidate(
         raise SologsbError(f"ra-人话审核记录不存在: {review_path}")
     text = candidate_path.read_text(encoding="utf-8")
     clean = text.strip()
-    errors: list[str] = []
+    difficulty_review = validate_difficulty_review(
+        difficulty_review_path or Path("__missing_difficulty_review__.json"),
+        difficulty,
+        prompt_text=clean,
+        history_path=history_path,
+    )
+    errors: list[str] = list(difficulty_review.get("errors") or [])
     if not clean:
         errors.append("提示词为空")
     if len(clean) > 240:
@@ -120,6 +509,13 @@ def validate_candidate(
     if ROUND_REFERENCE.search(clean):
         errors.append("包含轮次表述")
     warnings: list[str] = []
+    hints = difficulty_signal_hints(clean)
+    if hints["families"]:
+        warnings.append("题面识别到复杂信号：" + "、".join(hints["families"]))
+    else:
+        warnings.append("题面没有识别到并发/失效/原子性/迁移/权限/恢复/容量类复杂信号，复核时重点看这一项")
+    if hints["mediumShapeMatched"]:
+        warnings.append("题面命中“在既有模块补一层”的中等形态，必须已填写 mediumShapeDefense")
     rigid = PROMPT_RIGID_RE.findall(clean)
     if len(rigid) > PROMPT_MAX_RIGID:
         errors.append(
@@ -175,7 +571,20 @@ def validate_candidate(
         "textSha256": sha256_bytes(text.encode("utf-8")),
         "errors": errors,
         "warnings": warnings,
+        "difficultyReview": difficulty_review,
     }
+
+
+DIFFICULTY_TEMPLATE = Path(__file__).resolve().parents[1] / "references" / "difficulty-review-template.json"
+
+
+def ensure_difficulty_template(path: Path) -> bool:
+    """难度论证缺失时铺一份 1.7.9 模板，避免出题人凭记忆漏填回指字段。"""
+    if path.is_file() or not DIFFICULTY_TEMPLATE.is_file():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_copy(DIFFICULTY_TEMPLATE, path)
+    return True
 
 
 def install_prompt(
@@ -185,14 +594,17 @@ def install_prompt(
     review_path: Path,
     task_type: str,
     difficulty: str,
+    difficulty_review_path: Path,
     history_path: Path | None = None,
     allow_over_170: bool = False,
 ) -> dict[str, Any]:
+    scaffolded = ensure_difficulty_template(difficulty_review_path)
     result = validate_candidate(
         candidate_path,
         review_path,
         task_type=task_type,
         difficulty=difficulty,
+        difficulty_review_path=difficulty_review_path,
         history_path=history_path,
         allow_over_170=allow_over_170,
     )
@@ -200,6 +612,8 @@ def install_prompt(
     review_dir.mkdir(parents=True, exist_ok=True)
     write_json(review_dir / "validation.json", result)
     atomic_copy(review_path, review_dir / "ra-renhua-review.json")
+    if difficulty_review_path.is_file():
+        atomic_copy(difficulty_review_path, review_dir / "difficulty-review.json")
     if not result["ok"]:
         raise SologsbError("提示词门禁未通过:\n- " + "\n- ".join(result["errors"]))
     destination = task_root / "workspace" / "评审文件" / "提示词.md"
@@ -214,7 +628,13 @@ def install_prompt(
             "difficulty": difficulty,
             "promptPath": str(destination),
             "promptSha256": result["textSha256"],
+            "difficultyReviewPath": str(review_dir / "difficulty-review.json"),
+            "difficultySignalsPassed": (result.get("difficultyReview") or {}).get("signalsPassed"),
         }
     )
     save_state(task_root, state)
-    return {**result, "promptPath": str(destination)}
+    return {
+        **result,
+        "promptPath": str(destination),
+        "difficultyTemplateScaffolded": scaffolded,
+    }

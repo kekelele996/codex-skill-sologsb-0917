@@ -9,14 +9,26 @@
       "description": "迁移脚本database/init.sql里的旧约束没有移除，升级后接口返回缺少版本信息。版本相关需求没有做完，指标读写本身可以正常运行。",
       "evidenceIds": [
         "A-artifact-check-01"
-      ]
+      ],
+      "quality": {
+        "code": {
+          "score": 3,
+          "note": "database/init.sql保留了旧约束，迁移与接口层的版本字段各自硬编码，没有统一来源。"
+        }
+      }
     },
     "B": {
       "score": 2,
       "description": "新增、编辑和重命名三处入口都没有接入指标配置，保存后页面读回的仍是旧值，题目要求的主要功能没有达成。",
       "evidenceIds": [
         "B-artifact-check-01"
-      ]
+      ],
+      "quality": {
+        "code": {
+          "score": 2,
+          "note": "指标配置的保存接口直接返回写死的成功结果，没有写入存储，metrics.service.ts里只有桩实现。"
+        }
+      }
     }
   },
   "claims": [
