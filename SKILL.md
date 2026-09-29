@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.7.4`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.7.4`
-- 精确提交号：运行 `git rev-parse v1.7.4` 获取。
+- 全局版本号：`1.7.5`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.7.5`
+- 精确提交号：运行 `git rev-parse v1.7.5` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -53,6 +53,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 所有候选必须使用同一个 UTF-8 提示词文件，发送字节逐字一致。
 - 只允许 `困难`、`地狱`；任务类型不得选择 `代码理解`。
+- 困难、地狱题必须先通过 `references/difficulty-gate.md` 的 G16 难度证明：至少两个独立困难轴、至少一个强困难轴、合计至少三个真实源码锚点，并填写 `difficulty-audit.json`；规则多、字段多、页面动作多、测试多或改动行数多都不能单独证明困难。
 - 提示词不得设计成低改动量任务。困难、地狱题建议每个 A/B 至少产生 30 行非测试业务代码改动并跨至少 3 个业务文件。发布阶段仍生成 A/B 产物快照并记录行数门禁失败，平台提交前再执行最终阻断。
 - 发布产物前必须排除 `node_modules`、构建目录（包括 Nuxt 的 `.output`）、缓存和虚拟环境；锁文件随依赖清单发布：模型改了 `package.json`、`go.mod`、`Cargo.toml` 等依赖清单时，同目录（或工作区根目录）的锁文件一起进入产物 commit；`go.sum`、`go.work.sum` 改了就发布；清单没改时锁文件照旧撤回，否则干净检出后安装或构建会失败。提交预检必须从远端 commit 复算改动量并按平台 G11 口径阻断低改动或脏仓库。只有“任一侧业务代码少于 10 行”且这是唯一阻断项时，才允许 `change-volume-line-gate` 例外审批。
 - 例外审批必须绑定 payload 哈希、交付表哈希和改动量复核哈希，批准用户取自设备配置 `solo2.approver`；其他任何门禁失败都不能绕过。
@@ -211,9 +212,11 @@ python3 scripts/status_push.py uninstall
    再下载源码；选中结果和占用锁写入任务目录，供后续审计和 `cleanup` 释放。
 2. 阅读 `source/origin` 和参考规范。**开始设计提示词前**先运行
    `$CODEX_HOME/skills/sologsb-0917/submission/scripts/prompt_dedup.py --task-root ROOT`
-   拉取历史 GSB 的完整 `user_prompt` 列表，并排除当前任务自己的历史提交。基于历史列表设计
-   唯一提示词后，再运行同一脚本并传 `--candidate`；只有 `UNIQUE` 才能进入
-   `prompt --candidate ... --review ...`。提示词必须走固定版本 `ra-人话`。
+   拉取历史 GSB 的完整 `user_prompt` 列表，并排除当前任务自己的历史提交。按
+   `references/difficulty-gate.md` 建立 `difficulty-audit.json`，逐条记录困难轴、提示词原句、
+   源码锚点和失败后果。基于历史列表设计唯一提示词后，再运行同一脚本并传 `--candidate`；
+   只有 `UNIQUE` 且难度证明通过，才能进入
+   `prompt --candidate ... --review ... --difficulty-audit ...`。提示词必须走固定版本 `ra-人话`。
 3. 运行 `run --side both --candidates 2`（只有独立 Key 且容量确认时才显式提高 N）。困难题单 attempt 默认 7200 秒；
    运行器先建立本地初始快照并拉取 N 份隔离源码，再并行启动 N 个容器无头执行，每份分别写
    原生 JSONL。每个候选中断、异常或没有最终 `end_turn` 时，只销毁该候选现场并重新 clone，
@@ -269,7 +272,8 @@ python3 scripts/status_push.py uninstall
 python3 scripts/sologsb.py init --workdir DIR --task-name NAME \
   [--source PATH | --package ZIP | --from-platform --project-code CODE]
 python3 scripts/sologsb.py prompt --task-root ROOT --task-type TYPE \
-  --difficulty 困难 --candidate FILE --review FILE
+  --difficulty 困难 --candidate FILE --review FILE \
+  --difficulty-audit DIFFICULTY_AUDIT.json
 python3 scripts/sologsb.py run --task-root ROOT --side both --candidates 2 --attempts 6 --base-url https://<配置的 claude.baseUrl>
 python3 scripts/sologsb.py github-init --task-root ROOT  # 候选映射完成后才可执行
 python3 scripts/sologsb.py run --task-root ROOT --side A --force  # 重跑已映射候选
@@ -299,6 +303,8 @@ python3 scripts/sologsb.py version                                       # 打�
 ## 参考资料
 
 - `references/prompt-standard.md`：提示词、难度和查重门禁。
+- `references/difficulty-gate.md`：G16 困难词义、强困难轴、正反例与自检问题。
+- `references/difficulty-audit-template.json`：`--difficulty-audit` 必填模板。
 - `references/workspace-layout.md`：候选目录、映射状态和 GitHub 约定。
 - `references/trace-validation.md`：单轮轨迹硬校验和语义完成审核。
 - `references/semantic-review-template.json`：A/B 语义完成审核模板。
@@ -323,7 +329,7 @@ python3 scripts/sologsb.py version                                       # 打�
 
 ## 完成判定
 
-只有 `status` 同时确认提示词哈希、Git 三支、两份干净轨迹、两个产物快照、
+只有 `status` 同时确认提示词哈希、难度证明、Git 三支、两份干净轨迹、两个产物快照、
 两侧真实验证、A/B `lineGate` 记录、G11 仓库洁净门禁、150–240 字 GSB 理由、A/B 交付完整性打分与描述、官方 schema Excel、字段说明和两段
 1280x720、不超过 90 秒的视频，以及逐片段 `window-capture`、`cursor-guard` 报告、
 `frontmost-window-monitor.json`、`service-cleanup.json` 均存在且状态通过，

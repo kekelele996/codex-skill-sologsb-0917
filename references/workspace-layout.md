@@ -17,6 +17,10 @@
 │   ├── state.json
 │   ├── evidence.json
 │   ├── audit.json
+│   ├── prompt/
+│   │   ├── validation.json
+│   │   ├── difficulty-audit.json  # G16 难度证明，prompt 通过后才写入
+│   │   └── ra-renhua-review.json
 │   ├── gsb-draft.json   # gsb 命令写出的提交预检用草稿（含 claims / sentenceEvidence）
 │   ├── change-volume-line-gate.json  # publish 写入的 A/B 业务代码行数门禁记录
 │   ├── semantic/

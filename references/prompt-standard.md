@@ -8,16 +8,32 @@
 
 ## 设计口径
 
-沿用 `solo2-auto/references/fast-hard-first-round.md` 与
-`solo2-annotation-loop/references/prompt-task-type-design.md`：
+沿用 `solo2-auto/references/fast-hard-first-round.md`、
+`solo2-annotation-loop/references/prompt-task-type-design.md` 与本技能的
+`references/difficulty-gate.md`：
 
-1. 首轮只保留一个小而真实的冲突闭环。
-2. 只选一个最快可核对的证明面。
-3. 至少两条约束互相牵制，并写清一条失败对另一条的影响。
-4. 不靠新增页面、角色、服务、依赖、测试框架或部署面制造难度。
+1. 入口可以小，但题目本身必须至少有两个独立困难轴，其中一个属于多模块整合、关键设计取舍或复杂状态。
+2. 只选一个最快可核对的证明面，但不能把所有实现都压在同一个页面的线性校验里。
+3. 至少两条约束互相牵制，并写清一条失败会怎样破坏另一条业务结果。
+4. 复杂点要落在旧数据、并发、兼容、权限、异常恢复、性能或跨模块一致性上，不靠新增页面和依赖制造难度。
 5. 优先控制在 170 字以内，Skill 绝对上限为 240 字。
 6. 非代码测试题不把测试、自测、回归、验收标准当主交付物。
 7. 决策点必须写成业务默认、优先级、失败后果或历史兼容规则，不能要求执行者反问。
+8. 困难、地狱题提交前必须填写 `difficulty-audit.json`，缺失或自证不足时不得安装提示词。
+
+## G16 困难硬门槛
+
+平台曾以 `G16` 打回过“规则很多但都在同一业务域内”的题目。规则数量、字段数量、页面动作、
+测试数量、代码行数和文案长度都不能单独证明困难。必须同时提供：
+
+- 至少两个不同的困难轴；
+- 至少一个 `multi_module`、`design_tradeoff` 或 `complex_state`；
+- 合计至少三个真实源码锚点；
+- 每个困难轴对应一条逐字出现在最终提示词里的原句；
+- 每个困难轴的具体失败后果；
+- 一个说明“什么情况下只是中等题”的反例。
+
+可接受困难轴的完整列表、正反例和自检问题见 `references/difficulty-gate.md`。
 
 ## 改动量设计要求
 
@@ -48,6 +64,7 @@ python3 "$CODEX_HOME/skills/gsb-submit-preflight/scripts/prompt_dedup.py" --task
 ## 文案门禁
 
 - 唯一提示词写到 `workspace/评审文件/提示词.md`。
+- `difficulty-audit.json` 通过后写到 `monitor/prompt/difficulty-audit.json`，与提示词哈希一起进入任务状态。
 - `prompt.sha256` 记录最终文件哈希，A/B 只能读取该文件。
 - 必须实际读取并执行固定版本 `ra-人话`，再运行
   `solo-annotation-loop/scripts/validate-prompt.py <prompt> --review <review>`。
