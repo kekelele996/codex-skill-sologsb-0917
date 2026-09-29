@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import device_config as dc  # noqa: E402
+from common import AB_MODELS  # noqa: E402
 
 TIMEOUT_MANAGER = 15
 TIMEOUT_SOLO2 = 20
@@ -150,46 +151,50 @@ def device_identity() -> dict[str, str]:
 def verify_claude(cfg: dict) -> Result:
     api_key = dc.resolve_from(cfg, "claude.apiKey")
     base_url = (dc.resolve_from(cfg, "claude.baseUrl") or "").rstrip("/")
-    model = dc.resolve_from(cfg, "claude.model") or "auto_model/urm"
     if not api_key:
         return Result("claude", False, "缺少 claude.apiKey")
     if not base_url:
         return Result("claude", False, "缺少 claude.baseUrl")
-    body = {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ping"}]}
     headers = {"anthropic-version": "2023-06-01", "Authorization": f"Bearer {api_key}"}
+    verified: list[str] = []
 
-    attempts = 2
-    for attempt in range(1, attempts + 1):
-        try:
-            status, payload, _ = http_json("POST", f"{base_url}/v1/messages", headers=headers,
-                                           body=body, timeout=120)
-        except Exception as exc:
-            if attempt < attempts:
-                print(f"    （网关未响应：{type(exc).__name__}，{5 * attempt} 秒后重试）", flush=True)
-                time.sleep(5 * attempt)
-                continue
-            return Result("claude", False,
-                          f"网关无响应（{type(exc).__name__}），未能确认密钥状态", retryable=True,
-                          warnings=["这通常是网关繁忙或网络抖动，不是密钥问题；稍后重跑 verify 即可"])
-        if status == 200:
-            return Result("claude", True, f"接口返回 200，模型 {model} 可调用")
-        if status == 401:
-            return Result("claude", False, "网关返回 401，密钥无效")
-        if status == 403:
-            return Result("claude", False, "网关返回 403，密钥被拒绝或权限不足")
-        if status == 429:
-            return Result("claude", False, "网关返回 429，并发已满", retryable=True,
-                          warnings=["429 是准入失败，不代表密钥错误；等网关空闲后重跑 verify"])
-        if status in (500, 502, 503, 504):
-            if attempt < attempts:
-                print(f"    （网关返回 {status}，{5 * attempt} 秒后重试）", flush=True)
-                time.sleep(5 * attempt)
-                continue
-            return Result("claude", False,
-                          f"网关连续返回 {status}（网关侧故障），密钥未被拒绝", retryable=True,
-                          warnings=["网关临时故障，稍后重跑 verify；不要因此重填密钥"])
-        detail = str(payload).replace("\n", " ")[:120]
-        return Result("claude", False, f"网关返回 {status}：{detail}")
+    for model in (AB_MODELS["A"], AB_MODELS["B"]):
+        body = {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ping"}]}
+        attempts = 2
+        for attempt in range(1, attempts + 1):
+            try:
+                status, payload, _ = http_json("POST", f"{base_url}/v1/messages", headers=headers,
+                                               body=body, timeout=120)
+            except Exception as exc:
+                if attempt < attempts:
+                    print(f"    （{model} 网关未响应：{type(exc).__name__}，{5 * attempt} 秒后重试）", flush=True)
+                    time.sleep(5 * attempt)
+                    continue
+                return Result("claude", False,
+                              f"{model} 网关无响应（{type(exc).__name__}），未能确认模型状态", retryable=True,
+                              warnings=["这通常是网关繁忙或网络抖动，不是密钥问题；稍后重跑 verify 即可"])
+            if status == 200:
+                verified.append(model)
+                break
+            if status == 401:
+                return Result("claude", False, f"{model} 返回 401，密钥无效")
+            if status == 403:
+                return Result("claude", False, f"{model} 返回 403，密钥被拒绝或权限不足")
+            if status == 429:
+                return Result("claude", False, f"{model} 返回 429，并发已满", retryable=True,
+                              warnings=["429 是准入失败，不代表密钥错误；等网关空闲后重跑 verify"])
+            if status in (500, 502, 503, 504):
+                if attempt < attempts:
+                    print(f"    （{model} 网关返回 {status}，{5 * attempt} 秒后重试）", flush=True)
+                    time.sleep(5 * attempt)
+                    continue
+                return Result("claude", False,
+                              f"{model} 连续返回 {status}（网关侧故障），密钥未被拒绝", retryable=True,
+                              warnings=["网关临时故障，稍后重跑 verify；不要因此重填密钥"])
+            detail = str(payload).replace("\n", " ")[:120]
+            return Result("claude", False, f"{model} 网关返回 {status}：{detail}")
+
+    return Result("claude", True, "接口返回 200，A/B 两个模型均可调用: " + ", ".join(verified))
 
 def verify_manager(cfg: dict) -> Result:
     base_url = (dc.resolve_from(cfg, "manager.baseUrl") or "").rstrip("/")
@@ -627,7 +632,6 @@ def section_claude(cfg: dict, path: Path, *, advanced: bool = False) -> None:
         validate=lambda v: None if v.isdigit() and 1 <= int(v) <= 8 else "必须是 1-8 的正整数",
     )
     if advanced:
-        prompt_field(cfg, "claude.model", "模型名", default=dc.FIELDS["claude.model"][1])
         prompt_field(cfg, "claude.image", "Docker 镜像", default=dc.FIELDS["claude.image"][1])
         prompt_field(cfg, "claude.contextWindow", "上下文窗口", default=dc.FIELDS["claude.contextWindow"][1],
                      validate=lambda v: None if v.isdigit() else "必须是数字")

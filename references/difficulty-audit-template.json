@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "difficulty": "困难",
+  "summary": "用一段话说明为什么题目不是中等题，至少覆盖一个多模块整合、关键设计取舍或复杂状态，并写出会被牵动的后果。",
+  "axes": [
+    {
+      "kind": "multi_module",
+      "promptQuote": "从最终提示词逐字复制一条体现该困难轴的句子",
+      "sourceAnchors": [
+        "backend/internal/service/example.go",
+        "backend/internal/repository/example.go",
+        "frontend/src/pages/example/index.tsx"
+      ],
+      "whyNotStraightforward": "说明为什么不能在一个文件里按顺序直接完成这一段。",
+      "observableFailure": "说明如果只完成表面动作，会出现未写入、数据不一致、接口拒绝或服务失败等可见后果。"
+    },
+    {
+      "kind": "migration_consistency",
+      "promptQuote": "从最终提示词逐字复制另一条体现该困难轴的句子",
+      "sourceAnchors": [
+        "backend/internal/repository/example.go",
+        "frontend/src/types/example.ts"
+      ],
+      "whyNotStraightforward": "说明旧数据、旧接口或既有状态如何限制这次修改。",
+      "observableFailure": "说明漏掉兼容处理后老记录会如何读错、丢值或被重复处理。"
+    }
+  ],
+  "mediumCounterexample": "如果题目只剩一条明确的字段校验和页面提示，逐条实现即可，那属于中等题，不能提交为困难题。",
+  "reviewedBy": "Codex"
+}

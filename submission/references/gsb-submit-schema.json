@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "source": "/app/gsb/submit",
-  "inspectedAt": "2026-09-23T20:00:00+08:00",
+  "inspectedAt": "2026-09-29T17:42:55+08:00",
   "form": {
-    "fieldCount": 23,
-    "requiredCount": 23,
+    "fieldCount": 25,
+    "requiredCount": 25,
     "optionalFields": [],
     "submitButton": "提交并质检",
     "clearButton": "清空重填",
@@ -53,7 +53,8 @@
       "type": "textarea",
       "required": true,
       "maxLength": null,
-      "options": []
+      "options": [],
+      "validation": {}
     },
     {
       "order": 20,
@@ -70,7 +71,8 @@
         "代码重构",
         "工程化",
         "代码测试"
-      ]
+      ],
+      "validation": {}
     },
     {
       "order": 30,
@@ -82,7 +84,8 @@
       "options": [
         "困难",
         "地狱"
-      ]
+      ],
+      "validation": {}
     },
     {
       "order": 40,
@@ -91,7 +94,8 @@
       "type": "text",
       "required": true,
       "maxLength": 255,
-      "options": []
+      "options": [],
+      "validation": {}
     },
     {
       "order": 50,
@@ -103,7 +107,8 @@
       "options": [
         "Claude Code",
         "Codex CLI"
-      ]
+      ],
+      "validation": {}
     },
     {
       "order": 60,
@@ -112,7 +117,8 @@
       "type": "text",
       "required": true,
       "maxLength": 64,
-      "options": []
+      "options": [],
+      "validation": {}
     },
     {
       "order": 70,
@@ -124,7 +130,8 @@
       "options": [
         "MacOS/Linux",
         "Windows"
-      ]
+      ],
+      "validation": {}
     },
     {
       "order": 80,
@@ -137,7 +144,8 @@
         "无外部依赖",
         "有外部依赖，未容器化",
         "已容器化，可一键起环境"
-      ]
+      ],
+      "validation": {}
     },
     {
       "order": 90,
@@ -159,7 +167,8 @@
       "type": "text",
       "required": true,
       "maxLength": 128,
-      "options": []
+      "options": [],
+      "validation": {}
     },
     {
       "order": 110,
@@ -168,7 +177,8 @@
       "type": "attachment",
       "required": true,
       "maxLength": null,
-      "options": []
+      "options": [],
+      "validation": {}
     },
     {
       "order": 120,
@@ -190,7 +200,8 @@
       "type": "video",
       "required": true,
       "maxLength": 512,
-      "options": []
+      "options": [],
+      "validation": {}
     },
     {
       "order": 134,
@@ -213,7 +224,21 @@
       "type": "textarea",
       "required": true,
       "maxLength": null,
-      "options": []
+      "options": [],
+      "validation": {}
+    },
+    {
+      "order": 139,
+      "key": "x_a_model_name",
+      "label": "A-模型名称",
+      "type": "select",
+      "required": true,
+      "maxLength": null,
+      "options": [
+        "auto_model/urm",
+        "ark/urm-03"
+      ],
+      "validation": {}
     },
     {
       "order": 140,
@@ -222,7 +247,8 @@
       "type": "text",
       "required": true,
       "maxLength": 128,
-      "options": []
+      "options": [],
+      "validation": {}
     },
     {
       "order": 150,
@@ -231,7 +257,8 @@
       "type": "attachment",
       "required": true,
       "maxLength": null,
-      "options": []
+      "options": [],
+      "validation": {}
     },
     {
       "order": 160,
@@ -253,7 +280,8 @@
       "type": "video",
       "required": true,
       "maxLength": 512,
-      "options": []
+      "options": [],
+      "validation": {}
     },
     {
       "order": 174,
@@ -276,7 +304,21 @@
       "type": "textarea",
       "required": true,
       "maxLength": null,
-      "options": []
+      "options": [],
+      "validation": {}
+    },
+    {
+      "order": 179,
+      "key": "x_b_model_name",
+      "label": "B-模型名称",
+      "type": "select",
+      "required": true,
+      "maxLength": null,
+      "options": [
+        "auto_model/urm",
+        "ark/urm-03"
+      ],
+      "validation": {}
     },
     {
       "order": 180,
@@ -289,7 +331,8 @@
         "A 更好",
         "Same",
         "B 更好"
-      ]
+      ],
+      "validation": {}
     },
     {
       "order": 190,
@@ -298,8 +341,9 @@
       "type": "textarea",
       "required": true,
       "maxLength": null,
-      "options": []
+      "options": [],
+      "validation": {}
     }
   ],
-  "fingerprint": "954e9db2d25afeb4"
+  "fingerprint": "9a410bc6e129339b"
 }

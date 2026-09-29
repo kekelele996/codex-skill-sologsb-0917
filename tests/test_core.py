@@ -1003,8 +1003,10 @@ class DeliveryFieldTests(unittest.TestCase):
                 "repoUrl": "https://github.com/o/r", "initialSnapshot": "a" * 40,
                 "sides": {
                     "A": {"tracePath": str(trace_a), "sessionId": "s1", "harnessVersion": "2.1.197",
+                          "model": "auto_model/urm",
                           "artifactSnapshotUrl": "https://github.com/o/r/commit/" + "b" * 40},
                     "B": {"tracePath": str(trace_b), "sessionId": "s2",
+                          "model": "ark/urm-03",
                           "artifactSnapshotUrl": "https://github.com/o/r/commit/" + "c" * 40},
                 },
             })
@@ -1013,6 +1015,8 @@ class DeliveryFieldTests(unittest.TestCase):
             values = build_values(root, draft, schema)
             self.assertEqual(values["a_score_delivery"], 2)
             self.assertEqual(values["b_desc_delivery"], self.DESC_B)
+            self.assertEqual(values["x_a_model_name"], "auto_model/urm")
+            self.assertEqual(values["x_b_model_name"], "ark/urm-03")
             self.assertNotIn("remark", values)
             (trace_a.parent / "stale-copy.jsonl").write_text("x", encoding="utf-8")
             with self.assertRaisesRegex(Exception, "恰好包含 1 个"):
@@ -1117,6 +1121,42 @@ class DeliverySubmissionTests(unittest.TestCase):
         official = read_json(ROOT / "references" / "gsb-form-schema.json", {})
         self.assertEqual([f["key"] for f in page["fields"]], [f["field_key"] for f in official["fields"]])
         self.assertEqual(page["form"]["fieldCount"], len(page["fields"]))
+
+    def test_ab_model_plan_is_fixed_and_distinct(self) -> None:
+        common = {
+            "baseUrl": "https://relay.example",
+            "imageDigest": "sha256:test-image",
+            "declaredContextWindow": 1000000,
+            "harnessVersion": "2.1.197",
+            "claudeMaxRetries": "10",
+        }
+        good = {
+            "modelPlan": {"diffKeys": ["modelname"]},
+            "sides": {
+                "A": {"model": "auto_model/urm", **common},
+                "B": {"model": "ark/urm-03", **common},
+            },
+            "candidateMapping": {
+                "A": {"candidateId": "candidate-1"},
+                "B": {"candidateId": "candidate-2"},
+            },
+        }
+        result = self.preflight.validate_ab_model_plan(good)
+        self.assertTrue(result["ok"], result)
+        bad = {
+            "modelPlan": {"diffKeys": ["modelname"]},
+            "sides": {
+                "A": {"model": "auto_model/urm", **common},
+                "B": {"model": "auto_model/urm", **common},
+            },
+            "candidateMapping": {
+                "A": {"candidateId": "candidate-2"},
+                "B": {"candidateId": "candidate-1"},
+            },
+        }
+        rejected = self.preflight.validate_ab_model_plan(bad)
+        self.assertFalse(rejected["ok"])
+        self.assertTrue(any("不得相同" in item or "应为" in item or "应绑定" in item for item in rejected["errors"]))
 
     def test_number_fields_are_sent_as_int(self) -> None:
         schema = read_json(ROOT / "references" / "gsb-form-schema.json", {})
@@ -1975,13 +2015,15 @@ class ParallelRunTests(unittest.TestCase):
         self.assertFalse(legacy_off.live)
         self.assertEqual(default.candidates, 2)
         self.assertEqual(default.attempts, 6)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["run", "--task-root", "/tmp/task", "--side", "both", "--candidates", "3"])
         self.assertEqual(default.base_url, "")
         self.assertEqual(custom_base.base_url, "https://llm.example.com/")
         with mock.patch.dict(os.environ, {"SOLOSB_ANTHROPIC_BASE_URL": "https://custom.example/"}, clear=False):
             self.assertEqual(side_runner.anthropic_base_url(), "https://custom.example")
         self.assertEqual(semantic_a.side, "A")
 
-    def test_candidate_race_maps_first_two_by_finish_order_without_rename(self) -> None:
+    def test_fixed_models_map_candidate_1_to_a_and_candidate_2_to_b(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "monitor").mkdir(parents=True)
@@ -1992,26 +2034,19 @@ class ParallelRunTests(unittest.TestCase):
             prompt.write_text("prompt", encoding="utf-8")
             write_json(root / "monitor" / "state.json", {
                 "status": "prompt_ready",
-                "taskName": "candidate-race",
+                "taskName": "fixed-models",
                 "promptPath": str(prompt),
                 "promptSha256": sha256_file(prompt),
             })
 
             def fake_candidate(task_root, candidate, **kwargs):
-                stop_event = kwargs["stop_event"]
+                self.assertEqual(kwargs["mapped_side"], side_runner.candidate_side(candidate))
                 workspace = task_root / "source" / "candidates" / candidate
                 self.assertTrue((workspace / ".git").is_dir())
                 (workspace / "result.txt").write_text(candidate, encoding="utf-8")
                 if candidate == "candidate-1":
                     time.sleep(0.08)
-                elif candidate == "candidate-2":
-                    stop_event.wait(timeout=5)
-                    return {
-                        "candidateId": candidate,
-                        "status": "cancelled",
-                        "error": "stopped after first two",
-                    }
-                elif candidate == "candidate-3":
+                else:
                     time.sleep(0.01)
                 trace = task_root / "workspace" / "轨迹文件" / "candidates" / candidate / f"{candidate}.jsonl"
                 trace.parent.mkdir(parents=True, exist_ok=True)
@@ -2023,9 +2058,16 @@ class ParallelRunTests(unittest.TestCase):
                 trace.write_text("\n".join(json.dumps(x) for x in events) + "\n", encoding="utf-8")
                 return {
                     "candidateId": candidate,
+                    "mappedSide": kwargs["mapped_side"],
                     "attempt": 1,
                     "status": "staged",
                     "sessionId": session,
+                    "model": side_runner.candidate_model(candidate),
+                    "baseUrl": "https://relay.example",
+                    "imageDigest": "sha256:test-image",
+                    "declaredContextWindow": 1000000,
+                    "harnessVersion": "2.1.197",
+                    "claudeMaxRetries": "10",
                     "candidateTracePath": str(trace),
                     "tracePath": str(trace),
                     "changedFiles": ["result.txt"],
@@ -2034,16 +2076,21 @@ class ParallelRunTests(unittest.TestCase):
 
             with mock.patch.object(side_runner, "_ensure_image", return_value="image"):
                 with mock.patch.object(side_runner, "_run_candidate_locked", side_effect=fake_candidate):
-                    result = side_runner.run_both(root, timeout=10, live=False, candidate_count=3)
+                    result = side_runner.run_both(root, timeout=10, live=False, candidate_count=2)
 
-            self.assertEqual(result["candidateMapping"]["A"]["candidateId"], "candidate-3")
-            self.assertEqual(result["candidateMapping"]["B"]["candidateId"], "candidate-1")
-            self.assertIn("candidate-2", result["cancelledCandidates"])
-            for candidate in ("candidate-1", "candidate-2", "candidate-3"):
+            self.assertEqual(result["candidateMapping"]["A"]["candidateId"], "candidate-1")
+            self.assertEqual(result["candidateMapping"]["B"]["candidateId"], "candidate-2")
+            self.assertEqual(result["candidateMapping"]["A"]["modelname"], "auto_model/urm")
+            self.assertEqual(result["candidateMapping"]["B"]["modelname"], "ark/urm-03")
+            self.assertEqual(result["sides"]["A"]["model"], "auto_model/urm")
+            self.assertEqual(result["sides"]["B"]["model"], "ark/urm-03")
+            self.assertLess(result["sides"]["B"]["completionOrder"], result["sides"]["A"]["completionOrder"])
+            self.assertEqual(result["modelPlan"]["diffKeys"], ["modelname"])
+            self.assertEqual(result["cancelledCandidates"], [])
+            for candidate in ("candidate-1", "candidate-2"):
                 self.assertTrue((root / "source" / "candidates" / candidate).is_dir())
-            self.assertTrue((root / "workspace" / "轨迹文件" / "a" / "candidate-3.jsonl").is_file())
-            self.assertTrue((root / "workspace" / "轨迹文件" / "a").is_dir())
-            self.assertTrue((root / "workspace" / "轨迹文件" / "b").is_dir())
+            self.assertTrue((root / "workspace" / "轨迹文件" / "a" / "candidate-1.jsonl").is_file())
+            self.assertTrue((root / "workspace" / "轨迹文件" / "b" / "candidate-2.jsonl").is_file())
 
     def test_candidate_uses_six_actual_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2150,7 +2197,7 @@ class ParallelRunTests(unittest.TestCase):
             (root / "source" / "origin").mkdir(parents=True)
             (root / "source" / "origin" / "README.md").write_text("base", encoding="utf-8")
             write_json(root / "monitor" / "state.json", {"status": "prompt_ready", "taskName": "gate"})
-            with self.assertRaisesRegex(SologsbError, "候选竞速"):
+            with self.assertRaisesRegex(SologsbError, "固定模型"):
                 init_github_repo(root, dry_run=True)
 
     def test_github_repo_base_uses_platform_project_code(self) -> None:
@@ -2204,7 +2251,23 @@ class ParallelPublishTests(unittest.TestCase):
             write_json(root / "monitor" / "state.json", {
                 "status": "semantic_review_required", "owner": "smoke", "repoUrl": str(bare),
                 "remoteUrl": str(bare), "initialSnapshot": initial,
-                "sides": {side: {"status": "staged", "sessionId": f"s-{side}", "tracePath": str(root / "workspace" / "轨迹文件" / side.lower() / f"{side}.jsonl")} for side in ("A", "B")},
+                "modelPlan": {"diffKeys": ["modelname"]},
+                "sides": {
+                    side: {
+                        "status": "staged",
+                        "sessionId": f"s-{side}",
+                        "candidateId": side_runner.side_candidate(side),
+                        "workspacePath": str(root / "source" / side.lower()),
+                        "model": side_runner.AB_MODELS[side],
+                        "baseUrl": "https://relay.example",
+                        "imageDigest": "sha256:test-image",
+                        "declaredContextWindow": 1000000,
+                        "harnessVersion": "2.1.197",
+                        "claudeMaxRetries": "10",
+                        "tracePath": str(root / "workspace" / "轨迹文件" / side.lower() / f"{side}.jsonl"),
+                    }
+                    for side in ("A", "B")
+                },
             })
             result = side_runner.publish_sides(
                 root,
@@ -2226,7 +2289,7 @@ class ParallelPublishTests(unittest.TestCase):
             bare = root / "remote.git"
             subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
             _push_topology(origin, str(bare), initial)
-            mapping = {"A": "candidate-3", "B": "candidate-1"}
+            mapping = {"A": "candidate-1", "B": "candidate-2"}
             for side, candidate in mapping.items():
                 workspace = root / "source" / "candidates" / candidate
                 _clone_branch(str(bare), "main", workspace, initial)
@@ -2254,12 +2317,19 @@ class ParallelPublishTests(unittest.TestCase):
             write_json(root / "monitor" / "state.json", {
                 "status": "semantic_review_required", "owner": "smoke", "repoUrl": str(bare),
                 "remoteUrl": str(bare), "initialSnapshot": initial,
+                "modelPlan": {"diffKeys": ["modelname"]},
                 "sides": {
                     side: {
                         "status": "staged",
                         "sessionId": f"s-{candidate}",
                         "candidateId": candidate,
                         "workspacePath": str(root / "source" / "candidates" / candidate),
+                        "model": side_runner.AB_MODELS[side],
+                        "baseUrl": "https://relay.example",
+                        "imageDigest": "sha256:test-image",
+                        "declaredContextWindow": 1000000,
+                        "harnessVersion": "2.1.197",
+                        "claudeMaxRetries": "10",
                         "tracePath": str(root / "workspace" / "轨迹文件" / side.lower() / f"{candidate}.jsonl"),
                     }
                     for side, candidate in mapping.items()
@@ -2270,21 +2340,21 @@ class ParallelPublishTests(unittest.TestCase):
                 semantic_a=root / "monitor" / "semantic" / "a.review.json",
                 semantic_b=root / "monitor" / "semantic" / "b.review.json",
             )
-            self.assertTrue((root / "source" / "candidates" / "candidate-3").is_dir())
             self.assertTrue((root / "source" / "candidates" / "candidate-1").is_dir())
+            self.assertTrue((root / "source" / "candidates" / "candidate-2").is_dir())
             self.assertEqual(
                 subprocess.run(
                     ["git", "--git-dir", str(bare), "show", "refs/heads/A:result.txt"],
                     check=True, capture_output=True, text=True,
                 ).stdout,
-                "candidate-3",
+                "candidate-1",
             )
             self.assertEqual(
                 subprocess.run(
                     ["git", "--git-dir", str(bare), "show", "refs/heads/B:result.txt"],
                     check=True, capture_output=True, text=True,
                 ).stdout,
-                "candidate-1",
+                "candidate-2",
             )
 
 
@@ -3333,6 +3403,34 @@ class ContainerImageTests(unittest.TestCase):
                 self.assertEqual(reloaded.DEFAULT_IMAGE, dc.FIELDS["claude.image"][1])
             finally:
                 importlib.reload(side_runner)
+
+    def test_runtime_probe_injects_and_checks_the_expected_ab_model(self) -> None:
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            captured.append(list(cmd))
+            output = b"2.1.197\nMODEL=ark/urm-03 CONTEXT=1000000 BASE=https://relay.example\n"
+            return subprocess.CompletedProcess(cmd, 0, output, b"")
+
+        with mock.patch.object(side_runner, "run", side_effect=fake_run):
+            info = side_runner._runtime_info(
+                "container-1", "secret", "https://relay.example",
+                expected_model="ark/urm-03",
+            )
+        self.assertEqual(info["model"], "ark/urm-03")
+        self.assertIn("ANTHROPIC_MODEL=ark/urm-03", captured[0])
+        self.assertIn("CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000", captured[0])
+
+        def wrong_model(cmd, **_kwargs):
+            output = b"2.1.197\nMODEL=auto_model/urm CONTEXT=1000000 BASE=https://relay.example\n"
+            return subprocess.CompletedProcess(cmd, 0, output, b"")
+
+        with mock.patch.object(side_runner, "run", side_effect=wrong_model):
+            with self.assertRaisesRegex(SologsbError, "不等于 ark/urm-03"):
+                side_runner._runtime_info(
+                    "container-1", "secret", "https://relay.example",
+                    expected_model="ark/urm-03",
+                )
 
     def test_start_container_does_not_depend_on_image_entrypoint_or_base_url(self) -> None:
         # 新镜像的 entrypoint 放宽了 /workspace 非空检查，并内置了自己的 ANTHROPIC_BASE_URL；

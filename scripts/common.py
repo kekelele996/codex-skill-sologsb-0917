@@ -45,6 +45,17 @@ ALL_DISPLAY_TASK_TYPES = TASK_TYPES | {"代码理解"}
 DIFFICULTIES = {"困难", "地狱"}
 SIDES = ("A", "B")
 SIDE_LOWER = {"A": "a", "B": "b"}
+# 2026-09-29 规则：同一道题的 A/B 只允许切换 modelname，其余运行参数保持一致。
+AB_MODELS = {"A": "auto_model/urm", "B": "ark/urm-03"}
+FIXED_CANDIDATE_BY_SIDE = {"A": "candidate-1", "B": "candidate-2"}
+FIXED_SIDE_BY_CANDIDATE = {candidate: side for side, candidate in FIXED_CANDIDATE_BY_SIDE.items()}
+AB_COMMON_RUN_PARAMETER_KEYS = (
+    "baseUrl",
+    "imageDigest",
+    "declaredContextWindow",
+    "harnessVersion",
+    "claudeMaxRetries",
+)
 DEFAULT_RECORDING_LOCK_TIMEOUT = 7200.0
 RECORDING_LOCK_ENV = "SOLOGBS_0917_RECORDING_LOCK"
 

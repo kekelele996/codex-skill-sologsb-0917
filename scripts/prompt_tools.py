@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from difficulty_gate import install_difficulty_audit
 from common import (
     DIFFICULTIES,
     SOLO_SCRIPTS,
@@ -183,6 +184,7 @@ def install_prompt(
     *,
     candidate_path: Path,
     review_path: Path,
+    difficulty_audit_path: Path,
     task_type: str,
     difficulty: str,
     history_path: Path | None = None,
@@ -198,13 +200,27 @@ def install_prompt(
     )
     review_dir = task_root / "monitor" / "prompt"
     review_dir.mkdir(parents=True, exist_ok=True)
+    prompt_text = candidate_path.read_text(encoding="utf-8")
+    try:
+        difficulty_audit = install_difficulty_audit(
+            task_root,
+            audit_path=difficulty_audit_path,
+            difficulty=difficulty,
+            prompt_text=prompt_text,
+        )
+    except SologsbError as exc:
+        audit_errors = [str(exc)]
+        result["ok"] = False
+        result["errors"].extend(audit_errors)
+        result["difficultyAudit"] = {"ok": False, "errors": audit_errors}
+    else:
+        result["difficultyAudit"] = difficulty_audit
     write_json(review_dir / "validation.json", result)
     atomic_copy(review_path, review_dir / "ra-renhua-review.json")
     if not result["ok"]:
         raise SologsbError("提示词门禁未通过:\n- " + "\n- ".join(result["errors"]))
     destination = task_root / "workspace" / "评审文件" / "提示词.md"
-    text = candidate_path.read_text(encoding="utf-8")
-    atomic_write_text(destination, text)
+    atomic_write_text(destination, prompt_text)
     atomic_write_text(task_root / "workspace" / "评审文件" / "提示词.sha256", result["textSha256"] + "\n")
     state = read_json(task_root / "monitor" / "state.json", {})
     state.update(
@@ -214,6 +230,8 @@ def install_prompt(
             "difficulty": difficulty,
             "promptPath": str(destination),
             "promptSha256": result["textSha256"],
+            "difficultyAuditPath": (result.get("difficultyAudit") or {}).get("path", ""),
+            "difficultyAudit": result.get("difficultyAudit") or {},
         }
     )
     save_state(task_root, state)

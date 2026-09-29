@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import threading
@@ -1648,6 +1649,44 @@ def _all_process_ids() -> set[int]:
     return result
 
 
+def _chrome_process_rows() -> list[dict[str, Any]]:
+    """Snapshot Chrome processes without touching or signalling them."""
+    proc = run(["ps", "-axo", "pid=,ppid=,command="], check=False)
+    rows: list[dict[str, Any]] = []
+    for line in proc.stdout.decode("utf-8", errors="replace").splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        pid, ppid, command = int(parts[0]), int(parts[1]), parts[2]
+        if "Google Chrome.app/" not in command and "Google Chrome Helper" not in command:
+            continue
+        rows.append({"pid": pid, "ppid": ppid, "command": command})
+    return rows
+
+
+def _chrome_window_snapshot() -> list[dict[str, Any]]:
+    """Return the user's currently visible Chrome windows before we launch ours."""
+    windows: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for window in _window_list():
+        if int(window.get("kCGWindowLayer") or 0) != 0:
+            continue
+        payload = _window_info_payload(window)
+        if not payload:
+            continue
+        owner_pid = int(payload.get("ownerPid") or 0)
+        bundle_id = _app_bundle_id(owner_pid)
+        if _canonical_owner(str(payload.get("ownerName") or ""), bundle_id) != "Chrome":
+            continue
+        window_id = int(payload.get("windowId") or 0)
+        if window_id <= 0 or window_id in seen:
+            continue
+        seen.add(window_id)
+        payload.update({"ownerBundleId": bundle_id, "ownerApp": "Chrome"})
+        windows.append(payload)
+    return windows
+
+
 def _listener_rows(ports: list[int]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
@@ -1666,6 +1705,228 @@ def _listener_rows(ports: list[int]) -> list[dict[str, Any]]:
             seen.add(key)
             rows.append({"port": port, "pid": pid, "command": _process_command(pid)})
     return rows
+
+
+def _debug_port_is_free(port: int) -> bool:
+    try:
+        value = int(port)
+    except (TypeError, ValueError):
+        return False
+    return 0 < value < 65536 and not _listener_rows([value])
+
+
+def _pick_free_debug_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _ensure_debug_port_free(port: int) -> None:
+    rows = _listener_rows([int(port)])
+    if rows:
+        listeners = ", ".join(str(row.get("pid")) for row in rows)
+        raise SologsbError(f"Chrome 调试端口 {port} 已被占用，拒绝复用或连接: listeners={listeners}")
+
+
+def _command_uses_chrome_profile(command: str, profile: Path) -> bool:
+    expected = str(profile.expanduser().resolve(strict=False))
+    pattern = re.compile(r"--user-data-dir=(?P<value>\"[^\"]+\"|'[^']+'|\S+)")
+    for match in pattern.finditer(str(command)):
+        raw = match.group("value").strip().strip("'\"")
+        try:
+            candidate = str(Path(raw).expanduser().resolve(strict=False))
+        except (OSError, RuntimeError):
+            continue
+        if candidate == expected:
+            return True
+    return False
+
+
+def _process_parent_pid(pid: int) -> int:
+    proc = run(["ps", "-p", str(int(pid)), "-o", "ppid="], check=False)
+    value = proc.stdout.decode("utf-8", errors="replace").strip()
+    return int(value) if value.isdigit() else 0
+
+
+def _process_belongs_to_instance(
+    pid: int,
+    recording_pid: int,
+    profile: Path,
+    pre_existing_pids: set[int],
+    *,
+    command: str | None = None,
+) -> bool:
+    try:
+        pid = int(pid)
+        recording_pid = int(recording_pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0 or recording_pid <= 0 or pid in pre_existing_pids:
+        return False
+    current = pid
+    seen: set[int] = set()
+    while current > 0 and current not in seen:
+        if current == recording_pid:
+            break
+        seen.add(current)
+        current = _process_parent_pid(current)
+    else:
+        return False
+    actual_command = _process_command(pid) if command is None else str(command)
+    return _command_uses_chrome_profile(actual_command, profile)
+
+
+def _pids_using_chrome_profile(profile: Path) -> set[int]:
+    return {
+        int(row["pid"])
+        for row in _chrome_process_rows()
+        if _command_uses_chrome_profile(str(row.get("command") or ""), profile)
+    }
+
+
+def chrome_instance_gate_ok(
+    report: dict[str, Any] | None,
+    *,
+    window_capture_reports: list[dict[str, Any]] | None = None,
+) -> bool:
+    if not isinstance(report, dict):
+        return False
+    try:
+        recording_pid = int(report.get("recordingChromePid") or 0)
+        window_id = int(report.get("windowId") or 0)
+        window_owner_pid = int(report.get("windowOwnerPid") or 0)
+        debug_port = int(report.get("debugPort") or 0)
+        pre_existing = {int(pid) for pid in (report.get("preExistingChromePids") or [])}
+        port_listeners = {int(pid) for pid in (report.get("portListenerPids") or [])}
+    except (TypeError, ValueError):
+        return False
+    validations = report.get("validations") if isinstance(report.get("validations"), dict) else {}
+    required_validations = (
+        "preExistingChromeSnapshotted",
+        "debugPortWasFreeBeforeLaunch",
+        "portOwnerValidatedBeforeCdp",
+        "windowOwnerValidated",
+        "windowOwnerUsesDedicatedProfile",
+    )
+    report_path = Path(str(report.get("path") or ""))
+    if (
+        report.get("status") != "ok"
+        or report.get("dedicatedInstance") is not True
+        or report.get("reusedRunningChrome") is not False
+        or report.get("userChromeTouched") is not False
+        or recording_pid <= 0
+        or recording_pid in pre_existing
+        or window_id <= 0
+        or window_owner_pid <= 0
+        or window_owner_pid in pre_existing
+        or not port_listeners
+        or bool(port_listeners & pre_existing)
+        or not (0 < debug_port < 65536)
+        or not str(report.get("userDataDir") or "").strip()
+        or not str(report.get("path") or "").strip()
+        or not report_path.is_file()
+        or any(validations.get(key) is not True for key in required_validations)
+        or report.get("profileRemoved") is not True
+        or report.get("profileExistsAfterCleanup") is not False
+        or report.get("cleanupStatus") != "removed"
+    ):
+        return False
+    if window_capture_reports is not None:
+        chrome_captures = [
+            item
+            for item in window_capture_reports
+            if _canonical_owner(str(item.get("ownerName") or ""), str(item.get("ownerBundleId") or ""))
+            == "Chrome"
+        ]
+        if not chrome_captures:
+            return False
+        try:
+            if not any(
+                int(item.get("windowId") or 0) == window_id
+                and int(item.get("ownerPid") or 0) == window_owner_pid
+                for item in chrome_captures
+            ):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _terminate_chrome_instance(
+    chrome_proc: subprocess.Popen[bytes] | None,
+    profile: Path,
+    pre_existing_pids: set[int],
+) -> dict[str, Any]:
+    """Terminate only this recording's Chrome process group/profile matches."""
+    root_pid = int(getattr(chrome_proc, "pid", 0) or 0) if chrome_proc is not None else 0
+    target_pids = {root_pid} if root_pid > 0 else set()
+    target_pids.update(_pids_using_chrome_profile(profile))
+    target_pids.difference_update(pre_existing_pids)
+    terminated: list[int] = []
+    errors: list[str] = []
+
+    def live_root() -> set[int]:
+        if root_pid > 0 and chrome_proc is not None and chrome_proc.poll() is None:
+            return {root_pid}
+        return set()
+
+    if chrome_proc is not None and chrome_proc.poll() is None and root_pid > 0:
+        try:
+            process_group = os.getpgid(root_pid)
+            if process_group == root_pid:
+                os.killpg(process_group, signal.SIGTERM)
+            else:
+                os.kill(root_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError) as exc:
+            if isinstance(exc, PermissionError):
+                errors.append(f"terminate {root_pid}: {exc}")
+
+    for pid in sorted(target_pids):
+        if pid == root_pid:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            terminated.append(pid)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            errors.append(f"terminate {pid}: {exc}")
+
+    if chrome_proc is not None and chrome_proc.poll() is None:
+        try:
+            chrome_proc.wait(timeout=6)
+        except subprocess.TimeoutExpired:
+            try:
+                os.kill(root_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        remaining = (_pids_using_chrome_profile(profile) | live_root()) - pre_existing_pids
+        if not remaining:
+            break
+        time.sleep(0.2)
+    remaining = (_pids_using_chrome_profile(profile) | live_root()) - pre_existing_pids
+    for pid in sorted(remaining):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            terminated.append(pid)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            errors.append(f"kill {pid}: {exc}")
+    time.sleep(0.3)
+    remaining = (_pids_using_chrome_profile(profile) | live_root()) - pre_existing_pids
+    if root_pid > 0 and chrome_proc is not None and chrome_proc.poll() is not None:
+        terminated.append(root_pid)
+    return {
+        "status": "ok" if not remaining and not errors else "failed",
+        "recordingChromePid": root_pid,
+        "terminatedPids": sorted(set(terminated)),
+        "remainingPids": sorted(remaining),
+        "errors": errors,
+    }
 
 
 def _cleanup_recording_services(
@@ -1743,18 +2004,13 @@ def _cleanup_recording_services(
 
 
 def _remove_chrome_profile(profile: Path, report_path: Path) -> dict[str, Any]:
-    keep = os.environ.get("SOLOSGB_0917_KEEP_CHROME_PROFILE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
     payload: dict[str, Any] = {
-        "status": "skipped" if keep else "removed",
+        "status": "removed",
         "path": str(profile),
-        "keptByEnvironment": keep,
-        "removed": False,
+        "removed": not profile.exists(),
+        "profileExisted": profile.exists(),
     }
-    if not keep and profile.exists():
+    if profile.exists():
         for attempt in range(3):
             try:
                 shutil.rmtree(profile)
@@ -1767,6 +2023,10 @@ def _remove_chrome_profile(profile: Path, report_path: Path) -> dict[str, Any]:
                     time.sleep(0.4)
         if not payload["removed"]:
             payload["status"] = "failed"
+    payload["profileExistsAfterCleanup"] = profile.exists()
+    if payload["profileExistsAfterCleanup"]:
+        payload["removed"] = False
+        payload["status"] = "failed"
     write_json(report_path, payload)
     return payload
 
@@ -2098,6 +2358,7 @@ def _chrome_command(profile: Path, port: int) -> list[str]:
         str(CHROME_BINARY),
         f"--user-data-dir={profile}",
         f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
         *CHROME_FLAGS,
         "--no-startup-window",
     ]
@@ -2162,6 +2423,41 @@ def _chrome_open_background_window(
     return proc.stdout.decode("utf-8", errors="replace").strip()
 
 
+def _wait_for_dedicated_debug_port(
+    port: int,
+    chrome_proc: subprocess.Popen[bytes],
+    profile: Path,
+    pre_existing_pids: set[int],
+    *,
+    timeout: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Wait for the listener and verify it belongs to this process before any CDP call."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if chrome_proc.poll() is not None:
+            raise SologsbError(f"Chrome 提前退出({chrome_proc.returncode})，未建立独立调试端口 {port}")
+        rows = _listener_rows([int(port)])
+        if rows:
+            for row in rows:
+                pid = int(row.get("pid") or 0)
+                if pid in pre_existing_pids:
+                    raise SologsbError(
+                        f"调试端口 {port} 由录制前已存在的 Chrome 进程监听，拒绝连接或驱动: pid={pid}"
+                    )
+                if not _process_belongs_to_instance(
+                    pid,
+                    int(chrome_proc.pid),
+                    profile,
+                    pre_existing_pids,
+                ):
+                    raise SologsbError(
+                        f"调试端口 {port} 的监听进程不属于本次新起的 Chrome/profile，拒绝发送 CDP 指令: pid={pid}"
+                    )
+            return rows
+        time.sleep(0.2)
+    raise SologsbError(f"本次新起的 Chrome 未监听调试端口 {port}")
+
+
 def _record_chrome_segment(
     *,
     output_dir: Path,
@@ -2223,43 +2519,120 @@ def _record_chrome_segment(
         ),
         encoding="utf-8",
     )
-    port = random.randrange(9300, 9900)
+    pre_existing_chrome_windows = _chrome_window_snapshot()
+    pre_existing_chrome_pids = {int(row["pid"]) for row in _chrome_process_rows()}
+    pre_existing_chrome_pids.update(
+        int(window.get("ownerPid") or 0)
+        for window in pre_existing_chrome_windows
+        if int(window.get("ownerPid") or 0) > 0
+    )
+    pre_existing_window_ids = {
+        int(window.get("windowId") or 0)
+        for window in pre_existing_chrome_windows
+        if int(window.get("windowId") or 0) > 0
+    }
+    port = _pick_free_debug_port()
     cdp_url = f"http://127.0.0.1:{port}"
-    chrome_pids: list[int] = []
+    profile_resolved = str(profile.expanduser().resolve(strict=False))
+    instance_report_path = output_dir / "chrome-instance.json"
+    cleanup_report_path = output_dir / "chrome-profile-cleanup.json"
+    instance_report: dict[str, Any] = {
+        "status": "initializing",
+        "dedicatedInstance": False,
+        "reusedRunningChrome": False,
+        "userChromeTouched": False,
+        "recordingChromePid": 0,
+        "preExistingChromePids": sorted(pre_existing_chrome_pids),
+        "preExistingChromeWindows": pre_existing_chrome_windows,
+        "windowId": 0,
+        "windowOwnerPid": 0,
+        "portListenerPids": [],
+        "userDataDir": profile_resolved,
+        "debugPort": port,
+        "path": str(instance_report_path.resolve()),
+        "validations": {
+            "preExistingChromeSnapshotted": True,
+            "debugPortWasFreeBeforeLaunch": False,
+            "portOwnerValidatedBeforeCdp": False,
+            "windowOwnerValidated": False,
+            "windowOwnerUsesDedicatedProfile": False,
+        },
+        "profileRemoved": False,
+        "profileExistsAfterCleanup": profile.exists(),
+        "cleanupStatus": "pending",
+        "cleanupPath": str(cleanup_report_path.resolve()),
+        "startedAt": utc_now(),
+    }
+    write_json(instance_report_path, instance_report)
     chrome_proc: subprocess.Popen[bytes] | None = None
     chrome_log = (output_dir / "chrome.log").open("wb")
     try:
+        _ensure_debug_port_free(port)
+        instance_report["validations"]["debugPortWasFreeBeforeLaunch"] = True
+        write_json(instance_report_path, instance_report)
         chrome_proc = subprocess.Popen(
             _chrome_command(profile, port),
             stdin=subprocess.DEVNULL,
             stdout=chrome_log,
             stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
-        deadline = time.monotonic() + 30
-        version: dict[str, Any] = {}
-        while time.monotonic() < deadline:
-            if chrome_proc.poll() is not None:
-                raise SologsbError(f"Chrome 提前退出({chrome_proc.returncode})，详见 {output_dir / 'chrome.log'}")
-            try:
-                with urlopen(cdp_url + "/json/version", timeout=2) as response:
-                    version = json.loads(response.read().decode("utf-8"))
-                    break
-            except Exception:
-                time.sleep(0.25)
-        else:
-            raise SologsbError("Chrome CDP 未启动")
-        chrome_pids = [chrome_proc.pid]
+        instance_report["dedicatedInstance"] = True
+        instance_report["recordingChromePid"] = int(chrome_proc.pid)
+        write_json(instance_report_path, instance_report)
+
+        # Never issue a CDP request until the debug port is owned by this process.
+        listener_rows = _wait_for_dedicated_debug_port(
+            port,
+            chrome_proc,
+            profile,
+            pre_existing_chrome_pids,
+        )
+        instance_report["portListenerPids"] = sorted({int(row["pid"]) for row in listener_rows})
+        instance_report["validations"]["portOwnerValidatedBeforeCdp"] = True
+        write_json(instance_report_path, instance_report)
+        with urlopen(cdp_url + "/json/version", timeout=2) as response:
+            version = json.loads(response.read().decode("utf-8"))
         _chrome_open_background_window(
             str(version.get("webSocketDebuggerUrl") or ""),
             window_bounds,
         )
-        window_info = _window_info_for_pids(chrome_pids, label="Chrome")
+        window_info = _window_info_for_pids([int(chrome_proc.pid)], label="Chrome")
+        window_id = int(window_info.get("windowId") or 0)
+        window_owner_pid = int(window_info.get("ownerPid") or 0)
+        if window_id in pre_existing_window_ids or window_owner_pid in pre_existing_chrome_pids:
+            raise SologsbError(
+                f"CDP 创建的窗口命中录制前已存在的 Chrome 窗口/进程，拒绝采集: "
+                f"windowId={window_id}, ownerPid={window_owner_pid}"
+            )
+        if not _process_belongs_to_instance(
+            window_owner_pid,
+            int(chrome_proc.pid),
+            profile,
+            pre_existing_chrome_pids,
+        ):
+            raise SologsbError(
+                f"被采集窗口不属于本次新起的 Chrome 或命令行 profile 不符，拒绝采集: "
+                f"windowId={window_id}, ownerPid={window_owner_pid}"
+            )
+        instance_report.update(
+            {
+                "status": "ok",
+                "windowId": window_id,
+                "windowOwnerPid": window_owner_pid,
+                "confirmedAt": utc_now(),
+            }
+        )
+        instance_report["validations"]["windowOwnerValidated"] = True
+        instance_report["validations"]["windowOwnerUsesDedicatedProfile"] = True
+        write_json(instance_report_path, instance_report)
+
         # 系统可能把请求的窗口尺寸改写，按实际尺寸复核，避免成片留黑边或拉伸。
         _assert_browser_window_aspect(window_info)
         focus_guard.restore_if_recording_frontmost(
-            set(chrome_pids),
+            {int(chrome_proc.pid)},
             "chrome-open",
-            {int(window_info.get("windowId") or 0)},
+            {window_id},
         )
         node_path = _playwright_node_path(output_dir)
         _start_window_segment(
@@ -2298,17 +2671,35 @@ def _record_chrome_segment(
         # 成片里的页面比例就不正常了，这种录制不能算通过。
         _assert_window_bounds_unchanged(window_info, raw)
         return cropped, proc.returncode
+    except BaseException as exc:
+        if instance_report.get("status") != "ok":
+            instance_report["status"] = "failed"
+            instance_report["error"] = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
-        if chrome_proc is not None and chrome_proc.poll() is None:
-            chrome_proc.terminate()
-            try:
-                chrome_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                chrome_proc.kill()
-        run(["pkill", "-f", str(profile)], check=False)
+        termination = _terminate_chrome_instance(
+            chrome_proc,
+            profile,
+            pre_existing_chrome_pids,
+        )
         chrome_log.close()
         time.sleep(0.5)
-        _remove_chrome_profile(profile, output_dir / "chrome-profile-cleanup.json")
+        profile_cleanup = _remove_chrome_profile(profile, cleanup_report_path)
+        instance_report.update(
+            {
+                "cleanupStatus": profile_cleanup.get("status"),
+                "cleanupPath": str(cleanup_report_path.resolve()),
+                "profileRemoved": profile_cleanup.get("removed") is True,
+                "profileExistsAfterCleanup": bool(profile_cleanup.get("profileExistsAfterCleanup")),
+                "terminatedChromePids": termination.get("terminatedPids") or [],
+                "chromeTermination": termination,
+                "profileCleanup": profile_cleanup,
+                "finishedAt": utc_now(),
+            }
+        )
+        if termination.get("status") != "ok" or profile_cleanup.get("status") != "removed":
+            instance_report["status"] = "failed"
+        write_json(instance_report_path, instance_report)
 
 
 def _run_web_terminal(
@@ -2997,7 +3388,15 @@ def _record_side_locked(
                 "visualContent": report.get("visualContent"),
             }
         )
-    chrome_profile_cleanup = read_json(runtime_dir / "chrome-profile-cleanup.json", {}) or {}
+    chrome_profile_cleanup_path = runtime_dir / "chrome-profile-cleanup.json"
+    chrome_profile_cleanup = read_json(chrome_profile_cleanup_path, {}) or {}
+    if chrome_profile_cleanup:
+        chrome_profile_cleanup["reportPath"] = str(chrome_profile_cleanup_path.resolve())
+    chrome_instance = read_json(runtime_dir / "chrome-instance.json", {}) or {}
+    chrome_instance_ok = mode != "web" or chrome_instance_gate_ok(
+        chrome_instance,
+        window_capture_reports=window_capture_reports,
+    )
     capture_backend_ok = bool(window_capture_reports) and all(
         item.get("captureBackend") == "screen-capture-kit"
         and item.get("showsCursor") is False
@@ -3019,13 +3418,19 @@ def _record_side_locked(
         "serviceCleanup": service_cleanup,
         "residualAppPortListeners": service_cleanup.get("residualAppPortListeners") or [],
         "chromeProfileCleanup": chrome_profile_cleanup,
+        "chromeInstance": chrome_instance,
     }
-    recording_ok = command_ok and recording_metadata["focusRestoreOk"] and recording_isolation_ok(
-        mode=mode,
-        window_capture_reports=window_capture_reports,
-        guard_reports=guard_reports,
-        frontmost_report=frontmost_report,
-        service_cleanup=service_cleanup,
+    recording_ok = (
+        command_ok
+        and recording_metadata["focusRestoreOk"]
+        and chrome_instance_ok
+        and recording_isolation_ok(
+            mode=mode,
+            window_capture_reports=window_capture_reports,
+            guard_reports=guard_reports,
+            frontmost_report=frontmost_report,
+            service_cleanup=service_cleanup,
+        )
     )
     capture_error_message = next(
         (
@@ -3035,6 +3440,8 @@ def _record_side_locked(
         ),
         "",
     )
+    if mode == "web" and not chrome_instance_ok:
+        capture_error_message = str(chrome_instance.get("error") or "Chrome 独立实例门禁未通过")
     result = {
         "ok": recording_ok,
         "mode": mode,

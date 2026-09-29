@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "20260929-no-double-perfect-delivery",
+  "effectiveFrom": "2026-09-29T00:00:00+08:00",
+  "expiresAt": "2026-09-30T00:00:00+08:00",
+  "timezone": "Asia/Shanghai",
+  "scope": "sologsb-0917-submission",
+  "condition": {
+    "field": "delivery.score",
+    "operator": "both-equal",
+    "value": 5
+  },
+  "action": "discard-no-submit",
+  "message": "2026-09-29 按真实产物评定 A/B 交付完整性；如果两侧真实结果都为 5 分，丢弃任务，不提交。",
+  "selfDeleteOnExpiry": true,
+  "documentation": {
+    "path": "SKILL.md",
+    "startMarker": "<!-- temporary-constraint:20260929-no-double-perfect-delivery:start -->",
+    "endMarker": "<!-- temporary-constraint:20260929-no-double-perfect-delivery:end -->"
+  }
+}

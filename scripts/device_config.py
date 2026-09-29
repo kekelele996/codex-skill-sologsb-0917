@@ -24,7 +24,6 @@ DEFAULT_CONFIG_PATH = Path.home() / ".codex" / "sologsb" / "config.json"
 FIELDS: dict[str, tuple[str | None, str]] = {
     "claude.apiKey": ("SOLOSB_CLAUDE_KEY", ""),
     "claude.baseUrl": ("SOLOSB_ANTHROPIC_BASE_URL", ""),
-    "claude.model": ("SOLOSB_MODEL", "auto_model/urm"),
     "claude.image": ("SOLOSB_DOCKER_IMAGE", "adminfather/benzhi-claude-code2:20260919"),
     "claude.contextWindow": ("SOLOSB_CONTEXT_WINDOW", "1000000"),
     # 容器上限由 side_runner 动态优先读取本字段；环境变量仅作为字段缺失时的回退。

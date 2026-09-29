@@ -20,7 +20,10 @@ _device_config.load_and_apply()
 
 from artifact_verifier import run_verification
 from common import (
+    AB_COMMON_RUN_PARAMETER_KEYS,
+    AB_MODELS,
     DEFAULT_RECORDING_LOCK_TIMEOUT,
+    FIXED_CANDIDATE_BY_SIDE,
     SCHEMA_FALLBACK,
     SologsbError,
     ensure_single_side_trace,
@@ -43,7 +46,13 @@ from github_repo import init_github_repo
 from gsb_tools import export_gsb
 from prompt_tools import install_prompt
 from project_claims import release_claim_if_finished, release_project_claim
-from recorder import prepare_recording, record_side, recording_isolation_ok, video_dimensions
+from recorder import (
+    chrome_instance_gate_ok,
+    prepare_recording,
+    record_side,
+    recording_isolation_ok,
+    video_dimensions,
+)
 from semantic_review import ensure_packets
 from side_runner import (
     DEFAULT_CANDIDATE_COUNT,
@@ -55,6 +64,7 @@ from side_runner import (
 )
 from source_ingest import ingest_source
 from trace_validator import validate_single_round
+from temporary_constraints import prune_expired_policies
 
 STOP_TASKS_PATH = Path(os.environ.get(
     "SOLOSB_STOP_TASKS_PATH",
@@ -137,6 +147,7 @@ def cmd_prompt(args: argparse.Namespace) -> int:
         root,
         candidate_path=args.candidate.expanduser().resolve(),
         review_path=args.review.expanduser().resolve(),
+        difficulty_audit_path=args.difficulty_audit.expanduser().resolve(),
         task_type=args.task_type,
         difficulty=args.difficulty,
         history_path=args.history.expanduser().resolve() if args.history else None,
@@ -355,6 +366,37 @@ def _excel_errors(root: Path, state: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _recording_chrome_instance_errors(
+    side: str,
+    video: dict[str, Any],
+    window_capture_reports: list[dict[str, Any]],
+) -> list[str]:
+    if video.get("mode") != "web":
+        return []
+    metadata = video.get("recordingMetadata") or {}
+    instance_path = Path(str((metadata.get("chromeInstance") or {}).get("path") or ""))
+    cleanup_meta = metadata.get("chromeProfileCleanup") or {}
+    cleanup_path = Path(str(cleanup_meta.get("reportPath") or cleanup_meta.get("path") or (metadata.get("chromeInstance") or {}).get("cleanupPath") or ""))
+    errors: list[str] = []
+    if not instance_path.is_file():
+        errors.append(f"{side} Chrome 独立实例报告缺失")
+    else:
+        report = read_json(instance_path, {}) or {}
+        if not chrome_instance_gate_ok(report, window_capture_reports=window_capture_reports):
+            errors.append(f"{side} Chrome 独立实例门禁未通过")
+    if not cleanup_path.is_file():
+        errors.append(f"{side} Chrome 临时 profile 清理报告缺失")
+    else:
+        cleanup = read_json(cleanup_path, {}) or {}
+        if (
+            cleanup.get("status") != "removed"
+            or cleanup.get("removed") is not True
+            or cleanup.get("profileExistsAfterCleanup") is not False
+        ):
+            errors.append(f"{side} Chrome 临时 profile 未确认删除")
+    return errors
+
+
 def build_status(root: Path) -> dict[str, Any]:
     state = load_state(root)
     errors: list[str] = []
@@ -363,6 +405,16 @@ def build_status(root: Path) -> dict[str, Any]:
         errors.append("缺少提示词")
     elif sha256_file(prompt_path) != str(state.get("promptSha256") or ""):
         errors.append("提示词哈希不匹配")
+    difficulty_path = Path(str(state.get("difficultyAuditPath") or ""))
+    difficulty_audit = state.get("difficultyAudit") or {}
+    if not difficulty_path.is_file():
+        errors.append("缺少困难难度证明")
+    elif not difficulty_audit.get("ok"):
+        errors.append("困难难度证明未通过")
+    elif difficulty_audit.get("difficulty") != str(state.get("difficulty") or ""):
+        errors.append("困难难度证明与任务难度不一致")
+    elif difficulty_audit.get("auditSha256") != sha256_file(difficulty_path):
+        errors.append("困难难度证明哈希不匹配")
     heads: set[str] = set()
     if state.get("remoteUrl"):
         heads = _remote_heads(str(state["remoteUrl"]))
@@ -417,13 +469,22 @@ def build_status(root: Path) -> dict[str, Any]:
             errors.append(f"{side} 录屏后台/无干扰元数据门禁未通过")
         if not recording_metadata.get("focusRestores") or recording_metadata.get("focusRestoreOk") is not True:
             errors.append(f"{side} 缺少或未通过焦点恢复记录")
+        errors.extend(_recording_chrome_instance_errors(side, video, window_captures))
         if (recording_metadata.get("serviceCleanup") or {}).get("residualAppPortListeners"):
             errors.append(f"{side} 应用端口仍有残留监听进程")
+        chrome_isolation_paths: list[Any] = []
+        if video.get("mode") == "web":
+            chrome_isolation_paths = [
+                (recording_metadata.get("chromeInstance") or {}).get("path"),
+                ((recording_metadata.get("chromeProfileCleanup") or {}).get("reportPath")
+                 or (recording_metadata.get("chromeInstance") or {}).get("cleanupPath")),
+            ]
         isolation_paths = [
             *(item.get("path") for item in window_captures),
             *(item.get("path") for item in cursor_reports),
             (recording_metadata.get("frontmostSampling") or {}).get("path"),
             (recording_metadata.get("serviceCleanup") or {}).get("path"),
+            *chrome_isolation_paths,
         ]
         if any(not Path(str(path or "")).is_file() for path in isolation_paths):
             errors.append(f"{side} 窗口录屏隔离报告缺失")
@@ -438,6 +499,23 @@ def build_status(root: Path) -> dict[str, Any]:
                 errors.append(f"{side} 产物父提交不是初始快照")
     side_a_state = (state.get("sides") or {}).get("A") or {}
     side_b_state = (state.get("sides") or {}).get("B") or {}
+    if side_a_state.get("model") != AB_MODELS["A"] or side_b_state.get("model") != AB_MODELS["B"]:
+        errors.append("A/B 模型名不符合固定规则")
+    model_plan = state.get("modelPlan") if isinstance(state.get("modelPlan"), dict) else {}
+    if model_plan.get("diffKeys") != ["modelname"]:
+        errors.append("A/B 共同参数计划没有限定为只切换 modelname")
+    for key in AB_COMMON_RUN_PARAMETER_KEYS:
+        values = {
+            side: str(((state.get("sides") or {}).get(side) or {}).get(key) or "")
+            for side in ("A", "B")
+        }
+        if not all(values.values()) or len(set(values.values())) != 1:
+            errors.append(f"A/B 共同运行参数 {key} 缺失或不一致")
+    candidate_mapping = state.get("candidateMapping") or {}
+    for side, expected_candidate in FIXED_CANDIDATE_BY_SIDE.items():
+        actual_candidate = str((candidate_mapping.get(side) or {}).get("candidateId") or "")
+        if actual_candidate != expected_candidate:
+            errors.append(f"{side} 未绑定 {expected_candidate}")
     if side_a_state.get("harnessVersion") != side_b_state.get("harnessVersion"):
         errors.append("A/B Harness 版本不一致")
     if side_a_state.get("imageDigest") != side_b_state.get("imageDigest"):
@@ -564,6 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
     prompt.add_argument("--difficulty", required=True, choices=["困难", "地狱"])
     prompt.add_argument("--candidate", type=Path, required=True)
     prompt.add_argument("--review", type=Path, required=True)
+    prompt.add_argument("--difficulty-audit", type=Path, required=True)
     prompt.add_argument("--history", type=Path)
     prompt.add_argument("--allow-over-170", action="store_true")
     prompt.set_defaults(func=cmd_prompt)
@@ -574,15 +653,16 @@ def build_parser() -> argparse.ArgumentParser:
     github.add_argument("--dry-run", action="store_true")
     github.set_defaults(func=cmd_github_init)
 
-    run_parser = sub.add_parser("run", help="并行运行 N 个候选并将前两名映射 A/B；默认无头")
+    run_parser = sub.add_parser("run", help="并行运行固定 A/B 模型；默认无头")
     run_parser.add_argument("--task-root", required=True)
     run_parser.add_argument("--side", required=True, choices=["A", "B", "both"])
     run_parser.add_argument("--timeout", type=float, default=7200, help="单 attempt 超时秒数，默认 7200")
     run_parser.add_argument(
         "--candidates",
         type=int,
+        choices=[DEFAULT_CANDIDATE_COUNT],
         default=DEFAULT_CANDIDATE_COUNT,
-        help="首轮并行候选数，单 Key 默认 2；前两名完成者映射为 A/B",
+        help="固定为 2；candidate-1=A(auto_model/urm)，candidate-2=B(ark/urm-03)",
     )
     run_parser.add_argument(
         "--attempts",
@@ -692,6 +772,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    prune_expired_policies()
     parser = build_parser()
     args = parser.parse_args()
     stop_marker = _find_stop_marker(args)

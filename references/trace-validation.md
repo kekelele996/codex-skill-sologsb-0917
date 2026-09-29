@@ -17,13 +17,13 @@
 从本地初始快照重新 clone，再创建新容器、新 Claude home 和新 SessionID，并从同一提示词
 重新开始；每个候选最多六次实际尝试（含首次）。Claude Code 内部的自动重连默认最多十次，
 属于同一个 attempt，不算一次新尝试，也不能替代上述全新启动。已经通过结构校验的候选保持 staged。
-候选竞速得到最先完成的两个 staged 结果后，立即按完成顺序映射为 A/B，未进前两名的候选
-可以主动停止；候选目录名保持不变。
+candidate-1 固定为 A，modelname 为 `auto_model/urm`；candidate-2 固定为 B，modelname 为
+`ark/urm-03`。两侧只允许这一点不同，候选目录名保持不变，不按完成顺序交换。
 
 ## 结束后的语义完成审核
 
 结构和单 attempt 默认超时为 7200 秒。`end_turn` 校验只能证明回合结束，不能证明需求已完成。
-前两名候选映射 A/B 后，分别读取 `monitor/semantic/<side>.packet.json`，逐条核对提示词要求对应的
+两侧完成结构校验后，分别读取 `monitor/semantic/<side>.packet.json`，逐条核对提示词要求对应的
 候选轨迹事件和候选产物文件，写入 `<side>.review.json`。只有两侧都满足：
 
 - `completed=true`
