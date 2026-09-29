@@ -137,6 +137,7 @@ def cmd_prompt(args: argparse.Namespace) -> int:
         root,
         candidate_path=args.candidate.expanduser().resolve(),
         review_path=args.review.expanduser().resolve(),
+        difficulty_audit_path=args.difficulty_audit.expanduser().resolve(),
         task_type=args.task_type,
         difficulty=args.difficulty,
         history_path=args.history.expanduser().resolve() if args.history else None,
@@ -363,6 +364,16 @@ def build_status(root: Path) -> dict[str, Any]:
         errors.append("缺少提示词")
     elif sha256_file(prompt_path) != str(state.get("promptSha256") or ""):
         errors.append("提示词哈希不匹配")
+    difficulty_path = Path(str(state.get("difficultyAuditPath") or ""))
+    difficulty_audit = state.get("difficultyAudit") or {}
+    if not difficulty_path.is_file():
+        errors.append("缺少困难难度证明")
+    elif not difficulty_audit.get("ok"):
+        errors.append("困难难度证明未通过")
+    elif difficulty_audit.get("difficulty") != str(state.get("difficulty") or ""):
+        errors.append("困难难度证明与任务难度不一致")
+    elif difficulty_audit.get("auditSha256") != sha256_file(difficulty_path):
+        errors.append("困难难度证明哈希不匹配")
     heads: set[str] = set()
     if state.get("remoteUrl"):
         heads = _remote_heads(str(state["remoteUrl"]))
@@ -564,6 +575,7 @@ def build_parser() -> argparse.ArgumentParser:
     prompt.add_argument("--difficulty", required=True, choices=["困难", "地狱"])
     prompt.add_argument("--candidate", type=Path, required=True)
     prompt.add_argument("--review", type=Path, required=True)
+    prompt.add_argument("--difficulty-audit", type=Path, required=True)
     prompt.add_argument("--history", type=Path)
     prompt.add_argument("--allow-over-170", action="store_true")
     prompt.set_defaults(func=cmd_prompt)

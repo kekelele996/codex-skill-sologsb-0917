@@ -1,12 +1,12 @@
 # sologsb-0917
 
-全局版本号 `1.7.4`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
+全局版本号 `1.7.5`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
 
 0917 期 Pair-wise GSB 的可复用 Codex Skill。详见 `SKILL.md`。
 
 默认流程：
 
-1. 困难题默认单 attempt 超时为 7200 秒，避免 3600 秒过早重启；
+1. 困难题先通过 G16 难度证明：至少两个独立困难轴、至少一个强困难轴、合计至少三个源码锚点；规则多和改动行数多都不等于困难。默认单 attempt 超时为 7200 秒，避免 3600 秒过早重启；
 2. 先建立本地初始快照，再拉取 N 份隔离源码（单 Key 默认 2），目录固定为
    `source/candidates/candidate-1..N`；候选目录永不改名。
 3. `run --side both --candidates 2` 让 N 个候选在独立容器中并行无头执行；Base URL 取设备配置的 `claude.baseUrl`。
