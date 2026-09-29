@@ -148,7 +148,7 @@ SOURCE_EXTENSIONS = {
     ".svelte", ".swift", ".ts", ".tsx", ".vue",
 }
 GENERATED_DIR_NAMES = {
-    "node_modules", "dist", "build", "coverage", ".next", ".nuxt", ".output",
+    "node_modules", "dist", "build", "coverage", ".next", "out", ".nuxt", ".output", ".angular", ".stencil", "www",
     ".vite", ".svelte-kit", "target", "vendor", "__pycache__", ".venv", "venv", ".cache",
 }
 
@@ -199,7 +199,11 @@ DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
 def _is_generated_or_lock_path(path: str) -> bool:
     parts = [part for part in Path(path).parts if part not in {"", "."}]
     name = parts[-1] if parts else ""
-    return any(part in GENERATED_DIR_NAMES for part in parts) or name in LOCKFILE_NAMES
+    return (
+        any(part in GENERATED_DIR_NAMES for part in parts)
+        or name.endswith(".tsbuildinfo")
+        or name in LOCKFILE_NAMES
+    )
 
 
 def _is_source_path(path: str) -> bool:

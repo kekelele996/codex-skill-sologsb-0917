@@ -2534,17 +2534,26 @@ class ChangeVolumeGateTests(unittest.TestCase):
             (repo / "node_modules" / "dep.js").write_text("x\n" * 50, encoding="utf-8")
             (repo / ".output" / "public").mkdir(parents=True)
             (repo / ".output" / "public" / "index.html").write_text("x\n" * 50, encoding="utf-8")
+            (repo / "out" / "_next").mkdir(parents=True)
+            (repo / "out" / "_next" / "page.js").write_text("x\n" * 50, encoding="utf-8")
+            (repo / "tsconfig.tsbuildinfo").write_text("x\n" * 50, encoding="utf-8")
             side_runner._install_generated_path_excludes(repo)
             self._git(repo, "add", "-A")
+            # Explicit adds simulate a stale task or model that already staged generated files
+            # despite .git/info/exclude; the unstage guard must still remove them.
+            self._git(repo, "add", "-f", "out/_next/page.js", "tsconfig.tsbuildinfo")
             staged_before_unstage = self._git(repo, "diff", "--cached", "--name-only", initial)
             removed = side_runner._unstage_generated_paths(repo, initial)
+            staged_after_unstage = self._git(repo, "diff", "--cached", "--name-only", initial)
             lines, files = side_runner._staged_business_change_lines(repo, initial)
 
-            self.assertEqual(removed, ["package-lock.json"])
+            self.assertEqual(set(removed), {"package-lock.json", "out/_next/page.js", "tsconfig.tsbuildinfo"})
             self.assertEqual(lines, 12)
             self.assertEqual(files, ["app.ts"])
             self.assertNotIn("node_modules/dep.js", staged_before_unstage)
             self.assertNotIn(".output/public/index.html", staged_before_unstage)
+            self.assertNotIn("out/_next/page.js", staged_after_unstage)
+            self.assertNotIn("tsconfig.tsbuildinfo", staged_after_unstage)
 
     def test_paired_lockfiles_follow_manifest_changes(self) -> None:
         from common import paired_lockfiles
@@ -2660,6 +2669,8 @@ class ChangeVolumeGateTests(unittest.TestCase):
             self.assertIn("node_modules/", text)
             self.assertIn("dist/", text)
             self.assertIn(".output/", text)
+            self.assertIn("out/", text)
+            self.assertIn("*.tsbuildinfo", text)
             self.assertNotIn("package-lock.json", text)
             self.assertNotIn("go.sum", text)
             self.assertIn(".svelte-kit/", text)
@@ -2673,6 +2684,47 @@ class ChangeVolumeGateTests(unittest.TestCase):
         self.assertTrue(side_runner._is_generated_or_lock_path(".output/public/index.html"))
         self.assertIn(".output", self.preflight.GENERATED_DIR_NAMES)
         self.assertTrue(self.preflight._is_generated_or_lock_path(".output/server/index.mjs"))
+
+    def test_generated_path_excludes_include_next_export_and_tsbuildinfo(self) -> None:
+        self.assertIn("out/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertIn("*.tsbuildinfo", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertTrue(side_runner._is_generated_or_lock_path("out/index.html"))
+        self.assertTrue(side_runner._is_generated_or_lock_path("tsconfig.tsbuildinfo"))
+        self.assertIn("out", self.preflight.GENERATED_DIR_NAMES)
+        self.assertTrue(self.preflight._is_generated_or_lock_path("out/index.html"))
+        self.assertTrue(self.preflight._is_generated_or_lock_path("sub/tsconfig.tsbuildinfo"))
+
+    def test_generated_path_excludes_include_angular_cache(self) -> None:
+        self.assertIn(".angular/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertTrue(side_runner._is_generated_or_lock_path(".angular/cache/vite/deps/chunk.js"))
+        self.assertIn(".angular", self.preflight.GENERATED_DIR_NAMES)
+        self.assertTrue(self.preflight._is_generated_or_lock_path(".angular/cache/vite/deps/chunk.js"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            self._git(repo, "init", "-b", "main")
+            self._git(repo, "config", "user.name", "tester")
+            self._git(repo, "config", "user.email", "tester@example.com")
+            cache = repo / ".angular" / "cache" / "vite" / "deps"
+            cache.mkdir(parents=True)
+            (cache / "chunk.js").write_text("x\n", encoding="utf-8")
+            self._git(repo, "add", "-f", ".angular/cache/vite/deps/chunk.js")
+            self._git(repo, "commit", "-m", "dirty")
+            revision = self._git(repo, "rev-parse", "HEAD")
+            self.assertEqual(
+                side_runner._committed_generated_paths(repo, revision),
+                [".angular/cache/vite/deps/chunk.js"],
+            )
+
+    def test_generated_path_excludes_include_stencil_cache_and_www(self) -> None:
+        self.assertIn(".stencil/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertIn("www/", side_runner.GENERATED_PATH_EXCLUDES)
+        self.assertTrue(side_runner._is_generated_or_lock_path(".stencil/cache/optimize.log"))
+        self.assertTrue(side_runner._is_generated_or_lock_path("www/index.html"))
+        self.assertIn(".stencil", self.preflight.GENERATED_DIR_NAMES)
+        self.assertIn("www", self.preflight.GENERATED_DIR_NAMES)
+        self.assertTrue(self.preflight._is_generated_or_lock_path(".stencil/cache/optimize.log"))
+        self.assertTrue(self.preflight._is_generated_or_lock_path("www/build/app-root.entry.js"))
 
     def test_reason_file_token_recognizes_svelte_paths(self) -> None:
         self.assertEqual(
@@ -3089,6 +3141,29 @@ class SubmitApprovalTests(unittest.TestCase):
                     {**preflight, "lineGate": {"onlyBlocker": False, "reviewSha256": review_sha}},
                 )
 
+
+    def test_platform_today_count_uses_overview_today_submitted(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fake_request(method, url, *_args, **_kwargs):
+            calls.append((method, url))
+            return {"today": {"submitted": 82, "passed": 82}, "by_date": [{"date": "2026-09-27", "count": 99}]}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake_request):
+            count = self.submit_api.platform_today_count("https://solo.example", "cookie", "csrf")
+
+        self.assertEqual(count, 82)
+        self.assertEqual(calls, [("GET", "https://solo.example/api/v1/gsb/overview")])
+
+    def test_platform_today_count_falls_back_to_by_date(self) -> None:
+        def fake_request(*_args, **_kwargs):
+            return {"today": {}, "by_date": [{"date": "2026-09-27", "count": 83}]}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake_request), \
+                mock.patch.object(self.submit_api.daily_quota, "local_today", return_value="2026-09-27"):
+            count = self.submit_api.platform_today_count("https://solo.example", "cookie", "csrf")
+
+        self.assertEqual(count, 83)
 
     def test_poll_checks_once_per_minute_and_stops_after_ten_minutes(self) -> None:
         mod = self.submit_api
@@ -3722,6 +3797,25 @@ class DailyQuotaTests(unittest.TestCase):
 
                 self.assertEqual(self.quota.merge_platform_count(boom)["count"], 73)
 
+
+    def test_platform_overview_can_clear_stale_limit_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "quota.json"
+            today = self.quota.local_today()
+            path.write_text(json.dumps({
+                "date": today, "count": 100, "limit": 100,
+                "limitReached": True, "submissionIds": [],
+            }), encoding="utf-8")
+            env = {self.quota.FLAG_PATH_ENV: str(path), self.quota.DAILY_LIMIT_ENV: "100"}
+            with mock.patch.dict(os.environ, env):
+                state = self.quota.reserve(lambda: 82)
+                saved = self.quota.read_state()
+
+        self.assertTrue(state["reserved"])
+        self.assertEqual(state["count"], 83)
+        self.assertFalse(state["limitReached"])
+        self.assertEqual(state["platformCount"], 82)
+        self.assertFalse(saved["limitReached"])
 
 class PlatformTodayCountTests(unittest.TestCase):
     """当天提交量以总览接口为准，接口异常才回落到列表接口。"""
