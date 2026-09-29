@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.8.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.8.0`
-- 精确提交号：运行 `git rev-parse v1.8.0` 获取。
+- 全局版本号：`1.8.1`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.8.1`
+- 精确提交号：运行 `git rev-parse v1.8.1` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -160,7 +160,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   任务以 `模型审核中断：…` 结束。这是配置问题、不是偶发失败；遇到该中断必须回头核对设置页的 A/B 模型名与
   容器镜像实际能用的模型名，不得直接重跑。临时关闭用 `SOLOSB_MODEL_AUDIT=0`（默认开启，不推荐）。
 - 官方表单 fingerprint 更新（1.7.9）：2026-09-29 起表单为 `9a410bc6e129339b`、25 个字段，新增必填 `A-模型名称` / `B-模型名称`（`x_a_model_name` / `x_b_model_name`），由 state 里两侧的 model 自动写入；本地快照 `references/gsb-form-schema.json` 已同步。
-- 临时约束（仅本地日期 2026-09-29 有效，次日自动失效并清除运行时判断，不写入任务状态）：必须根据真实产物独立评定，不得为了避开双满分而随意压分。若复核后 A、B 交付完整性仍同为 5 分，`validate_delivery`、`gsb` 导出和提交预检直接阻断，任务应丢弃，不得提交；只有本侧真实证据确实不支持 5 分时，才能据实下调评分。
+- 2026-09-30 平台规则 G18（1.8.1，`references/g18-daily-full-score.md`）：同一人当天首次提交的数据里，A、B 两侧交付完整性都打满分的占比不得超过 10%，当天满 10 条后开始计算；一旦超过，当天之后再提交的两侧满分数据一律作废，非满分数据不受影响，返修无效。
+  口径：分母是当天已创建的提交条数（含当前这条），分子是其中两侧都等于 5 的条数，`> 10%` 才算超限。提交预检用实时接口复核并写 `monitor/g18-daily-full-score.json`，命中即出阻断项 `g18-daily-full-score`；实测 2026-09-29 的 2 条双满分数据就是这样被废弃的。
+  挽回顺序：先按本侧真实证据复核分数，确实不到 5 分就据实下调，禁止为了占比压分；两侧证据都撑得住 5 分时，这条阻断是唯一阻断项，`preflight` 记为 `g18_full_score_deferred`，`submit_api.py` 不上传不提交，直接走 `submit_deferred` 的次日再提交路径（返回码 3，状态 `deferred_g18_full_score`），把数据留到当天计数清零后再交。
 - 红线：A/B 交付完整性描述必须与本侧轨迹对应，不得出现对立意见。锚点必须在本侧原始轨迹中存在，分数和描述不得与本侧真实复核结果、引用证据、GSB 理由或 GSB 结论相反（详见 `references/delivery-scoring.md` 红线一）。本地（容器外）编写的任何测试和自动化脚本，包括验收、冒烟、Playwright、录制场景，都不参与交付完整性描述：不写进描述，不引用其证据，也不作为分数依据（红线二）。有页面的项目和之前一样引用录屏证据；纯后端 API 项目的录屏排除，改用验证计划的 `probe` 接口探活作为证据。描述和理由都直接写“请求了登录接口，返回404”这种主观直述，不写“从录屏来看”“根据编写的测试”。
 - GSB 理由不用先交代背景，开头直接写 A 侧方案做了什么；不得用“这次冲突在……”“本题冲突在……”等元描述开场。通顺度正反对照见 `references/reason-writing-rules.md` 的“2026-09-27 通顺度对照”。
 - GSB 理由与题目提示词都要写得像人话：理由按“一侧一段话”组织，相邻句不用同一称谓起头、每侧称谓最多 3 次；不写电报体，全文最多 6 句，结论前至少 2 处“结果”“导致”“但”“却”这类因果或转折衔接，不把两件事压成“先提交标题未更新”式短语，结论前必须点明判准和扣分点（2026-09-24 电报体打回后改为阻断）；句子不能以“检查”“核对”等动作直接起头而没有交代是哪一侧，两侧打平时结论统一写“因此选择Same”，不写“打平”，也不写“选A”“选B”（2026-09-25）；提示词像业务方交代需求，硬性措辞最多 3 处、分号最多 2 个，不用“刷新后……一致”式模板收尾。
@@ -291,6 +293,7 @@ python3 scripts/status_push.py uninstall
 11. `status=complete` 后直接运行 `submit --task-root ROOT --execute`，不再先做单独的人工 dry-run。提交命令会先执行完整预检、刷新历史文案缓存并对 `user_prompt` 与 `gsb_reason` 双重去重。
 12. 完整审核通过时，系统自动生成批准记录，`approvedBy` 为设备配置里的审批人，不使用人工审批文件；脚本通过 `/api/v1/submissions/upload` 上传四个文件，再调用 `/api/v1/gsb/submissions` 创建记录并轮询质检终态。
     - 如果预检状态为 `line_gate_approval_required`，确认低于 10 行是唯一阻断项后停止提交，等待设备配置里的审批人 在真实 TTY 中运行 `approve-line-gate --task-root ROOT`；审批后重新运行 `submit --task-root ROOT --execute`。
+    - 如果预检状态为 `g18_full_score_deferred`（G18 是唯一阻断项），`submit` 不会上传，返回码 3、状态 `deferred_g18_full_score`，任务登记进 `待提交`；按 `submit-deferred` 的次日夜间窗口重跑即可，不要为了绕开它压分。
     - 如果存在其他任何阻断项，直接修复后重跑，不得使用例外审批。
 13. 确认提交输出里的 `projectClaim.status` 为 `released`（或 `kept`，仅限 `PENDING_FIX`）。若为
     `release_failed`，运行 `release-claim --task-root ROOT --if-finished`；不要依赖 24 小时 TTL。
@@ -345,6 +348,7 @@ python3 scripts/sologsb.py version                                       # 打�
 - `references/reason-writing-rules.md`：GSB 文案编写通则（用词、句式、排版、结构与交稿自检清单），所有题目共用同一口径。
 - `references/reason-word-replacements.json`：文案禁用词与推荐替换词表；新增词只改这一处，`gsb_tools.py` 与提交预检共用。
 - `references/delivery-scoring.md`：A/B 交付完整性五档评分锚点、描述写法、正反例与草稿 `delivery` 格式。
+- `references/g18-daily-full-score.md`：平台规则 G18 当日两侧满分占比的口径、真实废弃样本与次日顺延处理。
 - `references/recording.md`：成功、失败和不同题型录屏。
 - `references/gsb-form-schema.json`：官方只读 schema 快照。
 - `references/gsb-draft-template.json`：带证据 ID 的 GSB 草稿模板。

@@ -463,13 +463,12 @@ DELIVERY_EDGE_RE = re.compile(
     r"(?:边界|异常|隐性|空值|空输入|空列表|非法|越权|权限|重复提交|重复|并发|冲突|回滚|刷新后|重启后|超长|上限|下限|校验|分页末|零值)"
 )
 DELIVERY_FULL_MIN_PASSING = 2
-# 临时约束：只在 2026-09-29 生效，使用本地日期等值判断；次日自动失效，
-# 不需要运行期删除或继续保留任何阻断状态。2026-09-30 后可整体移除这段判断。
-TEMPORARY_DOUBLE_FULL_SCORE_DISCARD_DATE = "2026-09-29"
-DELIVERY_TEMP_DOUBLE_FULL_SCORE_ERROR = (
-    "2026-09-29 临时约束：按真实产物评定时 A、B 两侧不得同时为 5 分。"
-    "当前双侧满分，应丢弃这个任务，不得提交；只有本侧证据确实不支持 5 分时才能据实下调评分。"
-)
+# 2026-09-30 平台规则 G18：同一人当天首次提交的数据里，A、B 两侧交付完整性都打满分的
+# 占比不得超过 10%，当天满 10 条后才开始计算；一旦超过，之后提交的两侧满分数据一律作废，
+# 返修无效。判定口径按平台真实废弃记录反推，见 references/delivery-scoring.md。
+G18_DAILY_FULL_SCORE_MIN_SUBMISSIONS = 10
+G18_DAILY_FULL_SCORE_RATIO_MAX = 0.10
+G18_DAILY_FULL_SCORE_WARN_RATIO = 0.08
 # 代码实现（1.7.6）：内部评估项，写在 draft.delivery.<side>.quality，不进官方表单，
 # 但约束交付完整性分数上限。美观度不参与评估（页面识别易误判）。
 QUALITY_NOTE_MIN = 20
@@ -526,9 +525,102 @@ def _local_today() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d")
 
 
-def _temporary_double_full_score_discard_active(today: str | None = None) -> bool:
-    """临时约束只覆盖生效当天的本地日期，过期后自动失效。"""
-    return (today or _local_today()) == TEMPORARY_DOUBLE_FULL_SCORE_DISCARD_DATE
+def _delivery_score_value(value: Any) -> int | None:
+    """把平台返回的打分（可能是字符串）归一成 1~5 的整数，认不出来就返回 None。"""
+    text = str(value or "").strip()
+    if text.isdigit() and 1 <= int(text) <= 5:
+        return int(text)
+    return None
+
+
+def _is_double_full_score(a_score: Any, b_score: Any) -> bool:
+    return _delivery_score_value(a_score) == 5 and _delivery_score_value(b_score) == 5
+
+
+def assess_daily_full_score_ratio(
+    day_records: list[dict[str, Any]] | None,
+    *,
+    new_scores: tuple[Any, Any] | None = None,
+    day: str | None = None,
+) -> dict[str, Any]:
+    """按平台规则 G18 复核“当日两侧满分占比”。
+
+    ``day_records`` 是当天已经创建的提交记录，每项至少要带本侧打分
+    （``scoreA``/``aScoreDelivery`` 与 ``scoreB``/``bScoreDelivery``）。
+    ``new_scores`` 传入当前待提交记录的 (A 分, B 分)，把它一并计入分母与分子，
+    这样 ``blocksCandidate`` 直接回答“这条要不要拦”。
+
+    口径：当天提交条数满 10 条后才开始计算；两侧满分占比超过 10% 时，
+    之后提交的两侧满分数据会被平台作废，非满分数据不受影响。
+    """
+    records = [item for item in (day_records or []) if isinstance(item, dict)]
+
+    def pair_of(item: dict[str, Any]) -> tuple[Any, Any]:
+        left = item.get("scoreA")
+        right = item.get("scoreB")
+        if left is None:
+            left = item.get("aScoreDelivery", item.get("a_score_delivery"))
+        if right is None:
+            right = item.get("bScoreDelivery", item.get("b_score_delivery"))
+        return left, right
+
+    before_pairs = [pair_of(item) for item in records]
+    before_total = len(before_pairs)
+    before_full = sum(1 for left, right in before_pairs if _is_double_full_score(left, right))
+    pairs = list(before_pairs)
+    candidate_full = False
+    if new_scores is not None:
+        candidate_full = _is_double_full_score(new_scores[0], new_scores[1])
+        pairs.append((new_scores[0], new_scores[1]))
+    total = len(pairs)
+    full = sum(1 for left, right in pairs if _is_double_full_score(left, right))
+    ratio = (full / total) if total else 0.0
+    ratio_before = (before_full / before_total) if before_total else 0.0
+    applicable = total >= G18_DAILY_FULL_SCORE_MIN_SUBMISSIONS
+    exceeded = bool(applicable and ratio > G18_DAILY_FULL_SCORE_RATIO_MAX)
+    blocks_candidate = bool(exceeded and candidate_full)
+    if blocks_candidate:
+        message = (
+            f"G18：这一条提交后当天共 {total} 条，其中两侧满分 {full} 条，占比 {ratio:.1%}，"
+            f"超过 {G18_DAILY_FULL_SCORE_RATIO_MAX:.0%} 上限；"
+            "当天之后再提交的两侧满分数据一律作废且返修无效。"
+            "只有本侧真实证据确实不支持 5 分时才据实下调评分，"
+            "否则把这条留到次日再提交，当天不要上传。"
+        )
+    elif applicable and ratio > G18_DAILY_FULL_SCORE_RATIO_MAX:
+        message = (
+            f"G18：当天共 {total} 条，两侧满分 {full} 条，占比 {ratio:.1%}，已超过上限；"
+            "这条不是两侧满分，仍然可以提交，但当天任何新的两侧满分数据都会被作废。"
+        )
+    elif not applicable:
+        message = (
+            f"G18：当天共 {total} 条，还没满 {G18_DAILY_FULL_SCORE_MIN_SUBMISSIONS} 条，"
+            "按规则暂不计算两侧满分占比。"
+        )
+    else:
+        message = (
+            f"G18：当天共 {total} 条，两侧满分 {full} 条，占比 {ratio:.1%}，"
+            f"未超过 {G18_DAILY_FULL_SCORE_RATIO_MAX:.0%} 上限。"
+        )
+    return {
+        "policy": "G18",
+        "day": day or _local_today(),
+        "minSubmissions": G18_DAILY_FULL_SCORE_MIN_SUBMISSIONS,
+        "maxRatio": G18_DAILY_FULL_SCORE_RATIO_MAX,
+        "warnRatio": G18_DAILY_FULL_SCORE_WARN_RATIO,
+        "dayCountBefore": before_total,
+        "bothFullCountBefore": before_full,
+        "ratioBefore": round(ratio_before, 4),
+        "dayCount": total,
+        "bothFullCount": full,
+        "ratio": round(ratio, 4),
+        "candidateBothFull": candidate_full,
+        "applicable": applicable,
+        "exceeded": exceeded,
+        "blocksCandidate": blocks_candidate,
+        "nearLimit": bool(applicable and ratio >= G18_DAILY_FULL_SCORE_WARN_RATIO),
+        "message": message,
+    }
 
 
 def _keychain_secret(service: str) -> str:
@@ -1301,11 +1393,15 @@ def validate_delivery(
     reason: str,
     *,
     today: str | None = None,
+    daily_full_score: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate A/B 交付完整性打分与描述（官方字段 a/b_score_delivery、a/b_desc_delivery）。
 
     评分锚点见 references/delivery-scoring.md；描述只谈交付完整性，
     允许与 GSB 理由有少量重合，但不得照抄理由，A/B 两段之间也不得雷同（平台规则 G12）。
+
+    ``daily_full_score`` 传 ``assess_daily_full_score_ratio`` 的结果，用来执行平台规则 G18；
+    不传时只做文案与评分本身的一致性检查。``today`` 仅为旧调用保留。
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -1417,8 +1513,9 @@ def validate_delivery(
             errors.append("GSB 结论为 Same，但两侧交付完整性相差 2 分以上，结论与打分对立")
         # 双满分从严（1.7.6）：分出胜负说明负方至少有一处可指认的差距，负方最高 4 分。
         if scores["A"] == 5 and scores["B"] == 5:
-            if _temporary_double_full_score_discard_active(today):
-                errors.append(DELIVERY_TEMP_DOUBLE_FULL_SCORE_ERROR)
+            assessment = daily_full_score if isinstance(daily_full_score, dict) else None
+            if assessment is not None and assessment.get("blocksCandidate"):
+                errors.append(str(assessment.get("message") or "G18：当天两侧满分占比超限，这条数据会被平台作废"))
             elif verdict in {"A 更好", "B 更好"}:
                 loser = "B" if verdict == "A 更好" else "A"
                 errors.append(

@@ -535,6 +535,31 @@ def release_finished_claim(task_root: Path) -> dict[str, Any]:
         return {"status": "release_failed", "error": str(exc)}
 
 
+def g18_deferral_plan(preflight_result: dict[str, Any], existing_id: str = "") -> dict[str, Any]:
+    """平台规则 G18：命中且是唯一阻断项时，把整条任务顺延到次日再提交。
+
+    返修（``existing_id`` 非空）不产生新记录，但把旧记录改成两侧满分同样会被作废，
+    所以这里不暂存，直接返回 ``revisionBlocked`` 让调用方报错。
+    """
+    assessment = preflight_result.get("g18DailyFullScore") or {}
+    hit = (
+        str(preflight_result.get("status") or "") == "g18_full_score_deferred"
+        and assessment.get("onlyBlocker") is True
+    )
+    message = str(
+        (assessment.get("assessment") or {}).get("message")
+        or "G18：当天两侧满分占比超限"
+    )
+    if not hit:
+        return {"defer": False, "revisionBlocked": False, "message": "", "assessment": assessment}
+    return {
+        "defer": not existing_id,
+        "revisionBlocked": bool(existing_id),
+        "message": message,
+        "assessment": assessment,
+    }
+
+
 def run_preflight(task_root: Path, preflight_script: Path) -> dict[str, Any]:
     proc = subprocess.run(
         [sys.executable, str(preflight_script), "--task-root", str(task_root)],
@@ -550,6 +575,8 @@ def run_preflight(task_root: Path, preflight_script: Path) -> dict[str, Any]:
         raise RuntimeError("提交前审核没有返回 JSON: " + proc.stdout[-2000:]) from exc
     if not result.get("ok"):
         if result.get("status") == "line_gate_approval_required" and (result.get("lineGate") or {}).get("onlyBlocker") is True:
+            return result
+        if result.get("status") == "g18_full_score_deferred" and (result.get("g18DailyFullScore") or {}).get("onlyBlocker") is True:
             return result
         raise RuntimeError("提交前审核存在阻断项:\n" + json.dumps(result.get("blockers") or [], ensure_ascii=False))
     return result
@@ -688,6 +715,32 @@ def main() -> int:
             if str(existing_detail.get("status") or "").strip() != "PENDING_FIX":
                 raise RuntimeError(f"提交 {candidate_id} 当前不是待返修状态，拒绝覆盖")
             existing_id = candidate_id
+
+    # 平台规则 G18：当天满 10 条后两侧满分占比超过 10%，之后再提交的两侧满分数据会被作废。
+    # 额度还够但命中 G18 时，把整条任务暂存到次日再提交，避免白天直接报废。
+    g18_plan = g18_deferral_plan(preflight_result, existing_id)
+    if g18_plan["defer"] or g18_plan["revisionBlocked"]:
+        if g18_plan["revisionBlocked"]:
+            raise RuntimeError(
+                "G18：这条返修记录在当前日期会落入“两侧满分占比超限”，平台按规则作废且返修无效；"
+                f"请先据实调整评分或改到次日提交。{g18_plan['message']}"
+            )
+        deferred = daily_quota.defer(
+            task_root, payload_path, payload, daily_quota.read_state(),
+            [sys.executable, str(Path(__file__).resolve()), "--task-root", str(task_root), "--execute"],
+            reason="当日两侧满分占比超限，已暂存",
+        )
+        print(json.dumps({
+            "status": "deferred_g18_full_score",
+            "ok": False,
+            "message": (
+                f"{g18_plan['message']} 本条未上传、未提交，已登记到待提交文件夹，"
+                f"{deferred['submitAfter']} 之后按当天新额度重跑 command 即可提交。"
+            ),
+            "assessment": g18_plan["assessment"],
+            "deferred": deferred,
+        }, ensure_ascii=False, indent=2))
+        return 3
 
     # 返修（PUT）不产生新提交，不占当日额度；新提交先在全局标志里预占一个名额。
     reserved = False

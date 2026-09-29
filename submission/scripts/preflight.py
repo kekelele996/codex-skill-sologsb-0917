@@ -644,6 +644,70 @@ def _fetch_history_detail(item_id: int) -> dict:
         return _readonly_json(f"/api/v1/gsb/submissions/{item_id}")
 
 
+def local_today() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d")
+
+
+def _local_date_of(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text[:10]
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone().strftime("%Y-%m-%d")
+
+
+def fetch_daily_delivery_records(day: str) -> list[dict]:
+    """读取当天已经创建的提交记录及其 a/b 交付完整性打分，供 G18 复核使用。
+
+    列表接口只返回当前账号自己的数据，``submitted_date`` 就是本地提交日期；
+    打分字段只在详情里，所以按住当天命中的记录逐条读详情。
+    """
+    params = {
+        "verdict": "", "git_state": "", "difficulty": "", "needs_review": "false",
+        "keyword": "", "date_from": "", "date_to": "", "user_id": "0", "team": "",
+        "ids": "", "leader_id": "0", "question_type": "", "only_stale": "false",
+        "stage": "", "page": "1", "page_size": "200",
+    }
+    first = _readonly_json("/api/v1/gsb/submissions?" + urllib.parse.urlencode(params))
+    meta = first.get("meta") or {}
+    total_pages = int(meta.get("total_pages") or 1)
+    rows = list(first.get("items") or [])
+    for page in range(2, total_pages + 1):
+        params["page"] = str(page)
+        payload = _readonly_json("/api/v1/gsb/submissions?" + urllib.parse.urlencode(params))
+        rows.extend(payload.get("items") or [])
+    today_ids = []
+    for item in rows:
+        item_id = int(item.get("id") or 0)
+        if item_id <= 0:
+            continue
+        submitted_day = str(item.get("submitted_date") or "").strip() or _local_date_of(
+            str(item.get("submitted_at") or "")
+        )
+        if submitted_day == day:
+            today_ids.append(item_id)
+    records: list[dict] = []
+    if today_ids:
+        with ThreadPoolExecutor(max_workers=min(GSB_HISTORY_DETAIL_WORKERS, len(today_ids))) as pool:
+            for item_id, detail in zip(today_ids, pool.map(_fetch_history_detail, today_ids)):
+                records.append({
+                    "id": item_id,
+                    "submittedDate": day,
+                    "submittedAt": str(detail.get("submitted_at") or detail.get("created_at") or ""),
+                    "scoreA": str(detail.get("a_score_delivery") or "").strip(),
+                    "scoreB": str(detail.get("b_score_delivery") or "").strip(),
+                    "qcHitRule": str(detail.get("qc_hit_rule") or ""),
+                    "status": str(detail.get("status_label") or detail.get("status") or ""),
+                })
+    records.sort(key=lambda item: str(item.get("submittedAt") or ""))
+    return records
+
+
 def _fetch_live_gsb_history(previous: dict | None = None) -> dict:
     params = {
         "verdict": "", "git_state": "", "difficulty": "", "needs_review": "false",
@@ -1536,6 +1600,29 @@ def assess_reason_quality(draft: dict, evidence_doc: dict | None = None) -> dict
     }
 
 
+G18_CHECK_IDS = {"g18-daily-full-score"}
+
+
+def classify_g18_daily_full_score(checks: list[dict]) -> dict:
+    """判断 G18 是不是当前唯一的阻断项，是的话走“次日再提交”的挽回路径。"""
+    failed_g18 = [
+        item for item in checks
+        if item.get("id") in G18_CHECK_IDS
+        and item.get("severity") == "blocker"
+        and not item.get("ok")
+    ]
+    other_failed_blockers = [
+        item for item in checks
+        if item.get("severity") == "blocker" and not item.get("ok")
+        and item.get("id") not in G18_CHECK_IDS
+    ]
+    return {
+        "failed": bool(failed_g18),
+        "onlyBlocker": bool(failed_g18 and not other_failed_blockers),
+        "otherBlockingCheckIds": [str(item.get("id") or "") for item in other_failed_blockers],
+    }
+
+
 def classify_change_volume_line_gate(
     checks: list[dict],
     code_change: dict,
@@ -1807,8 +1894,58 @@ def main() -> int:
         add("reason-ai-style", False, warning, severity="warning", evidence=reason_quality)
 
     style_helpers = _load_reason_style_helpers()
+    # 平台规则 G18：同一人当天满 10 条后，两侧满分占比超过 10% 时，
+    # 之后再提交的两侧满分数据一律作废，返修无效。这条必须用实时数据复核。
+    g18_day = local_today()
+    g18_records: list[dict] = []
+    g18_error = ""
+    try:
+        g18_records = fetch_daily_delivery_records(g18_day)
+    except Exception as exc:  # noqa: BLE001 - 复核失败要当成阻断项，不能静默放过
+        g18_error = str(exc)
+    draft_delivery = draft.get("delivery") if isinstance(draft.get("delivery"), dict) else {}
+    candidate_scores = (
+        (draft_delivery.get("A") or {}).get("score") if isinstance(draft_delivery.get("A"), dict) else None,
+        (draft_delivery.get("B") or {}).get("score") if isinstance(draft_delivery.get("B"), dict) else None,
+    )
     if style_helpers is not None:
-        delivery_quality = style_helpers.validate_delivery(draft, evidence_doc, reason_text)
+        g18 = style_helpers.assess_daily_full_score_ratio(
+            g18_records, new_scores=candidate_scores, day=g18_day
+        )
+    else:
+        g18 = {
+            "policy": "G18", "day": g18_day, "applicable": False, "exceeded": False,
+            "blocksCandidate": False, "candidateBothFull": False, "dayCount": len(g18_records),
+            "bothFullCount": 0, "ratio": 0.0,
+            "message": "GSB 文案校验器 gsb_tools 不可用，无法复核 G18 当日两侧满分占比",
+        }
+    g18.update({
+        "candidateScores": {"A": candidate_scores[0], "B": candidate_scores[1]},
+        "records": g18_records,
+        "fetchError": g18_error,
+    })
+    g18_path = task_root / "monitor" / "g18-daily-full-score.json"
+    g18_path.write_text(json.dumps(g18, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    add(
+        "g18-daily-full-score",
+        not g18_error and not g18.get("blocksCandidate"),
+        (f"G18 实时复核失败，无法确认当天两侧满分占比: {g18_error}" if g18_error
+         else str(g18.get("message") or "")),
+        evidence={**{key: value for key, value in g18.items() if key != "records"},
+                  "path": str(g18_path)},
+    )
+    if not g18_error and not g18.get("blocksCandidate") and g18.get("nearLimit"):
+        add(
+            "g18-daily-full-score-near-limit",
+            False,
+            f"G18 预警：当天两侧满分占比已经接近或超过上限，再来一条两侧满分数据会被作废。{g18.get('message')}",
+            severity="warning",
+            evidence={"path": str(g18_path)},
+        )
+    if style_helpers is not None:
+        delivery_quality = style_helpers.validate_delivery(
+            draft, evidence_doc, reason_text, daily_full_score=g18
+        )
     else:
         delivery_quality = {"ok": False, "errors": ["GSB 文案校验器 gsb_tools 不可用，无法审核交付完整性"], "warnings": []}
     add(
@@ -2009,6 +2146,9 @@ def main() -> int:
     )
     line_gate_failed_sides = line_gate_assessment["failedSides"]
     only_line_gate_blocker = line_gate_assessment["onlyBlocker"]
+    # G18 是唯一阻断项时不硬提交，改走“次日再提交”的挽回路径。
+    g18_gate = classify_g18_daily_full_score(checks)
+    only_g18_blocker = bool(g18.get("blocksCandidate") and g18_gate["onlyBlocker"])
     review_payload = {
         "schemaVersion": 1,
         "id": CHANGE_VOLUME_APPROVAL_SCOPE,
@@ -2088,12 +2228,21 @@ def main() -> int:
         "ok": not blockers,
         "status": (
             "pass" if not blockers
-            else ("line_gate_approval_required" if only_line_gate_blocker else "blocked")
+            else (
+                "g18_full_score_deferred" if only_g18_blocker
+                else ("line_gate_approval_required" if only_line_gate_blocker else "blocked")
+            )
         ),
         "approvalRequirement": (
             CHANGE_VOLUME_APPROVAL_SCOPE if only_line_gate_blocker
             else ("none" if not blockers else "blocked")
         ),
+        "g18DailyFullScore": {
+            "onlyBlocker": only_g18_blocker,
+            "deferToNextDay": only_g18_blocker,
+            "reportPath": str(g18_path),
+            "assessment": {key: value for key, value in g18.items() if key != "records"},
+        },
         "lineGate": {
             "onlyBlocker": only_line_gate_blocker,
             "failedSides": line_gate_failed_sides,

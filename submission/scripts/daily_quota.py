@@ -273,7 +273,7 @@ def task_submission_result(task_root: Path) -> dict[str, Any]:
 
 
 def defer(task_root: Path, payload_path: Path, payload: dict[str, Any], state: dict[str, Any],
-          command: list[str]) -> dict[str, Any]:
+          command: list[str], reason: str = "当日额度已满，已暂存") -> dict[str, Any]:
     """Park one task in ``<today>待提交`` and register it as pending in the status table."""
     # A task re-parked on a later full day keeps only its newest record.
     clear_deferred(task_root)
@@ -294,6 +294,7 @@ def defer(task_root: Path, payload_path: Path, payload: dict[str, Any], state: d
         "quotaDate": state.get("date"),
         "quotaCount": state.get("count"),
         "quotaLimit": state.get("limit"),
+        "deferReason": reason,
         "submitAfter": next_local_midnight(),
         "command": shlex.join(command),
     }
@@ -302,7 +303,7 @@ def defer(task_root: Path, payload_path: Path, payload: dict[str, Any], state: d
     index_path = _rewrite_index(folder)
     update_status(deferred_base(task_root), task_root, status=STATUS_PENDING, deferredDate=today,
                   deferredAt=record["deferredLocalTime"], recordPath=str(record_path),
-                  message="当日额度已满，已暂存")
+                  message=reason)
     return {"recordPath": str(record_path), "indexPath": str(index_path), **record}
 
 

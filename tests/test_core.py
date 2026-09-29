@@ -46,6 +46,7 @@ from gsb_tools import (
     _validate_negative_claim_triggers,
     _validate_reason_layer_coverage,
     _validate_reason_markdown,
+    assess_daily_full_score_ratio,
     evaluation_excluded_reason_errors,
     build_values,
     reason_flow_errors,
@@ -1006,7 +1007,7 @@ class DeliveryFieldTests(unittest.TestCase):
         errors = self._errors(self._draft(B={"quality": quality}), self._evidence(extra=[web]))
         self.assertTrue(any("美观度不参与评估" in item for item in errors), errors)
 
-    def test_double_full_score_temporary_discard_then_long_term_rule(self) -> None:
+    def test_double_full_score_long_term_rule_and_g18(self) -> None:
         self.trace_a.write_text(self._edit_event("/workspace/frontend/src/api.ts"), encoding="utf-8")
         desc_a = "逐项核对了登录、日记列表和发布三项需求，npm run build通过，非法密码会被拒绝，重复发布不会多出记录。"
         a_full = {"score": 5, "description": desc_a, "evidenceIds": ["A-artifact-check-02", "A-artifact-check-04"],
@@ -1021,12 +1022,46 @@ class DeliveryFieldTests(unittest.TestCase):
             today="2026-09-30",
         )
         self.assertTrue(any("负方 A 最高 4 分" in item for item in result["errors"]), result)
-        result = validate_delivery(self._draft("Same", A=a_full), evidence, self.REASON, today="2026-09-29")
-        self.assertTrue(any("临时约束" in item and "丢弃" in item for item in result["errors"]), result)
-        result = validate_delivery(self._draft("Same", A=a_full), evidence, self.REASON, today="2026-09-30")
+        result = validate_delivery(self._draft("Same", A=a_full), evidence, self.REASON)
         self.assertFalse(any("最高 4 分" in item for item in result["errors"]), result)
-        self.assertFalse(any("临时约束" in item for item in result["errors"]), result)
         self.assertTrue(any("两侧都给 5 分" in item for item in result["warnings"]), result)
+        # G18：当天已满 10 条且占比已被这条顶到 10% 以上时，两侧满分数据要被拦下。
+        day_records = [
+            {
+                "id": 9000 + index,
+                "submittedDate": "2026-09-30",
+                "scoreA": "5" if index < 4 else "4",
+                "scoreB": "5" if index < 4 else "4",
+            }
+            for index in range(15)
+        ]
+        g18 = assess_daily_full_score_ratio(day_records, new_scores=(5, 5), day="2026-09-30")
+        self.assertTrue(g18["blocksCandidate"], g18)
+        self.assertEqual(g18["dayCount"], 16)
+        self.assertEqual(g18["bothFullCount"], 5)
+        result = validate_delivery(
+            self._draft("Same", A=a_full), evidence, self.REASON, daily_full_score=g18
+        )
+        self.assertTrue(any("G18" in item and "作废" in item for item in result["errors"]), result)
+        # 换成非满分数据不受 G18 影响。
+        day_records = [
+            {
+                "id": 9000 + index,
+                "submittedDate": "2026-09-30",
+                "scoreA": "4" if index == 0 else "5",
+                "scoreB": "4" if index == 0 else "5",
+            }
+            for index in range(15)
+        ]
+        g18 = assess_daily_full_score_ratio(day_records, new_scores=(5, 5), day="2026-09-30")
+        self.assertTrue(g18["blocksCandidate"], g18)
+        g18 = assess_daily_full_score_ratio(day_records, new_scores=(4, 5), day="2026-09-30")
+        self.assertFalse(g18["blocksCandidate"], g18)
+        self.assertTrue(g18["exceeded"], g18)
+        # 当天还没满 10 条时不计算占比。
+        g18 = assess_daily_full_score_ratio(day_records[:5], new_scores=(5, 5), day="2026-09-30")
+        self.assertFalse(g18["applicable"], g18)
+        self.assertFalse(g18["blocksCandidate"], g18)
 
     def test_low_score_needs_location_and_consequence(self) -> None:
         errors = self._errors(self._draft(A={"description": "这一侧整体完成度一般，很多地方做得比较粗糙，和题目的要求相比还有不小的差距需要继续打磨。"}))
@@ -4612,6 +4647,74 @@ class PreflightModelEvidenceTests(unittest.TestCase):
             result = preflight.model_evidence_check(root, state)
             self.assertFalse(result["ok"])
             self.assertEqual(result["severity"], "warning")
+
+
+class G18DailyFullScoreTests(unittest.TestCase):
+    """平台规则 G18：命中且是唯一阻断项时顺延到次日，不做无谓报废。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = str(ROOT / "submission" / "scripts")
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+    def test_real_20260929_discarded_records_are_reproduced(self) -> None:
+        import preflight
+        helpers = preflight._load_reason_style_helpers()
+        self.assertIsNotNone(helpers, "gsb_tools 不可用，无法复核 G18")
+        # 2026-09-29 真实情况：第 36 条之前已有 35 条，其中 4 条两侧满分（占比 11.4%）。
+        full = [{"id": 18694, "scoreA": "5", "scoreB": "5"}, {"id": 18701, "scoreA": "5", "scoreB": "5"},
+                {"id": 18709, "scoreA": "5", "scoreB": "5"}, {"id": 19023, "scoreA": "5", "scoreB": "5"}]
+        rest = [{"id": 19000 + index, "scoreA": "4", "scoreB": "4"} for index in range(31)]
+        records = full + rest
+        self.assertEqual(len(records), 35)
+        assessment = helpers.assess_daily_full_score_ratio(
+            records, new_scores=(5, 5), day="2026-09-29"
+        )
+        self.assertTrue(assessment["blocksCandidate"], assessment)
+        self.assertEqual(assessment["dayCount"], 36)
+        self.assertEqual(assessment["bothFullCount"], 5)
+        self.assertGreater(assessment["ratio"], 0.10)
+        # 换成非满分数据时不再拦，即使当天占比已经超限。
+        assessment = helpers.assess_daily_full_score_ratio(
+            records, new_scores=(4, 5), day="2026-09-29"
+        )
+        self.assertFalse(assessment["blocksCandidate"], assessment)
+        self.assertTrue(assessment["exceeded"], assessment)
+
+    def test_only_blocker_detection_requires_no_other_blockers(self) -> None:
+        import preflight
+        only = preflight.classify_g18_daily_full_score(
+            [{"id": "g18-daily-full-score", "ok": False, "severity": "blocker"}]
+        )
+        self.assertTrue(only["onlyBlocker"], only)
+        mixed = preflight.classify_g18_daily_full_score([
+            {"id": "g18-daily-full-score", "ok": False, "severity": "blocker"},
+            {"id": "excel", "ok": False, "severity": "blocker"},
+        ])
+        self.assertFalse(mixed["onlyBlocker"], mixed)
+        self.assertEqual(mixed["otherBlockingCheckIds"], ["excel"])
+        warning_only = preflight.classify_g18_daily_full_score(
+            [{"id": "g18-daily-full-score", "ok": False, "severity": "warning"}]
+        )
+        self.assertFalse(warning_only["onlyBlocker"], warning_only)
+
+    def test_deferral_plan_defers_new_submission_and_blocks_revision(self) -> None:
+        import submit_api
+        preflight_result = {
+            "status": "g18_full_score_deferred",
+            "g18DailyFullScore": {"onlyBlocker": True, "assessment": {"message": "G18 超限"}},
+        }
+        plan = submit_api.g18_deferral_plan(preflight_result)
+        self.assertTrue(plan["defer"], plan)
+        self.assertFalse(plan["revisionBlocked"], plan)
+        self.assertEqual(plan["message"], "G18 超限")
+        revision = submit_api.g18_deferral_plan(preflight_result, "19732")
+        self.assertFalse(revision["defer"], revision)
+        self.assertTrue(revision["revisionBlocked"], revision)
+        untouched = submit_api.g18_deferral_plan({"status": "pass"})
+        self.assertFalse(untouched["defer"], untouched)
+        self.assertFalse(untouched["revisionBlocked"], untouched)
 
 
 class ModelAuditArchiveTests(unittest.TestCase):
