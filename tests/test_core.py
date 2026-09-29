@@ -2231,6 +2231,268 @@ class TransportValidationTests(unittest.TestCase):
             self.assertIn("API/网络错误", side_runner._api_transport_error(failed))
 
 
+class ModelAuditTests(unittest.TestCase):
+    """轨迹一审：容器上报的模型必须等于本次配置的模型。"""
+
+    def _trace(self, directory: str, model: str = "auto_model/urm", *, subtype: str = "init") -> Path:
+        path = Path(directory) / "stdout.jsonl"
+        path.write_text(
+            json.dumps({"type": "assistant", "message": {"content": []}}) + "\n"
+            + json.dumps({"type": "system", "subtype": subtype, "session_id": "s", "model": model}) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_init_event_reports_the_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(side_runner.trace_init_model(self._trace(temp, "ark/urm-03")), "ark/urm-03")
+
+    def test_missing_or_pending_trace_is_not_a_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(side_runner.trace_init_model(Path(temp) / "missing.jsonl"), "")
+            pending = Path(temp) / "pending.jsonl"
+            pending.write_text(json.dumps({"type": "assistant"}) + "\n", encoding="utf-8")
+            self.assertEqual(side_runner.trace_init_model(pending), "")
+            audit = side_runner.ModelCallAudit(expected="auto_model/urm", stdout_path=pending)
+            self.assertIsNone(audit.check())
+
+    def _stream(self, directory: str, *events: dict) -> Path:
+        path = Path(directory) / "stream.jsonl"
+        path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _reply(model: str, message_id: str = "msg_1") -> dict:
+        return {"type": "assistant", "message": {"id": message_id, "model": model, "content": []}}
+
+    def test_matching_model_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._stream(
+                temp,
+                {"type": "system", "subtype": "init", "model": "auto_model/urm"},
+                self._reply("auto_model/urm"),
+                self._reply("auto_model/urm", "msg_2"),
+                {"type": "result", "modelUsage": {"auto_model/urm": {"inputTokens": 1}}},
+            )
+            audit = side_runner.ModelCallAudit(expected="auto_model/urm", stdout_path=path)
+            self.assertIsNone(audit.check())
+            self.assertIsNone(audit.finalize(completed=True))
+            summary = audit.summary()
+            self.assertTrue(summary["ok"])
+            self.assertEqual(summary["responseModels"], {"auto_model/urm": 2})
+            self.assertEqual(summary["usageModels"], ["auto_model/urm"])
+
+    def test_other_model_is_a_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._trace(temp, "wrong/model")
+            audit = side_runner.ModelCallAudit(expected="auto_model/urm", stdout_path=path)
+            violation = audit.check()
+            self.assertIsNotNone(violation)
+            self.assertEqual(violation["expected"], "auto_model/urm")
+            self.assertEqual(violation["observed"], "wrong/model")
+            # 结论只下一次，之后每轮轮询都不再判一次。
+            self.assertIs(audit.check(), violation)
+
+    def test_init_echo_is_not_enough_the_api_response_decides(self) -> None:
+        """init 只回显 ANTHROPIC_MODEL；网关实际回的模型不同就要拦下。"""
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._stream(
+                temp,
+                {"type": "system", "subtype": "init", "model": "auto_model/urm"},
+                self._reply("claude-sonnet-routed", "msg_x"),
+            )
+            audit = side_runner.ModelCallAudit(expected="auto_model/urm", stdout_path=path)
+            violation = audit.check()
+            self.assertIsNotNone(violation)
+            self.assertEqual(violation["observed"], "claude-sonnet-routed")
+            self.assertEqual(violation["source"], "API 响应")
+            self.assertEqual(violation["detail"], "msg_x")
+
+    def test_background_model_in_usage_is_a_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._stream(
+                temp,
+                self._reply("ark/urm-03"),
+                {"type": "result", "modelUsage": {"ark/urm-03": {}, "claude-haiku-4-5": {}}},
+            )
+            audit = side_runner.ModelCallAudit(expected="ark/urm-03", stdout_path=path)
+            violation = audit.check()
+            self.assertIsNotNone(violation)
+            self.assertEqual(violation["source"], "modelUsage")
+            self.assertEqual(violation["observed"], "claude-haiku-4-5")
+
+    def test_synthetic_messages_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._stream(
+                temp,
+                self._reply("<synthetic>"),
+                self._reply("ark/urm-03"),
+                {"type": "result", "modelUsage": {"ark/urm-03": {}}},
+            )
+            audit = side_runner.ModelCallAudit(expected="ark/urm-03", stdout_path=path)
+            self.assertIsNone(audit.finalize(completed=True))
+
+    def test_completed_run_without_any_response_model_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._stream(temp, {"type": "assistant", "message": {"content": []}})
+            audit = side_runner.ModelCallAudit(expected="ark/urm-03", stdout_path=path)
+            self.assertIsNone(audit.check())
+            violation = audit.finalize(completed=True)
+            self.assertIsNotNone(violation)
+            self.assertIn("无法证明", violation["detail"])
+            # 进程是被取消或出错结束的，就不再追加这一条。
+            other = side_runner.ModelCallAudit(expected="ark/urm-03", stdout_path=path)
+            self.assertIsNone(other.finalize(completed=False))
+
+    def test_partial_line_is_read_on_the_next_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "grow.jsonl"
+            line = json.dumps(self._reply("wrong/model"))
+            path.write_text(line[:20], encoding="utf-8")
+            audit = side_runner.ModelCallAudit(expected="ark/urm-03", stdout_path=path)
+            self.assertIsNone(audit.check())
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line[20:] + "\n")
+            self.assertEqual(audit.check()["observed"], "wrong/model")
+
+    def test_audit_is_on_by_default_and_can_be_turned_off(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SOLOSB_MODEL_AUDIT", None)
+            self.assertTrue(side_runner.model_audit_enabled())
+            for value in ("0", "false", "OFF", "no"):
+                os.environ["SOLOSB_MODEL_AUDIT"] = value
+                self.assertFalse(side_runner.model_audit_enabled())
+            os.environ["SOLOSB_MODEL_AUDIT"] = "1"
+            self.assertTrue(side_runner.model_audit_enabled())
+
+    def test_audit_evidence_matches_the_monitor_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "monitor").mkdir(parents=True, exist_ok=True)
+            side_runner._record_model_audit(
+                task_root=root,
+                candidate="candidate-2",
+                mapped_side="B",
+                attempt=1,
+                violation={"expected": "ark/urm-03", "observed": "wrong/model",
+                           "source": "轨迹", "foundAt": "2026-09-30T00:00:00Z"},
+                container="sologsb-demo-candidate-2-1",
+            )
+            data = json.loads((root / "monitor" / "model-audit.json").read_text(encoding="utf-8"))
+            self.assertFalse(data["ok"])
+            self.assertEqual(data["policy"], "model-mismatch")
+            self.assertEqual(data["violation"]["candidateId"], "candidate-2")
+            self.assertEqual(data["violation"]["side"], "B")
+            self.assertEqual(data["violation"]["expected"], "ark/urm-03")
+            self.assertEqual(data["violation"]["observed"], "wrong/model")
+            self.assertEqual(data["action"]["kind"], "skill-stopped")
+            self.assertEqual(data["expectedModels"]["A"], side_runner.model_for_side("A"))
+
+    def test_model_mismatch_is_not_retried(self) -> None:
+        """审核命中就不再重试：同一份配置重跑只会再撞一次同一个错模型。"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "monitor").mkdir(parents=True, exist_ok=True)
+            origin = root / "source" / "origin"
+            origin.mkdir(parents=True)
+            (origin / "README.md").write_text("base", encoding="utf-8")
+            prompt = root / "prompt.txt"
+            prompt.write_text("prompt", encoding="utf-8")
+            write_json(root / "monitor" / "state.json", {
+                "status": "prompt_ready",
+                "taskName": "audit-blocked",
+                "promptPath": str(prompt),
+                "promptSha256": sha256_file(prompt),
+            })
+            attempts: list[int] = []
+            stop_event = threading.Event()
+
+            def fake_attempt(**kwargs):
+                attempts.append(int(kwargs["attempt"]))
+                return {
+                    "candidateId": kwargs["candidate"],
+                    "mappedSide": "A",
+                    "attempt": kwargs["attempt"],
+                    "status": "blocked",
+                    "error": "模型审核失败：candidate-1 实际调用模型「wrong/model」",
+                    "modelAudit": {"expected": "auto_model/urm", "observed": "wrong/model",
+                                   "source": "轨迹", "foundAt": "2026-09-30T00:00:00Z"},
+                    "finishedAt": "2026-09-30T00:00:00Z",
+                }
+
+            with mock.patch.object(side_runner, "_run_candidate_attempt", side_effect=fake_attempt):
+                result = side_runner._run_candidate_locked(
+                    root, "candidate-1", timeout=10, live=False, attempts=6,
+                    mapped_side="A", stop_event=stop_event,
+                )
+            self.assertEqual(attempts, [1])
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["modelAudit"]["observed"], "wrong/model")
+            self.assertTrue(stop_event.is_set(), "另一侧没有被取消")
+            state = read_json(root / "monitor" / "state.json", {})
+            self.assertEqual(state["candidates"]["candidate-1"]["status"], "blocked")
+
+    def test_running_container_is_killed_as_soon_as_the_trace_names_another_model(self) -> None:
+        """容器刚把 init 事件写进轨迹，本轮执行就被掐断并留下证据。"""
+        with tempfile.TemporaryDirectory() as temp:
+            task_root = Path(temp)
+            (task_root / "monitor").mkdir(parents=True, exist_ok=True)
+            prompt = task_root / "prompt.txt"
+            prompt.write_text("prompt", encoding="utf-8")
+            state = {
+                "status": "candidates_running",
+                "taskName": "audit-live",
+                "initialSnapshot": "0" * 40,
+                "promptPath": str(prompt),
+                "promptSha256": sha256_file(prompt),
+            }
+            write_json(task_root / "monitor" / "state.json", state)
+            killed: list[str] = []
+
+            class FakeProc:
+                def __init__(self, *args, **kwargs):
+                    self.pid = os.getpid()
+                    self._polls = 0
+                    # 容器起来写的第一个事件就是 system/init，模型名不对。
+                    kwargs["stdout"].write(
+                        (json.dumps({"type": "system", "subtype": "init", "session_id": "s",
+                                     "model": "wrong/model"}) + "\n").encode("utf-8")
+                    )
+                    kwargs["stdout"].flush()
+
+                def poll(self):
+                    self._polls += 1
+                    return None if self._polls == 1 else 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+            with mock.patch.object(side_runner, "_clone_candidate", return_value=task_root / "source" / "candidates" / "candidate-1"), \
+                 mock.patch.object(side_runner, "_ensure_image", return_value="sha256:fake"), \
+                 mock.patch.object(side_runner, "_start_container",
+                                   return_value={"name": "sologsb-audit-live-candidate-1-1", "_slot": None}), \
+                 mock.patch.object(side_runner, "_runtime_info",
+                                   return_value={"version": "2.1.197", "model": "auto_model/urm",
+                                                 "contextWindow": 1000000, "baseUrl": "https://llm.example"}), \
+                 mock.patch.object(side_runner, "_remove_container",
+                                   side_effect=lambda name: killed.append(str(name))), \
+                 mock.patch.object(side_runner, "_stop_process_group"), \
+                 mock.patch.object(side_runner.subprocess, "Popen", FakeProc):
+                (task_root / "source" / "candidates" / "candidate-1").mkdir(parents=True, exist_ok=True)
+                result = side_runner._run_candidate_attempt(
+                    task_root=task_root, state=state, candidate="candidate-1", attempt=1,
+                    timeout=30, live=False, mapped_side="A",
+                )
+
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["modelAudit"]["observed"], "wrong/model")
+            self.assertIn("sologsb-audit-live-candidate-1-1", killed)
+            evidence = json.loads((task_root / "monitor" / "model-audit.json").read_text(encoding="utf-8"))
+            self.assertEqual(evidence["violation"]["observed"], "wrong/model")
+            self.assertFalse(evidence["action"]["retry"])
+            self.assertEqual(evidence["expectedModels"]["B"], side_runner.model_for_side("B"))
+
+
 class ParallelRunTests(unittest.TestCase):
     def test_run_defaults_to_headless_and_both_is_available(self) -> None:
         parser = build_parser()
@@ -3711,14 +3973,30 @@ class ContainerImageTests(unittest.TestCase):
 
         def fake_run(cmd, **_kwargs):
             captured.append(list(cmd))
-            output = b"2.1.197\nMODEL=ark/urm-03 CONTEXT=1000000 BASE=https://relay.example"
+            pins = "".join(f"PIN {name}=ark/urm-03\n" for name in side_runner.MODEL_PIN_ENV)
+            output = ("2.1.197\nMODEL=ark/urm-03 CONTEXT=1000000 BASE=https://relay.example\n" + pins).encode()
             return subprocess.CompletedProcess(cmd, 0, output, b"")
 
         with mock.patch.object(side_runner, "run", side_effect=fake_run):
             info = side_runner._runtime_info("container-1", "s", "https://relay.example", "ark/urm-03")
         self.assertEqual(info["model"], "ark/urm-03")
-        self.assertIn("ANTHROPIC_MODEL=ark/urm-03", captured[0])
+        for name in side_runner.MODEL_PIN_ENV:
+            self.assertIn(f"{name}=ark/urm-03", captured[0])
+            self.assertEqual(info["modelPins"][name], "ark/urm-03")
+        self.assertIn("ANTHROPIC_SMALL_FAST_MODEL", side_runner.MODEL_PIN_ENV)
         self.assertIn("CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000", captured[0])
+
+        def haiku_left_default(cmd, **_kwargs):
+            pins = "".join(
+                f"PIN {name}={'' if name == 'ANTHROPIC_DEFAULT_HAIKU_MODEL' else 'ark/urm-03'}\n"
+                for name in side_runner.MODEL_PIN_ENV
+            )
+            output = ("2.1.197\nMODEL=ark/urm-03 CONTEXT=1000000 BASE=https://relay.example\n" + pins).encode()
+            return subprocess.CompletedProcess(cmd, 0, output, b"")
+
+        with mock.patch.object(side_runner, "run", side_effect=haiku_left_default):
+            with self.assertRaisesRegex(SologsbError, "ANTHROPIC_DEFAULT_HAIKU_MODEL=空"):
+                side_runner._runtime_info("container-1", "s", "https://relay.example", "ark/urm-03")
 
         def wrong_model(cmd, **_kwargs):
             output = b"2.1.197\nMODEL=auto_model/urm CONTEXT=1000000 BASE=https://relay.example"
@@ -4183,3 +4461,176 @@ class DeferredFolderDateTests(unittest.TestCase):
             self.assertEqual(Path(result["recordPath"]).parent.name, "2026-09-28待提交")
             row = quota.load_status_table(base)[str(base / "task")]
             self.assertEqual((row["status"], row["deferredDate"]), ("pending", "2026-09-28"))
+
+
+class ModelPlanLockTests(unittest.TestCase):
+    """红线：任务从开跑到提交只用一组模型，且就是设备配置里的那组。"""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in ("SOLOSB_A_MODEL", "SOLOSB_B_MODEL"):
+            os.environ.pop(name, None)
+
+    def _config(self, directory: str, **claude: str) -> Path:
+        path = Path(directory) / "device.json"
+        path.write_text(json.dumps({"configVersion": 1, "claude": claude}), encoding="utf-8")
+        return path
+
+    def test_config_file_beats_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._config(temp, modelA="cfg/a", modelB="cfg/b")
+            with mock.patch.dict(os.environ, {"SOLOSB_CONFIG": str(path), "SOLOSB_A_MODEL": "env/a"}):
+                os.environ.pop("SOLOSB_B_MODEL", None)
+                resolved = side_runner.resolve_models()
+            self.assertEqual((resolved["A"], resolved["B"]), ("cfg/a", "cfg/b"))
+            self.assertEqual(resolved["sources"], {"A": "config", "B": "config"})
+            self.assertEqual(resolved["ignoredEnv"], {"SOLOSB_A_MODEL": "env/a"})
+
+    def test_environment_only_fills_a_missing_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._config(temp, modelB="cfg/b")
+            with mock.patch.dict(os.environ, {"SOLOSB_CONFIG": str(path), "SOLOSB_A_MODEL": "env/a"}):
+                resolved = side_runner.resolve_models()
+            self.assertEqual(resolved["A"], "env/a")
+            self.assertEqual(resolved["sources"]["A"], "env")
+
+    def test_broken_config_never_falls_back_to_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "device.json"
+            path.write_text("{not json", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"SOLOSB_CONFIG": str(path)}):
+                with self.assertRaisesRegex(SologsbError, "拒绝用默认模型顶替"):
+                    side_runner.model_plan()
+
+    def test_first_lock_uses_config_and_later_config_change_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._config(temp, modelA="cfg/a", modelB="cfg/b")
+            with mock.patch.dict(os.environ, {"SOLOSB_CONFIG": str(path)}):
+                state: dict = {}
+                plan = side_runner.lock_model_plan(state)
+                self.assertEqual(side_runner.plan_models(plan), {"A": "cfg/a", "B": "cfg/b"})
+                self.assertTrue(plan["lockedAt"])
+                self.assertEqual(state["modelPlan"], plan)
+                # 同一配置再锁：计划不变，锁定时间不变。
+                again = side_runner.lock_model_plan(dict(state))
+                self.assertEqual(again["lockedAt"], plan["lockedAt"])
+                # 中途改配置：A、B 会跑在两组模型上，必须拒绝。
+                self._config(temp, modelA="new/a", modelB="cfg/b")
+                with self.assertRaisesRegex(SologsbError, "同一任务不得换模型"):
+                    side_runner.lock_model_plan(dict(state))
+
+    def test_expected_models_from_the_queue_must_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._config(temp, modelA="cfg/a", modelB="cfg/b")
+            with mock.patch.dict(os.environ, {"SOLOSB_CONFIG": str(path)}):
+                side_runner.lock_model_plan({}, expected={"A": "cfg/a", "B": "cfg/b"})
+                with self.assertRaisesRegex(SologsbError, "B 侧模型不符"):
+                    side_runner.lock_model_plan({}, expected={"A": "cfg/a", "B": "other/b"})
+
+    def test_candidate_model_comes_from_the_task_plan(self) -> None:
+        plan = {"A": {"candidateId": "candidate-1", "model": "task/a"},
+                "B": {"candidateId": "candidate-2", "model": "task/b"}}
+        self.assertEqual(side_runner.model_for_candidate("candidate-1", "", plan), "task/a")
+        self.assertEqual(side_runner.model_for_candidate("candidate-2", "B", plan), "task/b")
+
+    def test_run_candidates_refuses_before_touching_anything(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "task"
+            (root / "monitor").mkdir(parents=True)
+            origin = root / "source" / "origin"
+            origin.mkdir(parents=True)
+            (origin / "README.md").write_text("base", encoding="utf-8")
+            prompt = root / "prompt.txt"
+            prompt.write_text("prompt", encoding="utf-8")
+            state = {"status": "blocked", "taskName": "lock", "promptPath": str(prompt),
+                     "promptSha256": sha256_file(prompt),
+                     "candidates": {"candidate-1": {"status": "staged"}},
+                     "modelPlan": {"A": {"candidateId": "candidate-1", "model": "old/a"},
+                                   "B": {"candidateId": "candidate-2", "model": "old/b"},
+                                   "lockedAt": "2026-09-30T00:00:00Z"}}
+            write_json(root / "monitor" / "state.json", state)
+            with mock.patch.object(side_runner, "_clone_candidate") as clone:
+                with self.assertRaisesRegex(SologsbError, "同一任务不得换模型"):
+                    side_runner.run_candidates(root, candidate_count=2)
+                clone.assert_not_called()
+            after = read_json(root / "monitor" / "state.json", {})
+            self.assertEqual(after["candidates"], {"candidate-1": {"status": "staged"}})
+
+    def test_run_cli_accepts_expected_models(self) -> None:
+        args = build_parser().parse_args([
+            "run", "--task-root", "/tmp/t", "--side", "both",
+            "--expect-model-a", "x/a", "--expect-model-b", "x/b",
+        ])
+        self.assertEqual((args.expect_model_a, args.expect_model_b), ("x/a", "x/b"))
+
+
+class PreflightModelEvidenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = str(ROOT / "submission" / "scripts")
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+    def _task(self, temp: str, a_model: str, b_model: str, *, locked: bool = True) -> tuple[Path, dict]:
+        root = Path(temp)
+        sides = {}
+        for side, model in (("A", a_model), ("B", b_model)):
+            trace = root / f"{side}.jsonl"
+            trace.write_text(json.dumps({"type": "assistant", "message": {"id": "m", "model": model}}) + "\n",
+                             encoding="utf-8")
+            sides[side] = {"model": model, "tracePath": str(trace)}
+        plan = {"A": {"model": "auto_model/urm"}, "B": {"model": "ark/urm-03"}}
+        if locked:
+            plan["lockedAt"] = "2026-09-30T00:00:00Z"
+        return root, {"modelPlan": plan, "sides": sides}
+
+    def test_matching_traces_pass(self) -> None:
+        import preflight
+        with tempfile.TemporaryDirectory() as temp:
+            root, state = self._task(temp, "auto_model/urm", "ark/urm-03")
+            result = preflight.model_evidence_check(root, state)
+            self.assertTrue(result["ok"], result)
+
+    def test_trace_on_another_model_blocks_submission(self) -> None:
+        import preflight
+        with tempfile.TemporaryDirectory() as temp:
+            root, state = self._task(temp, "auto_model/urm", "ark/urm-03")
+            Path(state["sides"]["B"]["tracePath"]).write_text(
+                json.dumps({"type": "assistant", "message": {"id": "m", "model": "claude-haiku"}}) + "\n",
+                encoding="utf-8")
+            result = preflight.model_evidence_check(root, state)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["severity"], "blocker")
+            self.assertIn("claude-haiku", result["message"])
+
+    def test_legacy_task_without_lock_only_warns(self) -> None:
+        import preflight
+        with tempfile.TemporaryDirectory() as temp:
+            root, state = self._task(temp, "auto_model/urm", "wrong/b", locked=False)
+            result = preflight.model_evidence_check(root, state)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["severity"], "warning")
+
+
+class ModelAuditArchiveTests(unittest.TestCase):
+    def test_new_pair_run_archives_the_previous_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "task"
+            (root / "monitor").mkdir(parents=True)
+            origin = root / "source" / "origin"
+            origin.mkdir(parents=True)
+            (origin / "README.md").write_text("base", encoding="utf-8")
+            prompt = root / "prompt.txt"
+            prompt.write_text("prompt", encoding="utf-8")
+            write_json(root / "monitor" / "state.json", {
+                "status": "blocked", "taskName": "archive", "promptPath": str(prompt),
+                "promptSha256": sha256_file(prompt),
+            })
+            write_json(root / "monitor" / "model-audit.json", {"ok": False})
+            with mock.patch.object(side_runner, "_ensure_origin_commit", side_effect=SologsbError("stop here")):
+                with self.assertRaisesRegex(SologsbError, "stop here"):
+                    side_runner.run_candidates(root, candidate_count=2)
+            self.assertFalse((root / "monitor" / "model-audit.json").exists())
+            self.assertEqual(len(list((root / "monitor").glob("model-audit.*.json"))), 1)

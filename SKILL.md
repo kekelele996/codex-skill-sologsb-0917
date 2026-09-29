@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.7.9`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.7.9`
-- 精确提交号：运行 `git rev-parse v1.7.9` 获取。
+- 全局版本号：`1.8.0`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.8.0`
+- 精确提交号：运行 `git rev-parse v1.8.0` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -60,7 +60,8 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   固定目录为 `source/candidates/candidate-1` 和 `source/candidates/candidate-2`，每份源码各自使用独立容器、Claude home、
   SessionID 和轨迹；默认用 `run --side both --candidates 2` 并行无头执行，需要观察时加 `--live`。
   A/B 使用同一提示词、镜像、Base URL、上下文窗口、重试次数、超时和工具权限，唯一差异是
-  `ANTHROPIC_MODEL`：candidate-1 为 `auto_model/urm`，candidate-2 为 `ark/urm-03`。
+  模型名：candidate-1 用 A 侧模型（设备配置 `claude.modelA`，默认 `auto_model/urm`），candidate-2 用 B 侧模型
+  （`claude.modelB`，默认 `ark/urm-03`），任务首次开跑即锁定。
 - 每个候选只发送一次提示词。只要出现追问、权限询问、重复真人输入、最终 API/网络失败、
   无最终 `end_turn` 或异常退出，就必须销毁该候选工作区和容器，从本地初始快照重新 clone，
   再用新容器、新 Claude home、新 SessionID 从提示词重新开始；每个候选最多六次实际尝试（含首次）。
@@ -141,6 +142,23 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 2026-09-23 官方表单（fingerprint `954e9db2d25afeb4`，23 个字段全部必填）删除了“备注”，新增 `A/B-交付完整性`（1~5 整数）和 `A/B-交付完整性描述`。草稿必须提供 `delivery.A/B.score/description/evidenceIds`，打分与写法见 `references/delivery-scoring.md`：只写完整性，两侧独立撰写，允许与 GSB 理由少量重合但不得照抄，A、B 两段之间和与历史数据之间都按 G12 查重。1.7.7 起交付完整性从严：默认 4 分，5 分需要至少 2 条本侧通过证据（构建或启动 + 功能级）、描述写明“逐条核对了”并给出一项边界处理的实测结果；结论分出胜负时禁止双满分，负方最高 4 分。另外每侧必评代码实现（1~5），写在 `delivery.<side>.quality.code`：交付完整性 5 分要求代码实现不低于 4 分，代码实现 2 分及以下时交付完整性最高 3 分，锚点见 `references/delivery-scoring.md`。美观度不参与评估（视觉识别易误判）。
 - 2026-09-29 G16 加固（1.7.9）：当天 `sologsb-1007` 的一条数据被平台按 G16 废弃，原因是题面只做了“在既有页面补一个对照视图 + 局部只读守卫 + 给草稿加一个字段”，而难度论证只是自由文字自证。从本版本起难度论证必须回指题面与真实语料，缺一项即阻断：`platformSignals`（三项信号逐项作答，`promptQuote` 必须是题面原句子串）、`crossObjectInvariant`（至少两个对象名必须出现在题面里，并写清不变量与背离后果）、`corpusEvidence`（`nearestDiscardedId` 必须是真实 G16 废弃样本、`nearestPassedId` 必须是质检通过样本，并写清差别与借鉴点）、`substantiveComplexity`（题面原句必须真的出现并发、失效重算、失败恢复、迁移兼容、权限边界、容量、离线合并或跨系统对账等信号）、以及命中中等形态时的 `mediumShapeDefense`。当天追加的 `#19600` 已加入废弃样本：审阅回合、批注去重、冲突提示和快照修订只算多步实现，不能再自证为困难或地狱。样本清单见 `references/g16-discarded-samples.json`，判定标准见 `references/difficulty-standard.md`。`MEDIUM_SHAPE_RE` 只是摩擦规则不是判难器：当日真实语料回归为 7 条 G16 废弃命中 3 条、40 条通过命中 10 条，命中只要求补写自辩，没命中也不代表题面够难。
 - 2026-09-29 A/B 模型分离（1.7.9）：A/B 必须换模型跑（默认 `claude.modelA=auto_model/urm`、`claude.modelB=ark/urm-03`）。`run` 开跑前会校验两者不同；提交预检新增 `ab-model-split`，两侧模型名相同直接阻断。同模型的两侧不构成模型对比，出现即报废重跑。
+- 2026-09-30 轨迹模型审核（1.8.0）：`system/init` 的 `model` 只是客户端回显 `ANTHROPIC_MODEL`，不能证明网关实际用了哪个模型。
+  执行器在候选轮询里增量读轨迹，以网关的真实回应为准：每条 `assistant` 事件的 `message.model`（API 响应的模型名，
+  `<synthetic>` 除外）和 `result` 事件 `modelUsage` 的全部键（含后台小任务）都必须等于
+  `model_for_candidate`（A 侧 `claude.modelA`、B 侧 `claude.modelB`）；正常结束却没有任何带模型名的响应同样判失败。
+  核对结果写进 `attempt.json` 的 `modelEvidence`。容器内 `ANTHROPIC_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL`、
+  `ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL`、`CLAUDE_CODE_SUBAGENT_MODEL` 全部钉成同一个候选模型，
+  `_runtime_info` 开跑前逐个回读，任一未钉住就拒绝启动。
+  模型计划锁定：A/B 模型只以设备配置文件 `claude.modelA` / `claude.modelB` 为准（环境变量仅在文件未写时回退，
+  冲突时忽略并记入 `modelPlan.ignoredEnv`；文件损坏直接报错，不退回默认模型）。首次 `run --side both`
+  把计划写入 `state.modelPlan`（含 `source`、`lockedAt`），之后续跑、重试、单侧 `run --side A|B` 一律只用该计划；
+  设备配置中途改动、或 `--expect-model-a/-b` 与计划不符，都在改动任何状态之前拒绝启动。
+  `SOLOSB_MODEL_AUDIT=0` 只关闭“当场掐断”，结束时的复核不可关闭；staged 前还会对原生会话轨迹再复核一次。
+  提交预检新增 `ab-model-evidence`：从 A/B 交付轨迹复算实际回应模型并与 `modelPlan` 逐侧比对，不一致阻断提交
+  （无 `lockedAt` 的旧任务只提示）。不一致就立刻杀掉该候选容器、终止本轮执行、
+  写 `monitor/model-audit.json`（`policy=model-mismatch`），候选标记为 `blocked` 且**不再重试**，另一侧也一并取消，
+  任务以 `模型审核中断：…` 结束。这是配置问题、不是偶发失败；遇到该中断必须回头核对设置页的 A/B 模型名与
+  容器镜像实际能用的模型名，不得直接重跑。临时关闭用 `SOLOSB_MODEL_AUDIT=0`（默认开启，不推荐）。
 - 官方表单 fingerprint 更新（1.7.9）：2026-09-29 起表单为 `9a410bc6e129339b`、25 个字段，新增必填 `A-模型名称` / `B-模型名称`（`x_a_model_name` / `x_b_model_name`），由 state 里两侧的 model 自动写入；本地快照 `references/gsb-form-schema.json` 已同步。
 - 临时约束（仅本地日期 2026-09-29 有效，次日自动失效并清除运行时判断，不写入任务状态）：必须根据真实产物独立评定，不得为了避开双满分而随意压分。若复核后 A、B 交付完整性仍同为 5 分，`validate_delivery`、`gsb` 导出和提交预检直接阻断，任务应丢弃，不得提交；只有本侧真实证据确实不支持 5 分时，才能据实下调评分。
 - 红线：A/B 交付完整性描述必须与本侧轨迹对应，不得出现对立意见。锚点必须在本侧原始轨迹中存在，分数和描述不得与本侧真实复核结果、引用证据、GSB 理由或 GSB 结论相反（详见 `references/delivery-scoring.md` 红线一）。本地（容器外）编写的任何测试和自动化脚本，包括验收、冒烟、Playwright、录制场景，都不参与交付完整性描述：不写进描述，不引用其证据，也不作为分数依据（红线二）。有页面的项目和之前一样引用录屏证据；纯后端 API 项目的录屏排除，改用验证计划的 `probe` 接口探活作为证据。描述和理由都直接写“请求了登录接口，返回404”这种主观直述，不写“从录屏来看”“根据编写的测试”。

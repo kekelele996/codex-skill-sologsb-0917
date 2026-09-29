@@ -36,6 +36,7 @@ for _parent in Path(__file__).resolve().parents:
         break
 import device_config as _device_config  # noqa: E402
 from common import LOCKFILE_NAMES, SologsbError, ensure_single_side_trace, paired_lockfiles  # noqa: E402
+from model_audit import audit_trace_models  # noqa: E402
 
 _device_config.load_and_apply()
 
@@ -1578,6 +1579,50 @@ def classify_change_volume_line_gate(
     }
 
 
+def model_evidence_check(task_root: Path, state: dict) -> dict:
+    """红线：A/B 交付轨迹里网关实际回应的模型必须等于本任务锁定的模型。
+
+    不信任 state 里写下的 model 字段，直接从两侧交付轨迹复算
+    （assistant.message.model / modelUsage），与 modelPlan 逐侧比对。
+    模型计划锁定机制上线前开跑（modelPlan 没有 lockedAt）的旧任务只提示不阻断。
+    """
+    plan = state.get("modelPlan") if isinstance(state.get("modelPlan"), dict) else {}
+    sides = state.get("sides") if isinstance(state.get("sides"), dict) else {}
+    legacy = not plan.get("lockedAt")
+    evidence: dict = {"plan": {side: (plan.get(side) or {}).get("model") for side in ("A", "B")}, "sides": {}}
+    problems: list[str] = []
+    for side in ("A", "B"):
+        record = sides.get(side) if isinstance(sides.get(side), dict) else {}
+        expected = str((plan.get(side) or {}).get("model") or "").strip()
+        recorded = str(record.get("model") or "").strip()
+        if not expected:
+            problems.append(f"{side} 侧缺少锁定模型")
+            continue
+        if recorded and recorded != expected:
+            problems.append(f"{side} 侧记录模型 {recorded} ≠ 锁定模型 {expected}")
+        result = audit_trace_models(Path(str(record.get("tracePath") or "")).expanduser(), expected)
+        evidence["sides"][side] = {
+            "expected": expected,
+            "recorded": recorded,
+            "responseModels": result.get("responseModels"),
+            "tracePath": result.get("path") or str(record.get("tracePath") or ""),
+            "ok": result.get("ok"),
+        }
+        if not result.get("ok"):
+            violation = result.get("violation") or {}
+            problems.append(
+                f"{side} 侧轨迹实际模型「{violation.get('observed') or '无'}」≠ 锁定模型 {expected}"
+                f"（{violation.get('source') or ''}{'；' + violation['detail'] if violation.get('detail') else ''}"
+                f"{result.get('error') or ''}）"
+            )
+    ok = not problems
+    message = (
+        "A/B 轨迹实际调用模型与本任务锁定模型一致"
+        if ok else "A/B 模型证据不通过：" + "；".join(problems)
+    )
+    return {"ok": ok, "message": message, "severity": "warning" if legacy else "blocker", "evidence": evidence}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only GSB submission preflight")
     parser.add_argument("--task-root", type=Path)
@@ -1716,6 +1761,14 @@ def main() -> int:
         bool(model_a and model_b and model_a != model_b),
         f"A/B 必须使用不同模型：A={model_a or '缺失'}，B={model_b or '缺失'}",
         evidence={"modelA": model_a, "modelB": model_b},
+    )
+    model_evidence = model_evidence_check(task_root, state)
+    add(
+        "ab-model-evidence",
+        model_evidence["ok"],
+        model_evidence["message"],
+        severity=model_evidence["severity"],
+        evidence=model_evidence["evidence"],
     )
     add("prompt-dedup", bool(prompt_dedup) and prompt_dedup.get("decision") == "UNIQUE", f"历史 GSB 提示词去重: {prompt_dedup.get('decision') or 'BLOCKED'}", evidence={"path": str(dedup_path), "decision": prompt_dedup.get("decision"), "matches": prompt_dedup.get("matches", []), "error": history_error})
     add("gsb-reason-history", bool(reason_history), "历史 GSB 理由列表已抽取", evidence={"path": str(reason_history_path), "total": reason_history.get("total", 0)})

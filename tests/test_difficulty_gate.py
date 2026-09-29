@@ -262,28 +262,21 @@ if __name__ == "__main__":
 class ModelSplitTests(unittest.TestCase):
     """2026-09-29：同模型的两侧不构成 Pair-wise 对比，必须在开跑前拦掉。"""
 
+    @staticmethod
+    def _plan(model_a: str, model_b: str) -> dict:
+        return {"A": {"candidateId": "candidate-1", "model": model_a},
+                "B": {"candidateId": "candidate-2", "model": model_b}}
+
     def test_same_model_is_rejected(self) -> None:
         import side_runner
 
-        original_a, original_b = side_runner.DEFAULT_A_MODEL, side_runner.DEFAULT_B_MODEL
-        try:
-            side_runner.DEFAULT_A_MODEL = "auto_model/urm"
-            side_runner.DEFAULT_B_MODEL = "auto_model/urm"
-            with self.assertRaisesRegex(Exception, "模型名相同"):
-                side_runner.assert_model_split()
-        finally:
-            side_runner.DEFAULT_A_MODEL, side_runner.DEFAULT_B_MODEL = original_a, original_b
+        with self.assertRaisesRegex(Exception, "模型名相同"):
+            side_runner.assert_model_split(self._plan("auto_model/urm", "auto_model/urm"))
 
     def test_different_models_pass(self) -> None:
         import side_runner
 
-        original_a, original_b = side_runner.DEFAULT_A_MODEL, side_runner.DEFAULT_B_MODEL
-        try:
-            side_runner.DEFAULT_A_MODEL = "auto_model/urm"
-            side_runner.DEFAULT_B_MODEL = "ark/urm-03"
-            side_runner.assert_model_split()
-        finally:
-            side_runner.DEFAULT_A_MODEL, side_runner.DEFAULT_B_MODEL = original_a, original_b
+        side_runner.assert_model_split(self._plan("auto_model/urm", "ark/urm-03"))
 
 
 class DifficultyTemplateScaffoldTests(unittest.TestCase):

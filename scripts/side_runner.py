@@ -47,25 +47,51 @@ from github_repo import _ensure_origin_commit, _github_git_env
 from project_claims import task_project_code
 from semantic_review import build_packet, ensure_packets, validate_review
 from trace_validator import validate_single_round
+from model_audit import (  # noqa: F401  (re-exported for callers and tests)
+    ModelCallAudit,
+    ModelConfigError,
+    SYNTHETIC_MODELS,
+    audit_trace_models,
+    resolve_models,
+    trace_init_model,
+)
 
 DEFAULT_IMAGE = os.environ.get(
     "SOLOSB_DOCKER_IMAGE",
     "adminfather/benzhi-claude-code2:20260919",
 )
-DEFAULT_A_MODEL = os.environ.get("SOLOSB_A_MODEL", "auto_model/urm").strip() or "auto_model/urm"
-DEFAULT_B_MODEL = os.environ.get("SOLOSB_B_MODEL", "ark/urm-03").strip() or "ark/urm-03"
-# 兼容旧调用点；A/B 首轮对比固定使用 DEFAULT_A_MODEL / DEFAULT_B_MODEL。
-DEFAULT_MODEL = os.environ.get("SOLOSB_MODEL", DEFAULT_A_MODEL).strip() or DEFAULT_A_MODEL
+CANDIDATE_SIDES = {"candidate-1": "A", "candidate-2": "B"}
 
 
-def assert_model_split() -> None:
+def assert_model_split(plan: dict[str, Any] | None = None) -> None:
     """2026-09-29：A/B 必须换模型跑，同模型的两侧无法做模型对比。"""
-    if DEFAULT_A_MODEL == DEFAULT_B_MODEL:
+    plan = plan or model_plan()
+    model_a, model_b = plan["A"]["model"], plan["B"]["model"]
+    if not model_a or not model_b or model_a == model_b:
         raise SologsbError(
             "A/B 模型名相同，无法做 Pair-wise 对比："
-            f"SOLOSB_A_MODEL={DEFAULT_A_MODEL}，SOLOSB_B_MODEL={DEFAULT_B_MODEL}；"
+            f"A={model_a or '空'}，B={model_b or '空'}；"
             "请在设备配置里把 claude.modelA / claude.modelB 设成不同模型"
         )
+
+
+# Claude Code 除主模型外，后台小任务和按档位的别名各有一个模型变量；不设就会
+# 回落到内置的 claude-* 名字，经网关路由到别的模型。全部钉成同一个候选模型。
+MODEL_PIN_ENV = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+
+
+def model_pin_env(model: str) -> dict[str, str]:
+    """容器里所有模型变量都指向同一个候选模型。"""
+    return {name: model for name in MODEL_PIN_ENV}
+
+
 DEFAULT_ANTHROPIC_BASE_URL = ""
 DECLARED_CONTEXT_WINDOW = int(os.environ.get("SOLOSB_CONTEXT_WINDOW", "1000000"))
 MAX_ATTEMPTS = 6
@@ -84,35 +110,104 @@ CONTAINER_TICKET_STALE_SECONDS = 120.0
 CONTAINER_TASK_RE = re.compile(r"^(sologsb-.+?)-candidate-\d+-")
 
 
-def model_for_side(side: str) -> str:
-    """Return the fixed modelname for the logical A/B side."""
+def model_plan() -> dict[str, Any]:
+    """按当前设备配置生成 A/B 模型计划（尚未锁定到任务）。"""
+    try:
+        resolved = resolve_models()
+    except ModelConfigError as exc:
+        raise SologsbError(str(exc)) from exc
+    return {
+        "A": {"candidateId": "candidate-1", "model": resolved["A"], "source": resolved["sources"]["A"]},
+        "B": {"candidateId": "candidate-2", "model": resolved["B"], "source": resolved["sources"]["B"]},
+        "configPath": resolved["configPath"],
+        "ignoredEnv": resolved["ignoredEnv"],
+    }
+
+
+def task_model_plan(state: dict[str, Any]) -> dict[str, Any] | None:
+    """任务 state 里锁定的模型计划；没有或不完整时返回 None。"""
+    plan = state.get("modelPlan") if isinstance(state, dict) else None
+    if not isinstance(plan, dict):
+        return None
+    for side in SIDES:
+        entry = plan.get(side)
+        if not isinstance(entry, dict) or not str(entry.get("model") or "").strip():
+            return None
+    return plan
+
+
+def plan_models(plan: dict[str, Any]) -> dict[str, str]:
+    return {side: str(plan[side]["model"]).strip() for side in SIDES}
+
+
+def lock_model_plan(
+    state: dict[str, Any],
+    *,
+    expected: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """把本任务的 A/B 模型锁进 state，并与设备配置、调用方期望逐一核对。
+
+    红线：同一任务从开跑到提交只用一组模型。已锁定的计划与当前设备配置不一致时
+    直接拒绝，绝不静默换模型——那样 A、B 可能跑在两组不同配置上。
+    """
+    current = model_plan()
+    wanted = {side: str(value or "").strip() for side, value in (expected or {}).items() if str(value or "").strip()}
+    locked = task_model_plan(state)
+    if locked is not None:
+        plan = locked
+        if plan_models(locked) != plan_models(current):
+            raise SologsbError(
+                "本任务已锁定 A/B 模型 "
+                f"A={locked['A']['model']}、B={locked['B']['model']}，"
+                f"但当前设备配置是 A={current['A']['model']}、B={current['B']['model']}（{current['configPath']}）；"
+                "同一任务不得换模型。请恢复设备配置，或为新模型新建任务。"
+            )
+    else:
+        plan = current
+    for side, model in wanted.items():
+        if plan[side]["model"] != model:
+            raise SologsbError(
+                f"{side} 侧模型不符：任务要求 {model}，"
+                f"{'已锁定' if locked is not None else '设备配置'}为 {plan[side]['model']}"
+                f"（{current['configPath']}）；拒绝启动，请先在调度台「A / B 模型」保存正确配置。"
+            )
+    assert_model_split(plan)
+    plan = dict(plan)
+    plan.setdefault("lockedAt", utc_now())
+    state["modelPlan"] = plan
+    return plan
+
+
+def model_for_side(side: str, plan: dict[str, Any] | None = None) -> str:
+    """Return the modelname for the logical A/B side (the task plan wins)."""
     key = str(side or "").strip().upper()
-    if key == "A":
-        return DEFAULT_A_MODEL
-    if key == "B":
-        return DEFAULT_B_MODEL
-    raise SologsbError("模型只允许映射到 A 或 B")
+    if key not in SIDES:
+        raise SologsbError("模型只允许映射到 A 或 B")
+    return str((plan or model_plan())[key]["model"])
 
 
-def model_for_candidate(candidate: str, mapped_side: str = "") -> str:
+def model_for_candidate(candidate: str, mapped_side: str = "", plan: dict[str, Any] | None = None) -> str:
     """Return the model for a candidate, preferring the explicit A/B mapping."""
     if mapped_side:
-        return model_for_side(mapped_side)
-    if candidate == "candidate-1":
-        return DEFAULT_A_MODEL
-    if candidate == "candidate-2":
-        return DEFAULT_B_MODEL
+        return model_for_side(mapped_side, plan)
+    if candidate in CANDIDATE_SIDES:
+        return model_for_side(CANDIDATE_SIDES[candidate], plan)
     raise SologsbError(
         f"模型对比固定为 candidate-1=A、candidate-2=B，不支持 {candidate}"
     )
 
 
-def model_plan() -> dict[str, dict[str, str]]:
-    """Describe the fixed, auditable A/B model comparison."""
-    return {
-        "A": {"candidateId": "candidate-1", "model": DEFAULT_A_MODEL},
-        "B": {"candidateId": "candidate-2", "model": DEFAULT_B_MODEL},
-    }
+def _require_task_plan(task_root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    """候选运行时只认任务里锁定的计划；旧任务没有计划时按当前配置补锁。"""
+    plan = task_model_plan(state)
+    if plan is not None:
+        return plan
+    def mutate(current: dict[str, Any]) -> dict[str, Any]:
+        lock_model_plan(current)
+        return current
+    updated = mutate_state(task_root, mutate)
+    state["modelPlan"] = updated["modelPlan"]
+    return updated["modelPlan"]
 
 
 def anthropic_base_url() -> str:
@@ -1026,12 +1121,19 @@ def _runtime_info(
 ) -> dict[str, Any]:
     env = os.environ.copy()
     env["ANTHROPIC_AUTH_TOKEN"] = secret
-    command = 'claude --version; printf "MODEL=%s CONTEXT=%s BASE=%s" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$ANTHROPIC_BASE_URL"'
+    command = (
+        'claude --version; printf "MODEL=%s CONTEXT=%s BASE=%s\\n" "$ANTHROPIC_MODEL" '
+        '"$CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$ANTHROPIC_BASE_URL"; '
+        + " ".join(f'printf "PIN {name}=%s\\n" "${name}";' for name in MODEL_PIN_ENV)
+    )
+    pins: list[str] = []
+    for name, value in model_pin_env(expected_model).items():
+        pins.extend(["-e", f"{name}={value}"])
     proc = run(
         [
             "docker", "exec",
             "-e", "ANTHROPIC_AUTH_TOKEN",
-            "-e", f"ANTHROPIC_MODEL={expected_model}",
+            *pins,
             "-e", f"CLAUDE_CODE_MAX_CONTEXT_TOKENS={DECLARED_CONTEXT_WINDOW}",
             "-e", f"ANTHROPIC_BASE_URL={base_url}",
             container, "bash", "-lc", command,
@@ -1050,6 +1152,13 @@ def _runtime_info(
     runtime_base_url = match.group(3) if match else ""
     if model != expected_model:
         raise SologsbError(f"容器模型 {model} 不等于 {expected_model}")
+    pinned = dict(__import__("re").findall(r"^PIN (\w+)=(.*)$", output, flags=__import__("re").M))
+    unpinned = [name for name in MODEL_PIN_ENV if pinned.get(name, "").strip() != expected_model]
+    if unpinned:
+        raise SologsbError(
+            "容器模型变量未全部钉到 " + expected_model + "："
+            + "，".join(f"{name}={pinned.get(name, '').strip() or '空'}" for name in unpinned)
+        )
     if context != DECLARED_CONTEXT_WINDOW:
         raise SologsbError(f"容器上下文窗口 {context} 不等于 {DECLARED_CONTEXT_WINDOW}")
     if runtime_base_url.rstrip("/") != base_url.rstrip("/"):
@@ -1059,6 +1168,7 @@ def _runtime_info(
     return {
         "version": version,
         "model": model,
+        "modelPins": {name: pinned[name].strip() for name in MODEL_PIN_ENV},
         "contextWindow": context,
         "baseUrl": runtime_base_url.rstrip("/"),
     }
@@ -1428,6 +1538,68 @@ def _find_candidate_trace(attempt_dir: Path, session_id: str) -> Path | None:
     return matches[0] if matches else None
 
 
+MODEL_AUDIT_FILE = "model-audit.json"
+
+
+def model_audit_enabled() -> bool:
+    """轨迹模型审核默认开启；SOLOSB_MODEL_AUDIT=0 可临时关掉。"""
+    value = os.environ.get("SOLOSB_MODEL_AUDIT", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _model_audit_error(candidate: str, violation: dict[str, Any]) -> str:
+    observed = violation.get("observed") or "未知"
+    detail = f"；{violation['detail']}" if violation.get("detail") else ""
+    return (
+        f"模型审核失败：{candidate} 实际调用模型「{observed}」，"
+        f"本次配置为「{violation.get('expected')}」（{violation.get('source')}{detail}）"
+    )
+
+
+def _record_model_audit(
+    *,
+    task_root: Path,
+    candidate: str,
+    mapped_side: str,
+    attempt: int,
+    violation: dict[str, Any],
+    container: str,
+    plan: dict[str, Any] | None = None,
+) -> None:
+    """把模型审核结果写成监控台能直接读的证据文件。
+
+    结构与监控台自己的审核记录一致（monitor/model-audit.json），
+    监视页面不必额外解析就能显示“这条任务为什么被中断”。
+    """
+    side = str(mapped_side or "").strip().upper()
+    if side not in SIDES:
+        side = {"candidate-1": "A", "candidate-2": "B"}.get(candidate, "")
+    write_json(task_root / "monitor" / MODEL_AUDIT_FILE, {
+        "ok": False,
+        "policy": "model-mismatch",
+        "taskRoot": str(task_root),
+        "candidateId": candidate,
+        "attempt": int(attempt),
+        "violation": {
+            "candidateId": candidate,
+            "side": side,
+            "expected": str(violation.get("expected") or ""),
+            "recorded": str(violation.get("expected") or ""),
+            "observed": str(violation.get("observed") or ""),
+            "source": str(violation.get("source") or "轨迹"),
+            "detail": str(violation.get("detail") or ""),
+            "foundAt": str(violation.get("foundAt") or utc_now()),
+        },
+        "expectedModels": {key: model_for_side(key, plan) for key in SIDES},
+        "action": {
+            "kind": "skill-stopped",
+            "killedContainer": str(container or ""),
+            "retry": False,
+        },
+        "at": utc_now(),
+    })
+
+
 def _stop_process_group(proc: subprocess.Popen[Any]) -> None:
     if proc.poll() is not None:
         return
@@ -1467,7 +1639,8 @@ def _run_candidate_attempt(
     secret = _claude_secret()
     base_url = anthropic_base_url()
     image_digest = _ensure_image(DEFAULT_IMAGE)
-    model = model_for_candidate(candidate, mapped_side)
+    task_plan = _require_task_plan(task_root, state)
+    model = model_for_candidate(candidate, mapped_side, task_plan)
     container = ""
     container_slot: _ContainerReservation | None = None
     try:
@@ -1492,13 +1665,14 @@ def _run_candidate_attempt(
         command = _claude_command(session_id)
         env = os.environ.copy()
         env["ANTHROPIC_AUTH_TOKEN"] = secret
-        env["ANTHROPIC_MODEL"] = model
+        env.update(model_pin_env(model))
         env["ANTHROPIC_BASE_URL"] = base_url
         env["CLAUDE_CODE_MAX_RETRIES"] = CLAUDE_MAX_RETRIES
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(DECLARED_CONTEXT_WINDOW)
         docker_cmd = [
             "docker", "exec", "-i", "-w", "/workspace",
-            "-e", "ANTHROPIC_AUTH_TOKEN", "-e", "ANTHROPIC_MODEL",
+            "-e", "ANTHROPIC_AUTH_TOKEN",
+            *[arg for name in MODEL_PIN_ENV for arg in ("-e", name)],
             "-e", f"ANTHROPIC_BASE_URL={base_url}",
             "-e", "CLAUDE_CODE_MAX_RETRIES", "-e", "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
             container, "/bin/bash", "-lc", command,
@@ -1526,6 +1700,11 @@ def _run_candidate_attempt(
         live_offset = 0
         auto_reconnect_count = 0
         stop_requested = False
+        # 核对本身不可关闭：SOLOSB_MODEL_AUDIT=0 只关“当场掐断”，结束时照样复核，
+        # 不一致照样 blocked，没有模型证据的结果进不了 staged。
+        model_audit = ModelCallAudit(expected=model, stdout_path=stdout_path)
+        live_model_audit = model_audit_enabled()
+        audit_violation: dict[str, Any] | None = None
         with prompt_path.open("rb") as stdin, stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
             proc = subprocess.Popen(
                 docker_cmd,
@@ -1570,6 +1749,13 @@ def _run_candidate_attempt(
                                     b'"type":"assistant"' in line or b'"type": "assistant"' in line
                                     for line in stream
                                 )
+                        if live_model_audit:
+                            # 轨迹一审：容器刚上报模型就核对，不一致立刻掐断本轮执行。
+                            audit_violation = model_audit.check()
+                            if audit_violation is not None:
+                                error = _model_audit_error(candidate, audit_violation)
+                                exit_code = 190
+                                break
                     except OSError:
                         current_size = -1
                     if current_size != last_size:
@@ -1594,6 +1780,28 @@ def _run_candidate_attempt(
                 exit_code = 130
             if live:
                 _consume_live_events(stdout_path, live_offset, candidate)
+        if audit_violation is None:
+            audit_violation = model_audit.finalize(
+                completed=exit_code == 0 and not stop_requested and not error
+            )
+            if audit_violation is not None:
+                error = _model_audit_error(candidate, audit_violation)
+                exit_code = 190
+        metadata["modelEvidence"] = model_audit.summary()
+        write_json(attempt_dir / "attempt.json", metadata)
+        if audit_violation is not None:
+            # 容器还在跑就直接掐掉：错误模型既浪费额度，又会毁掉 A/B 对比。
+            _stop_process_group(proc)
+            _remove_container(container)
+            _record_model_audit(
+                task_root=task_root,
+                candidate=candidate,
+                mapped_side=mapped_side,
+                attempt=attempt,
+                violation=audit_violation,
+                container=container,
+                plan=task_plan,
+            )
         trace = _find_candidate_trace(attempt_dir, session_id)
         auto_reconnect_count = len(_api_retry_events(stdout_path))
         transport_error = _api_transport_error(stdout_path)
@@ -1612,6 +1820,26 @@ def _run_candidate_attempt(
                 if not validation["ok"]:
                     error = error or "; ".join(validation["errors"])
         if error:
+            if audit_violation is not None:
+                # 模型不符是配置问题，不是可以重试的偶发失败。
+                blocked = {
+                    **metadata,
+                    "candidateId": candidate,
+                    "mappedSide": mapped_side,
+                    "status": "blocked",
+                    "exitCode": exit_code,
+                    "error": error,
+                    "modelAudit": {
+                        **audit_violation,
+                        "candidateId": candidate,
+                        "side": mapped_side,
+                    },
+                    "autoReconnectCount": auto_reconnect_count,
+                    "tracePath": str(trace) if trace else "",
+                    "finishedAt": utc_now(),
+                }
+                _record_candidate_state(task_root, candidate, blocked)
+                return blocked
             _save_rejected(
                 task_root=task_root,
                 candidate=candidate,
@@ -1635,6 +1863,37 @@ def _run_candidate_attempt(
                 "finishedAt": utc_now(),
             }
 
+        # 交付的是原生会话轨迹：发布前对它再做一次同口径复核，
+        # 与 stream-json 的结论不一致也不能进 staged。
+        native_audit = audit_trace_models(trace, model)
+        metadata["modelEvidence"]["nativeTrace"] = {
+            key: native_audit.get(key) for key in ("ok", "responseModels", "path")
+        }
+        write_json(attempt_dir / "attempt.json", metadata)
+        if not native_audit.get("ok"):
+            violation = native_audit.get("violation") or {
+                "expected": model, "observed": "", "source": "原生轨迹",
+                "detail": native_audit.get("error") or "", "foundAt": utc_now(),
+            }
+            violation = {**violation, "source": f"原生轨迹 {violation.get('source') or ''}".strip()}
+            _record_model_audit(
+                task_root=task_root, candidate=candidate, mapped_side=mapped_side,
+                attempt=attempt, violation=violation, container=container, plan=task_plan,
+            )
+            blocked = {
+                **metadata,
+                "candidateId": candidate,
+                "mappedSide": mapped_side,
+                "status": "blocked",
+                "exitCode": 190,
+                "error": _model_audit_error(candidate, violation),
+                "modelAudit": {**violation, "candidateId": candidate, "side": mapped_side},
+                "autoReconnectCount": auto_reconnect_count,
+                "tracePath": str(trace),
+                "finishedAt": utc_now(),
+            }
+            _record_candidate_state(task_root, candidate, blocked)
+            return blocked
         candidate_trace = _candidate_trace_root(task_root, candidate) / trace.name
         atomic_copy(trace, candidate_trace)
         active_trace = candidate_trace
@@ -1821,6 +2080,7 @@ def _run_candidate_locked(
     }
     if state.get("status") not in allowed:
         raise SologsbError(f"当前状态 {state.get('status')} 不允许运行 {candidate}")
+    task_plan = _require_task_plan(task_root, state)
     existing = (state.get("candidates") or {}).get(candidate) or {}
     if existing.get("status") == "running" and not force:
         old_pid = existing.get("runPid")
@@ -1866,8 +2126,8 @@ def _run_candidate_locked(
             {
                 "candidateId": candidate,
                 "mappedSide": mapped_side,
-                "model": model_for_candidate(candidate, mapped_side),
-                "modelname": model_for_candidate(candidate, mapped_side),
+                "model": model_for_candidate(candidate, mapped_side, task_plan),
+                "modelname": model_for_candidate(candidate, mapped_side, task_plan),
                 "status": "running",
                 "attempt": attempt,
                 "startedAt": utc_now(),
@@ -1924,6 +2184,12 @@ def _run_candidate_locked(
             return result
         if result.get("status") == "cancelled":
             _record_candidate_state(task_root, candidate, result)
+            return result
+        if result.get("status") == "blocked" and result.get("modelAudit"):
+            # 模型名不对是配置问题：再跑一次还是同一个错模型，直接停。
+            _record_candidate_state(task_root, candidate, result)
+            if stop_event is not None:
+                stop_event.set()
             return result
         last_error = str(result.get("error") or last_error)
         _remove_container(str((result.get("container") or {}).get("name") or ""))
@@ -1990,10 +2256,12 @@ def _record_side_state(task_root: Path, side: str, record: dict[str, Any]) -> di
                 "workspacePath": record.get("workspacePath", ""),
                 "completionOrder": record.get("completionOrder", 0),
                 "finishedAt": record.get("finishedAt", ""),
-                "model": record.get("model") or model_for_side(side),
-                "modelname": record.get("modelname") or record.get("model") or model_for_side(side),
+                "model": record.get("model") or model_for_side(side, task_model_plan(state)),
+                "modelname": (record.get("modelname") or record.get("model")
+                              or model_for_side(side, task_model_plan(state))),
             }
-        state.setdefault("modelPlan", model_plan())
+        if task_model_plan(state) is None:
+            lock_model_plan(state)
         statuses = {name: (sides.get(name) or {}).get("status") for name in SIDES}
         if any(value == "blocked" for value in statuses.values()):
             state["status"] = "blocked"
@@ -2018,11 +2286,16 @@ def _run_side_locked(
     live: bool = True,
     force: bool = False,
     attempts: int = MAX_ATTEMPTS,
+    expected_models: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     side = side.upper()
     if side not in SIDE_LOWER:
         raise SologsbError("--side 只能是 A 或 B")
     state = read_json(task_root / "monitor" / "state.json", {})
+    # 续跑单侧最容易混模型：另一侧已经按锁定计划跑完，这一侧只能用同一份计划。
+    if task_model_plan(state) is None:
+        raise SologsbError(f"{side} 侧续跑找不到本任务锁定的 A/B 模型计划；请用 run --side both 重新开始")
+    lock_model_plan(dict(state), expected=expected_models)
     allowed = {
         "repo_ready", "running", "a_staged", "b_staged", "semantic_review_required",
         "attempt_invalid", "blocked",
@@ -2093,6 +2366,7 @@ def run_side(
     live: bool = True,
     force: bool = False,
     attempts: int = MAX_ATTEMPTS,
+    expected_models: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     side = side.upper()
     with _side_run_lock(task_root, side):
@@ -2103,6 +2377,7 @@ def run_side(
             live=live,
             force=force,
             attempts=attempts,
+            expected_models=expected_models,
         )
 
 
@@ -2162,13 +2437,13 @@ def run_candidates(
     timeout: float = 7200,
     live: bool = False,
     attempts: int = MAX_ATTEMPTS,
+    expected_models: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the fixed A/B model pair with identical parameters except modelname."""
-    assert_model_split()
     if candidate_count != 2:
         raise SologsbError(
-            "A/B 模型对比固定为 2 个候选：candidate-1 使用 auto_model/urm，"
-            "candidate-2 使用 ark/urm-03；不得提高候选数"
+            "A/B 模型对比固定为 2 个候选：candidate-1 使用 A 侧模型（claude.modelA），"
+            "candidate-2 使用 B 侧模型（claude.modelB）；不得提高候选数"
         )
     ids = candidate_ids(candidate_count)
     if attempts < 1:
@@ -2191,8 +2466,14 @@ def run_candidates(
     origin = task_root / "source" / "origin"
     if not origin.is_dir() or not any(origin.iterdir()):
         raise SologsbError(f"原始源码目录为空: {origin}")
+    # 任何改动之前先锁模型：与设备配置、调用方期望或已锁定计划不一致都直接退出。
+    plan = lock_model_plan(dict(state), expected=expected_models)
+    # 上一轮的模型审核结论属于上一轮：留档改名，否则监控台会把新一轮也显示成“模型审核中断”。
+    previous_audit = task_root / "monitor" / MODEL_AUDIT_FILE
+    if previous_audit.is_file():
+        stamp = utc_now().replace(":", "").replace("-", "")
+        previous_audit.rename(previous_audit.with_name(f"model-audit.{stamp}.json"))
     initial_sha = _ensure_origin_commit(origin, "chore: initial environment snapshot")
-    plan = model_plan()
     state = read_json(task_root / "monitor" / "state.json", {})
     for record in (state.get("candidates") or {}).values():
         if isinstance(record, dict):
@@ -2242,6 +2523,7 @@ def run_candidates(
     errors: dict[str, str] = {}
     results: dict[str, dict[str, Any]] = {}
     finish_order: dict[str, int] = {}
+    audit_violations: dict[str, dict[str, Any]] = {}
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=candidate_count, thread_name_prefix="sologsb-paired-model")
     futures: dict[str, concurrent.futures.Future[Any]] = {}
     try:
@@ -2272,6 +2554,10 @@ def run_candidates(
             results[candidate] = result
             if result.get("status") != "staged":
                 errors[candidate] = str(result.get("error") or result.get("status") or "候选失败")
+            if result.get("modelAudit"):
+                # 一侧的模型不符已经说明配置本身是错的：另一侧没必要再烧一轮。
+                audit_violations[candidate] = result["modelAudit"]
+                stop_event.set()
     finally:
         stop_event.set()
         for future in futures.values():
@@ -2285,7 +2571,7 @@ def run_candidates(
     fixed = (("candidate-1", "A"), ("candidate-2", "B"))
     for candidate, side in fixed:
         result = dict(results.get(candidate) or {})
-        candidate_model = model_for_candidate(candidate, side)
+        candidate_model = model_for_candidate(candidate, side, plan)
         if result.get("status") == "staged":
             side_record = _side_record_from_candidate(
                 task_root=task_root,
@@ -2366,9 +2652,26 @@ def run_candidates(
         state["status"] = "blocked"
         state["candidateRaceError"] = "固定 A/B 模型对比必须两侧都产生干净结果"
         state["candidateErrors"] = errors
+        if audit_violations:
+            # 审核命中时把原因写进状态，任务就是“配置错了”，不是随机失败。
+            state["modelAudit"] = {
+                "policy": "model-mismatch",
+                "violations": audit_violations,
+                "at": utc_now(),
+            }
         save_state(task_root, state)
         packets = {}
     if len(mapping) != 2:
+        if audit_violations:
+            first = next(iter(audit_violations.values()))
+            raise SologsbError(
+                "模型审核中断："
+                + "；".join(
+                    f"{candidate} 实际调用「{item.get('observed')}」，配置为「{item.get('expected')}」"
+                    for candidate, item in audit_violations.items()
+                )
+                + "。请先核对设置页的 A/B 模型与容器镜像能用的模型名，再重跑。"
+            )
         raise SologsbError(state["candidateRaceError"] + (f": {errors}" if errors else ""))
     return {
         "status": "semantic_review_required",
@@ -2391,6 +2694,7 @@ def run_both(
     live: bool = False,
     candidate_count: int = DEFAULT_CANDIDATE_COUNT,
     attempts: int = MAX_ATTEMPTS,
+    expected_models: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if candidate_count != 2:
         raise SologsbError("A/B 模型对比固定为两个候选，不允许改变候选数")
@@ -2400,6 +2704,7 @@ def run_both(
         timeout=timeout,
         live=live,
         attempts=attempts,
+        expected_models=expected_models,
     )
 
 

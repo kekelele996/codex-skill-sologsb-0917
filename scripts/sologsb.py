@@ -168,6 +168,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     root = task_root_from_arg(args.task_root)
     if args.base_url:
         os.environ["SOLOSB_ANTHROPIC_BASE_URL"] = str(args.base_url).strip().rstrip("/")
+    expected_models = {
+        side: str(value or "").strip()
+        for side, value in (("A", args.expect_model_a), ("B", args.expect_model_b))
+        if str(value or "").strip()
+    }
     try:
         if args.side == "both":
             if args.force:
@@ -178,6 +183,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 live=args.live,
                 candidate_count=args.candidates,
                 attempts=args.attempts,
+                expected_models=expected_models,
             )
         else:
             result = run_side(
@@ -187,6 +193,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 live=args.live,
                 force=args.force,
                 attempts=args.attempts,
+                expected_models=expected_models,
             )
     finally:
         cleanup_result = cleanup_task_containers(root, reason="run-command-end")
@@ -595,7 +602,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--candidates",
         type=int,
         default=DEFAULT_CANDIDATE_COUNT,
-        help="固定为 2：candidate-1=A(auto_model/urm)，candidate-2=B(ark/urm-03)",
+        help="固定为 2：candidate-1=A(claude.modelA)，candidate-2=B(claude.modelB)",
     )
     run_parser.add_argument(
         "--attempts",
@@ -607,6 +614,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-url",
         default="",
         help="Anthropic 兼容中转站 Base URL；默认取设备配置的 claude.baseUrl",
+    )
+    run_parser.add_argument(
+        "--expect-model-a",
+        default="",
+        help="调度台给本任务配置的 A 侧模型；与设备配置或已锁定计划不一致时拒绝启动",
+    )
+    run_parser.add_argument(
+        "--expect-model-b",
+        default="",
+        help="调度台给本任务配置的 B 侧模型；与设备配置或已锁定计划不一致时拒绝启动",
     )
     run_parser.add_argument("--force", action="store_true", help="丢弃已映射 A/B 候选的现有尝试并重跑；跨多次 force 必须手动累计实际次数")
     visibility = run_parser.add_mutually_exclusive_group()
