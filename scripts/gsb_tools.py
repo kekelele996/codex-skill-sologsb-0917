@@ -16,6 +16,7 @@ from typing import Any
 
 import device_config as _device_config
 from common import (
+    AB_MODELS,
     SCHEMA_FALLBACK,
     SOLO_SCRIPTS,
     SologsbError,
@@ -41,7 +42,7 @@ def gsb_server() -> str:
         )
     return value
 AUDIT_HUMAN = SOLO_SCRIPTS / "audit-human-writing.py"
-EXPECTED_FINGERPRINT = "954e9db2d25afeb4"
+EXPECTED_FINGERPRINT = "9a410bc6e129339b"
 FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+\.(?:go|js|cjs|mjs|ts|tsx|jsx|py|java|kt|rs|svelte|vue|json|ya?ml|toml|md|sql|sh|css|html|xml)")
 ERROR_TOKEN = re.compile(r"(?:Error|ERROR|panic|PANIC|npm ERR!|failed|FAILED|报错|失败)[:：]?\s*[^\n，。；;]{1,120}")
 TEST_COUNT_PATTERN = re.compile(
@@ -1501,6 +1502,19 @@ def build_values(task_root: Path, draft: dict[str, Any], schema: dict[str, Any])
         "gsb_reason": draft.get("reason", ""),
     }
     allowed = {str(field.get("field_key")): field for field in schema.get("fields") or []}
+    # 2026-09-29 起 A/B 固定使用不同模型，导出时只接受 runtime 记录的真实值。
+    for model_key, side, side_state in (
+        ("x_a_model_name", "A", side_a),
+        ("x_b_model_name", "B", side_b),
+    ):
+        if model_key in allowed:
+            actual = str(side_state.get("model") or "").strip()
+            expected = AB_MODELS[side]
+            if actual != expected:
+                raise SologsbError(
+                    f"{side} 模型必须是 {expected}，当前 state 记录为 {actual or '空'}"
+                )
+            values[model_key] = expected
     unknown = set(values) - set(allowed)
     if unknown:
         raise SologsbError(f"内部值映射包含未知字段: {sorted(unknown)}")

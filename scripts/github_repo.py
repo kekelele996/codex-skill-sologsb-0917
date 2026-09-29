@@ -212,8 +212,8 @@ def init_github_repo(
     }
     if state.get("status") not in allowed:
         raise SologsbError(
-            "必须先完成候选竞速并映射 A/B，再创建 GitHub 仓库；"
-            "候选完成前禁止上传源码")
+            "必须先完成固定模型 A/B 运行并记录映射，再创建 GitHub 仓库；"
+            "两侧完成前禁止上传源码")
     mapping = state.get("candidateMapping") if isinstance(state.get("candidateMapping"), dict) else {}
     for side in ("A", "B"):
         item = mapping.get(side) if isinstance(mapping.get(side), dict) else {}

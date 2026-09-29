@@ -23,7 +23,11 @@ from typing import Any
 
 import device_config
 from common import (
+    AB_COMMON_RUN_PARAMETER_KEYS,
+    AB_MODELS,
     AUTO_RUNNER,
+    FIXED_CANDIDATE_BY_SIDE,
+    FIXED_SIDE_BY_CANDIDATE,
     SIDES,
     SologsbError,
     SIDE_LOWER,
@@ -52,7 +56,6 @@ DEFAULT_IMAGE = os.environ.get(
     "SOLOSB_DOCKER_IMAGE",
     "adminfather/benzhi-claude-code2:20260919",
 )
-DEFAULT_MODEL = os.environ.get("SOLOSB_MODEL", "auto_model/urm")
 DEFAULT_ANTHROPIC_BASE_URL = ""
 DECLARED_CONTEXT_WINDOW = int(os.environ.get("SOLOSB_CONTEXT_WINDOW", "1000000"))
 MAX_ATTEMPTS = 6
@@ -306,11 +309,28 @@ def candidate_id(index: int) -> str:
 
 
 def candidate_ids(count: int) -> tuple[str, ...]:
-    if count < 2:
-        raise SologsbError("至少需要 2 个候选才能竞逐 A/B")
-    if count > 8:
-        raise SologsbError("候选数最多为 8，避免无界并发占用主机资源")
-    return tuple(candidate_id(index) for index in range(1, count + 1))
+    if count != DEFAULT_CANDIDATE_COUNT:
+        raise SologsbError("A/B 固定模型规则要求候选数必须为 2")
+    return tuple(FIXED_CANDIDATE_BY_SIDE[side] for side in SIDES)
+
+
+def candidate_side(candidate: str) -> str:
+    side = FIXED_SIDE_BY_CANDIDATE.get(candidate)
+    if not side:
+        raise SologsbError(f"候选 {candidate} 没有固定的 A/B 映射")
+    return side
+
+
+def side_candidate(side: str) -> str:
+    normalized = side.upper()
+    candidate = FIXED_CANDIDATE_BY_SIDE.get(normalized)
+    if not candidate:
+        raise SologsbError("--side 只能是 A 或 B")
+    return candidate
+
+
+def candidate_model(candidate: str) -> str:
+    return AB_MODELS[candidate_side(candidate)]
 
 
 def _candidate_workspace(task_root: Path, candidate: str) -> Path:
@@ -952,7 +972,7 @@ def _start_container(
     slot = _CONTAINER_LIMITER.acquire(project_code, container, stop_event)
     if stop_event is not None and stop_event.is_set():
         slot.release()
-        raise CandidateCancelled("已有两个候选先完成，不再启动新容器")
+        raise CandidateCancelled("任务已停止，不再启动新容器")
     try:
         proc = run(cmd, env=env, check=False, timeout=180)
         if proc.returncode != 0:
@@ -974,12 +994,24 @@ def _start_container(
     }
 
 
-def _runtime_info(container: str, secret: str, base_url: str) -> dict[str, Any]:
+def _runtime_info(
+    container: str,
+    secret: str,
+    base_url: str,
+    expected_model: str,
+) -> dict[str, Any]:
     env = os.environ.copy()
     env["ANTHROPIC_AUTH_TOKEN"] = secret
     command = 'claude --version; printf "MODEL=%s CONTEXT=%s BASE=%s" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$ANTHROPIC_BASE_URL"'
     proc = run(
-        ["docker", "exec", "-e", "ANTHROPIC_AUTH_TOKEN", "-e", f"ANTHROPIC_BASE_URL={base_url}", container, "bash", "-lc", command],
+        [
+            "docker", "exec",
+            "-e", "ANTHROPIC_AUTH_TOKEN",
+            "-e", f"ANTHROPIC_MODEL={expected_model}",
+            "-e", f"CLAUDE_CODE_MAX_CONTEXT_TOKENS={DECLARED_CONTEXT_WINDOW}",
+            "-e", f"ANTHROPIC_BASE_URL={base_url}",
+            container, "bash", "-lc", command,
+        ],
         env=env,
         check=False,
         timeout=60,
@@ -992,8 +1024,8 @@ def _runtime_info(container: str, secret: str, base_url: str) -> dict[str, Any]:
     model = match.group(1) if match else ""
     context = int(match.group(2)) if match else 0
     runtime_base_url = match.group(3) if match else ""
-    if model != DEFAULT_MODEL:
-        raise SologsbError(f"容器模型 {model} 不等于 {DEFAULT_MODEL}")
+    if model != expected_model:
+        raise SologsbError(f"容器模型 {model} 不等于 {expected_model}")
     if context != DECLARED_CONTEXT_WINDOW:
         raise SologsbError(f"容器上下文窗口 {context} 不等于 {DECLARED_CONTEXT_WINDOW}")
     if runtime_base_url.rstrip("/") != base_url.rstrip("/"):
@@ -1401,6 +1433,11 @@ def _run_candidate_attempt(
     stop_event: Any = None,
 ) -> dict[str, Any]:
     initial_sha = str(state["initialSnapshot"])
+    fixed_side = candidate_side(candidate)
+    if mapped_side and mapped_side.upper() != fixed_side:
+        raise SologsbError(f"{candidate} 固定映射到 {fixed_side}，不能作为 {mapped_side} 运行")
+    mapped_side = fixed_side
+    expected_model = AB_MODELS[fixed_side]
     repo = _clone_candidate(task_root, state, candidate)
     attempt_dir = _candidate_runtime_root(task_root, candidate) / f"attempt-{attempt:02d}"
     if attempt_dir.exists():
@@ -1430,18 +1467,20 @@ def _run_candidate_attempt(
         prompt = prompt_path.read_text(encoding="utf-8")
         if sha256_file(prompt_path) != str(state["promptSha256"]):
             raise SologsbError("提示词文件已变化，拒绝启动")
-        runtime_info = _runtime_info(container, secret, base_url)
+        runtime_info = _runtime_info(
+            container, secret, base_url, expected_model=expected_model,
+        )
         harness_version = runtime_info["version"]
         command = _claude_command(session_id)
         env = os.environ.copy()
         env["ANTHROPIC_AUTH_TOKEN"] = secret
-        env["ANTHROPIC_MODEL"] = DEFAULT_MODEL
+        env["ANTHROPIC_MODEL"] = expected_model
         env["ANTHROPIC_BASE_URL"] = base_url
         env["CLAUDE_CODE_MAX_RETRIES"] = CLAUDE_MAX_RETRIES
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(DECLARED_CONTEXT_WINDOW)
         docker_cmd = [
             "docker", "exec", "-i", "-w", "/workspace",
-            "-e", "ANTHROPIC_AUTH_TOKEN", "-e", "ANTHROPIC_MODEL",
+            "-e", "ANTHROPIC_AUTH_TOKEN", "-e", f"ANTHROPIC_MODEL={expected_model}",
             "-e", f"ANTHROPIC_BASE_URL={base_url}",
             "-e", "CLAUDE_CODE_MAX_RETRIES", "-e", "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
             container, "/bin/bash", "-lc", command,
@@ -1458,6 +1497,7 @@ def _run_candidate_attempt(
             "imageDigest": image_digest,
             "declaredContextWindow": runtime_info["contextWindow"],
             "baseUrl": runtime_info["baseUrl"],
+            "claudeMaxRetries": CLAUDE_MAX_RETRIES,
             "status": "running",
             "startedAt": utc_now(),
         }
@@ -1493,7 +1533,7 @@ def _run_candidate_attempt(
                 while True:
                     if stop_event is not None and stop_event.is_set():
                         stop_requested = True
-                        error = "候选竞速已完成，未进入前两名；执行被主动终止"
+                        error = "任务已停止；执行被主动终止"
                         break
                     code = proc.poll()
                     if code is not None:
@@ -1719,6 +1759,25 @@ def _record_candidate_state(task_root: Path, candidate: str, record: dict[str, A
     return mutate_state(task_root, mutate)
 
 
+def _validate_same_run_parameters(state: dict[str, Any], sides: dict[str, Any]) -> dict[str, Any]:
+    plan = state.get("modelPlan") if isinstance(state.get("modelPlan"), dict) else {}
+    if plan.get("diffKeys") != ["modelname"]:
+        raise SologsbError("model-plan.json 的 diffKeys 必须且只能是 modelname")
+    observed: dict[str, Any] = {}
+    for key in AB_COMMON_RUN_PARAMETER_KEYS:
+        values = {
+            side: (sides.get(side) or {}).get(key)
+            for side in SIDES
+        }
+        normalized = {side: str(value or "") for side, value in values.items()}
+        if not all(normalized.values()):
+            raise SologsbError(f"A/B 缺少共同运行参数 {key}: {normalized}")
+        if len(set(normalized.values())) != 1:
+            raise SologsbError(f"A/B 的 {key} 不一致: {normalized}")
+        observed[key] = normalized["A"]
+    return observed
+
+
 def _side_record_from_candidate(
     *,
     task_root: Path,
@@ -1727,6 +1786,18 @@ def _side_record_from_candidate(
     result: dict[str, Any],
     completion_order: int,
 ) -> dict[str, Any]:
+    side = side.upper()
+    expected_candidate = side_candidate(side)
+    if candidate != expected_candidate:
+        raise SologsbError(
+            f"{side} 必须绑定 {expected_candidate}，当前却是 {candidate}"
+        )
+    expected_model = AB_MODELS[side]
+    actual_model = str(result.get("model") or "").strip()
+    if actual_model != expected_model:
+        raise SologsbError(
+            f"{side} 模型必须是 {expected_model}，当前结果是 {actual_model or '空'}"
+        )
     record = dict(result)
     workspace = _candidate_workspace(task_root, candidate)
     record.update(
@@ -1736,6 +1807,7 @@ def _side_record_from_candidate(
             "candidateFolder": str(workspace.relative_to(task_root)),
             "workspacePath": str(workspace),
             "completionOrder": completion_order,
+            "model": expected_model,
             "status": "staged",
         }
     )
@@ -1755,6 +1827,11 @@ def _run_candidate_locked(
 ) -> dict[str, Any]:
     if attempts < 1:
         raise SologsbError("attempts 必须至少为 1")
+    fixed_side = candidate_side(candidate)
+    normalized_side = mapped_side.upper() if mapped_side else fixed_side
+    if normalized_side != fixed_side:
+        raise SologsbError(f"{candidate} 固定映射到 {fixed_side}，不能作为 {normalized_side} 运行")
+    mapped_side = fixed_side
     state = read_json(task_root / "monitor" / "state.json", {})
     allowed = {
         "prepared", "prompt_ready", "candidates_running", "candidates_ready",
@@ -1797,7 +1874,7 @@ def _run_candidate_locked(
                 "mappedSide": mapped_side,
                 "attempt": attempt - 1,
                 "status": "cancelled",
-                "error": "已有两个候选先完成，未启动新的重试",
+                "error": "任务已停止，未启动新的重试",
                 "finishedAt": utc_now(),
             }
             _record_candidate_state(task_root, candidate, canceled)
@@ -1903,9 +1980,12 @@ def run_candidate(
 ) -> dict[str, Any]:
     if not re.fullmatch(r"candidate-[1-9][0-9]*", candidate):
         raise SologsbError(f"非法候选目录名: {candidate}")
-    mapped_side = mapped_side.upper() if mapped_side else ""
-    if mapped_side and mapped_side not in SIDE_LOWER:
+    fixed_side = candidate_side(candidate)
+    mapped_side = mapped_side.upper() if mapped_side else fixed_side
+    if mapped_side not in SIDE_LOWER:
         raise SologsbError("mapped_side 只能是 A 或 B")
+    if mapped_side != fixed_side:
+        raise SologsbError(f"{candidate} 固定映射到 {fixed_side}，不能作为 {mapped_side} 运行")
     with _candidate_run_lock(task_root, candidate):
         return _run_candidate_locked(
             task_root,
@@ -1959,7 +2039,7 @@ def _run_side_locked(
     if state.get("status") not in allowed:
         raise SologsbError(
             f"当前状态 {state.get('status')} 不允许续跑 {side}；"
-            "首轮竞速请先运行 run --side both"
+            "首次运行请先执行 run --side both"
         )
     side_state = (state.get("sides") or {}).get(side) or {}
     candidate = str(side_state.get("candidateId") or (state.get("candidateMapping") or {}).get(side, {}).get("candidateId") or "")
@@ -2050,10 +2130,11 @@ def _side_run_lock(task_root: Path, side: str):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _race_candidate_worker(
+def _candidate_worker(
     task_root: Path,
     candidate: str,
     *,
+    mapped_side: str,
     timeout: float,
     live: bool,
     attempts: int,
@@ -2067,6 +2148,7 @@ def _race_candidate_worker(
             timeout=timeout,
             live=live,
             attempts=attempts,
+            mapped_side=mapped_side,
             stop_event=stop_event,
         )
         if result.get("status") != "staged":
@@ -2076,6 +2158,8 @@ def _race_candidate_worker(
     except Exception as exc:
         result = {
             "candidateId": candidate,
+            "mappedSide": mapped_side,
+            "model": candidate_model(candidate),
             "status": "blocked",
             "error": str(exc),
             "finishedAt": utc_now(),
@@ -2104,7 +2188,7 @@ def run_candidates(
     state = read_json(task_root / "monitor" / "state.json", {})
     if state.get("status") not in {"prompt_ready", "candidates_running", "candidates_ready", "blocked", "attempt_invalid"}:
         raise SologsbError(
-            f"当前状态 {state.get('status')} 不允许启动候选竞速；"
+            f"当前状态 {state.get('status')} 不允许启动 A/B 固定模型运行；"
             "必须在 GitHub 上传前运行"
         )
     prompt_path = Path(str(state.get("promptPath") or ""))
@@ -2113,11 +2197,40 @@ def run_candidates(
     origin = task_root / "source" / "origin"
     if not origin.is_dir() or not any(origin.iterdir()):
         raise SologsbError(f"原始源码目录为空: {origin}")
+    base_url = anthropic_base_url()
     initial_sha = _ensure_origin_commit(origin, "chore: initial environment snapshot")
     state = read_json(task_root / "monitor" / "state.json", {})
     for record in (state.get("candidates") or {}).values():
         if isinstance(record, dict):
             _remove_container(str((record.get("container") or {}).get("name") or ""))
+
+    planned_mapping: dict[str, dict[str, Any]] = {}
+    for side in SIDES:
+        candidate = FIXED_CANDIDATE_BY_SIDE[side]
+        workspace = _candidate_workspace(task_root, candidate)
+        planned_mapping[side] = {
+            "candidateId": candidate,
+            "candidateFolder": str(workspace.relative_to(task_root)),
+            "workspacePath": str(workspace),
+            "modelname": AB_MODELS[side],
+        }
+    model_plan = {
+        "schemaVersion": 1,
+        "rule": "同一道题的 A、B 只允许切换 modelname，其余运行参数保持不变",
+        "candidateMapping": planned_mapping,
+        "commonParameters": {
+            "promptSha256": str(state.get("promptSha256") or ""),
+            "baseUrl": base_url,
+            "image": DEFAULT_IMAGE,
+            "declaredContextWindow": DECLARED_CONTEXT_WINDOW,
+            "claudeMaxRetries": CLAUDE_MAX_RETRIES,
+            "settings": {"autoMemoryEnabled": False},
+            "tools": "Bash,Read,Write,Edit,Glob,Grep,TodoWrite",
+            "permissionMode": "dangerously-skip-permissions",
+        },
+        "diffKeys": ["modelname"],
+    }
+    write_json(task_root / "monitor" / "model-plan.json", model_plan)
     state.update(
         {
             "status": "candidates_running",
@@ -2126,13 +2239,14 @@ def run_candidates(
             "candidateIds": list(ids),
             "candidates": {},
             "candidateMapping": {},
+            "plannedCandidateMapping": planned_mapping,
+            "modelPlan": model_plan,
             "sides": {},
-            "candidateRaceStartedAt": utc_now(),
+            "candidateRunStartedAt": utc_now(),
         }
     )
     save_state(task_root, state)
-    # Satisfy the fixed order strictly: materialize every isolated candidate
-    # workspace first, then start any model container.
+    # Materialize both isolated workspaces first, then start either model container.
     try:
         for candidate in ids:
             _clone_candidate(task_root, state, candidate)
@@ -2140,145 +2254,167 @@ def run_candidates(
     except Exception as exc:
         failed = read_json(task_root / "monitor" / "state.json", {})
         failed["status"] = "blocked"
-        failed["candidateRaceError"] = f"候选预拉取或镜像准备失败: {exc}"
+        failed["candidateRunError"] = f"候选预拉取或镜像准备失败: {exc}"
         save_state(task_root, failed)
         raise
 
     stop_event = threading.Event()
     completed: queue.Queue[tuple[str, dict[str, Any], float]] = queue.Queue()
     errors: dict[str, str] = {}
-    winners: list[tuple[float, str, dict[str, Any]]] = []
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=candidate_count, thread_name_prefix="sologsb-candidate")
+    results: dict[str, dict[str, Any]] = {}
+    finish_order: dict[str, int] = {}
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(ids), thread_name_prefix="sologsb-candidate")
     futures: dict[str, concurrent.futures.Future[Any]] = {}
+    remaining = set(ids)
     try:
-        for candidate in ids:
+        for side in SIDES:
+            candidate = FIXED_CANDIDATE_BY_SIDE[side]
             futures[candidate] = pool.submit(
-                _race_candidate_worker,
+                _candidate_worker,
                 task_root,
                 candidate,
+                mapped_side=side,
                 timeout=timeout,
                 live=live,
                 attempts=attempts,
                 stop_event=stop_event,
                 completed=completed,
             )
-        remaining = set(ids)
-        # Each worker only reports after all of its attempts, and may first
-        # queue for a container slot, so the race budget is the worst case of
-        # one worker, not a single attempt's timeout.
+        # Both fixed sides must finish. A failed side does not cancel the other
+        # side because its staged result remains valid for repair and audit.
         _limit, _excluded, slot_wait = _CONTAINER_LIMITER._settings()
-        race_budget = attempts * (float(timeout) + ATTEMPT_BACKOFF_MAX_SECONDS) + slot_wait
-        race_deadline = time.monotonic() + race_budget
-        while remaining and len(winners) < 2:
+        run_budget = attempts * (float(timeout) + ATTEMPT_BACKOFF_MAX_SECONDS) + slot_wait
+        run_deadline = time.monotonic() + run_budget
+        while remaining:
             try:
-                candidate, result, finished_at = completed.get(
-                    timeout=max(1.0, race_deadline - time.monotonic())
+                candidate, result, _finished_at = completed.get(
+                    timeout=max(1.0, run_deadline - time.monotonic())
                 )
             except queue.Empty as exc:
-                raise SologsbError(f"候选竞速等待结果超时（总预算 {int(race_budget)} 秒）") from exc
+                raise SologsbError(f"A/B 固定模型运行等待结果超时（总预算 {int(run_budget)} 秒）") from exc
             remaining.discard(candidate)
+            results[candidate] = result
+            finish_order[candidate] = len(finish_order) + 1
             if result.get("status") == "staged":
-                winners.append((finished_at, candidate, result))
-                if len(winners) == 2:
-                    stop_event.set()
+                if live:
+                    _emit_live(candidate, f"{candidate_side(candidate)} 侧已通过结构校验并保持 staged")
             else:
                 errors[candidate] = str(result.get("error") or result.get("status") or "候选失败")
-        if len(winners) < 2:
+    finally:
+        if remaining:
             stop_event.set()
             for future in futures.values():
                 future.cancel()
-            pool.shutdown(wait=True)
-            failed = read_json(task_root / "monitor" / "state.json", {})
-            failed["status"] = "blocked"
-            failed["candidateRaceError"] = (
-                f"候选竞速必须至少产生 2 个干净结果，当前仅 {len(winners)} 个"
-            )
-            failed["candidateErrors"] = errors
-            save_state(task_root, failed)
-            raise SologsbError(failed["candidateRaceError"] + (f": {errors}" if errors else ""))
-    finally:
-        # Any exceptional exit must stop sibling candidates too; never wait for
-        # another model to finish after this orchestrator has failed.
-        stop_event.set()
-        for future in futures.values():
-            future.cancel()
         pool.shutdown(wait=True)
 
-    winners.sort(key=lambda item: (item[0], item[1]))
     state = read_json(task_root / "monitor" / "state.json", {})
     candidates = state.setdefault("candidates", {})
     sides: dict[str, dict[str, Any]] = {}
     mapping: dict[str, dict[str, Any]] = {}
-    for order, (finished_at, candidate, result) in enumerate(winners[:2], 1):
-        side = "A" if order == 1 else "B"
-        side_record = _side_record_from_candidate(
-            task_root=task_root,
-            side=side,
-            candidate=candidate,
-            result=result,
-            completion_order=order,
-        )
-        trace = Path(str(result.get("candidateTracePath") or result.get("tracePath") or ""))
-        if not trace.is_file():
-            raise SologsbError(f"{candidate} 完成但候选轨迹不存在: {trace}")
-        side_trace = task_root / "workspace" / "轨迹文件" / side.lower() / trace.name
-        atomic_copy(trace, side_trace)
-        side_record.update(
-            {
-                "tracePath": str(side_trace),
-                "traceSha256": sha256_file(side_trace),
-                "completionOrder": order,
-                "finishedAt": utc_now(),
-            }
-        )
-        sides[side] = side_record
+    for side in SIDES:
+        candidate = FIXED_CANDIDATE_BY_SIDE[side]
+        model = AB_MODELS[side]
+        order = int(finish_order.get(candidate) or 0)
+        result = results.get(candidate) or {}
         mapping[side] = {
             "candidateId": candidate,
-            "candidateFolder": side_record["candidateFolder"],
-            "workspacePath": side_record["workspacePath"],
+            "candidateFolder": str(_candidate_workspace(task_root, candidate).relative_to(task_root)),
+            "workspacePath": str(_candidate_workspace(task_root, candidate)),
+            "modelname": model,
             "completionOrder": order,
-            "finishedAt": side_record["finishedAt"],
         }
-        candidate_record = dict(candidates.get(candidate) or result)
-        candidate_record.update(
-            {
-                "status": "staged",
-                "mappedSide": side,
+        if result.get("status") == "staged":
+            side_record = _side_record_from_candidate(
+                task_root=task_root,
+                side=side,
+                candidate=candidate,
+                result=result,
+                completion_order=order,
+            )
+            trace = Path(str(result.get("candidateTracePath") or result.get("tracePath") or ""))
+            if not trace.is_file():
+                raise SologsbError(f"{candidate} 完成但候选轨迹不存在: {trace}")
+            side_trace = task_root / "workspace" / "轨迹文件" / side.lower() / trace.name
+            atomic_copy(trace, side_trace)
+            side_record.update(
+                {
+                    "tracePath": str(side_trace),
+                    "traceSha256": sha256_file(side_trace),
+                    "completionOrder": order,
+                    "finishedAt": utc_now(),
+                }
+            )
+            sides[side] = side_record
+            candidate_record = dict(candidates.get(candidate) or result)
+            candidate_record.update(
+                {
+                    "status": "staged",
+                    "mappedSide": side,
+                    "model": model,
+                    "completionOrder": order,
+                    "finishedAt": side_record["finishedAt"],
+                }
+            )
+            candidates[candidate] = candidate_record
+            write_json(_candidate_runtime_root(task_root, candidate) / "result.json", candidate_record)
+            write_json(task_root / "monitor" / "runtime" / side.lower() / "result.json", side_record)
+        else:
+            error = str(result.get("error") or errors.get(candidate) or "未返回 staged 结果")
+            sides[side] = {
+                "side": side,
+                "candidateId": candidate,
+                "candidateFolder": mapping[side]["candidateFolder"],
+                "workspacePath": mapping[side]["workspacePath"],
+                "model": model,
                 "completionOrder": order,
-                "finishedAt": mapping[side]["finishedAt"],
+                "status": "blocked",
+                "error": error,
+                "finishedAt": utc_now(),
             }
-        )
-        candidates[candidate] = candidate_record
-        write_json(_candidate_runtime_root(task_root, candidate) / "result.json", candidate_record)
-        write_json(task_root / "monitor" / "runtime" / side.lower() / "result.json", side_record)
+            write_json(task_root / "monitor" / "runtime" / side.lower() / "result.json", sides[side])
 
     state["candidates"] = candidates
     state["sides"] = sides
     state["candidateMapping"] = mapping
-    state["candidateWinners"] = [mapping["A"]["candidateId"], mapping["B"]["candidateId"]]
-    state["candidateRaceFinishedAt"] = utc_now()
-    state["status"] = "semantic_review_required"
+    state["candidatePair"] = list(ids)
+    state["candidateRunFinishedAt"] = utc_now()
     state["semanticPackets"] = {}
+    staged_sides = tuple(side for side in SIDES if (sides.get(side) or {}).get("status") == "staged")
+    if len(staged_sides) == len(SIDES):
+        observed_common = _validate_same_run_parameters(state, sides)
+        model_plan = {
+            **model_plan,
+            "observedCommonParameters": observed_common,
+        }
+        state["modelPlan"] = model_plan
+        write_json(task_root / "monitor" / "model-plan.json", model_plan)
+        state["status"] = "semantic_review_required"
+        save_state(task_root, state)
+        packets = ensure_packets(task_root)
+        state = read_json(task_root / "monitor" / "state.json", {})
+        state["semanticPackets"] = packets
+        save_state(task_root, state)
+        return {
+            "status": "semantic_review_required",
+            "executionMode": "fixed-models-live" if live else "fixed-models-headless",
+            "candidateCount": candidate_count,
+            "candidateMapping": mapping,
+            "modelPlan": model_plan,
+            "sides": sides,
+            "packets": packets,
+            "cancelledCandidates": [],
+            "errors": errors,
+        }
+
+    state["status"] = "blocked"
+    state["candidateRunError"] = "A/B 固定模型运行没有同时产出两个 staged 结果"
+    state["candidateErrors"] = errors
     save_state(task_root, state)
-    packets = ensure_packets(task_root)
+    packets = ensure_packets(task_root, staged_sides) if staged_sides else {}
     state = read_json(task_root / "monitor" / "state.json", {})
     state["semanticPackets"] = packets
     save_state(task_root, state)
-    return {
-        "status": "semantic_review_required",
-        "executionMode": "candidate-race-live" if live else "candidate-race-headless",
-        "candidateCount": candidate_count,
-        "candidateMapping": mapping,
-        "sides": sides,
-        "packets": packets,
-        "cancelledCandidates": [
-            candidate
-            for candidate, record in candidates.items()
-            if str((record or {}).get("status") or "") == "cancelled"
-        ],
-        "errors": errors,
-    }
-
+    raise SologsbError(state["candidateRunError"] + (f": {errors}" if errors else ""))
 
 def run_both(
     task_root: Path,
@@ -2306,6 +2442,14 @@ def publish_sides(
     sides = state.get("sides") or {}
     if (sides.get("A") or {}).get("status") not in {"staged", "clean"} or (sides.get("B") or {}).get("status") not in {"staged", "clean"}:
         raise SologsbError("A/B 都必须完成结构校验后才能发布")
+    _validate_same_run_parameters(state, sides)
+    for side in SIDES:
+        side_state = sides.get(side) or {}
+        expected_candidate = side_candidate(side)
+        if str(side_state.get("candidateId") or "") != expected_candidate:
+            raise SologsbError(f"{side} 必须绑定 {expected_candidate} 才能发布")
+        if str(side_state.get("model") or "") != AB_MODELS[side]:
+            raise SologsbError(f"{side} 模型必须是 {AB_MODELS[side]} 才能发布")
     validate_review(task_root, "A", semantic_a.expanduser().resolve())
     validate_review(task_root, "B", semantic_b.expanduser().resolve())
     published = _atomic_publish(task_root, state, sides)

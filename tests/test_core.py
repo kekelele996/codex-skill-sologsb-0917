@@ -1003,8 +1003,10 @@ class DeliveryFieldTests(unittest.TestCase):
                 "repoUrl": "https://github.com/o/r", "initialSnapshot": "a" * 40,
                 "sides": {
                     "A": {"tracePath": str(trace_a), "sessionId": "s1", "harnessVersion": "2.1.197",
+                          "model": "auto_model/urm",
                           "artifactSnapshotUrl": "https://github.com/o/r/commit/" + "b" * 40},
                     "B": {"tracePath": str(trace_b), "sessionId": "s2",
+                          "model": "ark/urm-03",
                           "artifactSnapshotUrl": "https://github.com/o/r/commit/" + "c" * 40},
                 },
             })
@@ -1013,6 +1015,8 @@ class DeliveryFieldTests(unittest.TestCase):
             values = build_values(root, draft, schema)
             self.assertEqual(values["a_score_delivery"], 2)
             self.assertEqual(values["b_desc_delivery"], self.DESC_B)
+            self.assertEqual(values["x_a_model_name"], "auto_model/urm")
+            self.assertEqual(values["x_b_model_name"], "ark/urm-03")
             self.assertNotIn("remark", values)
             (trace_a.parent / "stale-copy.jsonl").write_text("x", encoding="utf-8")
             with self.assertRaisesRegex(Exception, "恰好包含 1 个"):
@@ -1117,6 +1121,42 @@ class DeliverySubmissionTests(unittest.TestCase):
         official = read_json(ROOT / "references" / "gsb-form-schema.json", {})
         self.assertEqual([f["key"] for f in page["fields"]], [f["field_key"] for f in official["fields"]])
         self.assertEqual(page["form"]["fieldCount"], len(page["fields"]))
+
+    def test_ab_model_plan_is_fixed_and_distinct(self) -> None:
+        common = {
+            "baseUrl": "https://relay.example",
+            "imageDigest": "sha256:test-image",
+            "declaredContextWindow": 1000000,
+            "harnessVersion": "2.1.197",
+            "claudeMaxRetries": "10",
+        }
+        good = {
+            "modelPlan": {"diffKeys": ["modelname"]},
+            "sides": {
+                "A": {"model": "auto_model/urm", **common},
+                "B": {"model": "ark/urm-03", **common},
+            },
+            "candidateMapping": {
+                "A": {"candidateId": "candidate-1"},
+                "B": {"candidateId": "candidate-2"},
+            },
+        }
+        result = self.preflight.validate_ab_model_plan(good)
+        self.assertTrue(result["ok"], result)
+        bad = {
+            "modelPlan": {"diffKeys": ["modelname"]},
+            "sides": {
+                "A": {"model": "auto_model/urm", **common},
+                "B": {"model": "auto_model/urm", **common},
+            },
+            "candidateMapping": {
+                "A": {"candidateId": "candidate-2"},
+                "B": {"candidateId": "candidate-1"},
+            },
+        }
+        rejected = self.preflight.validate_ab_model_plan(bad)
+        self.assertFalse(rejected["ok"])
+        self.assertTrue(any("不得相同" in item or "应为" in item or "应绑定" in item for item in rejected["errors"]))
 
     def test_number_fields_are_sent_as_int(self) -> None:
         schema = read_json(ROOT / "references" / "gsb-form-schema.json", {})
@@ -1975,13 +2015,15 @@ class ParallelRunTests(unittest.TestCase):
         self.assertFalse(legacy_off.live)
         self.assertEqual(default.candidates, 2)
         self.assertEqual(default.attempts, 6)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["run", "--task-root", "/tmp/task", "--side", "both", "--candidates", "3"])
         self.assertEqual(default.base_url, "")
         self.assertEqual(custom_base.base_url, "https://llm.example.com/")
         with mock.patch.dict(os.environ, {"SOLOSB_ANTHROPIC_BASE_URL": "https://custom.example/"}, clear=False):
             self.assertEqual(side_runner.anthropic_base_url(), "https://custom.example")
         self.assertEqual(semantic_a.side, "A")
 
-    def test_candidate_race_maps_first_two_by_finish_order_without_rename(self) -> None:
+    def test_fixed_models_map_candidate_1_to_a_and_candidate_2_to_b(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "monitor").mkdir(parents=True)
@@ -1992,26 +2034,19 @@ class ParallelRunTests(unittest.TestCase):
             prompt.write_text("prompt", encoding="utf-8")
             write_json(root / "monitor" / "state.json", {
                 "status": "prompt_ready",
-                "taskName": "candidate-race",
+                "taskName": "fixed-models",
                 "promptPath": str(prompt),
                 "promptSha256": sha256_file(prompt),
             })
 
             def fake_candidate(task_root, candidate, **kwargs):
-                stop_event = kwargs["stop_event"]
+                self.assertEqual(kwargs["mapped_side"], side_runner.candidate_side(candidate))
                 workspace = task_root / "source" / "candidates" / candidate
                 self.assertTrue((workspace / ".git").is_dir())
                 (workspace / "result.txt").write_text(candidate, encoding="utf-8")
                 if candidate == "candidate-1":
                     time.sleep(0.08)
-                elif candidate == "candidate-2":
-                    stop_event.wait(timeout=5)
-                    return {
-                        "candidateId": candidate,
-                        "status": "cancelled",
-                        "error": "stopped after first two",
-                    }
-                elif candidate == "candidate-3":
+                else:
                     time.sleep(0.01)
                 trace = task_root / "workspace" / "轨迹文件" / "candidates" / candidate / f"{candidate}.jsonl"
                 trace.parent.mkdir(parents=True, exist_ok=True)
@@ -2023,9 +2058,16 @@ class ParallelRunTests(unittest.TestCase):
                 trace.write_text("\n".join(json.dumps(x) for x in events) + "\n", encoding="utf-8")
                 return {
                     "candidateId": candidate,
+                    "mappedSide": kwargs["mapped_side"],
                     "attempt": 1,
                     "status": "staged",
                     "sessionId": session,
+                    "model": side_runner.candidate_model(candidate),
+                    "baseUrl": "https://relay.example",
+                    "imageDigest": "sha256:test-image",
+                    "declaredContextWindow": 1000000,
+                    "harnessVersion": "2.1.197",
+                    "claudeMaxRetries": "10",
                     "candidateTracePath": str(trace),
                     "tracePath": str(trace),
                     "changedFiles": ["result.txt"],
@@ -2034,16 +2076,21 @@ class ParallelRunTests(unittest.TestCase):
 
             with mock.patch.object(side_runner, "_ensure_image", return_value="image"):
                 with mock.patch.object(side_runner, "_run_candidate_locked", side_effect=fake_candidate):
-                    result = side_runner.run_both(root, timeout=10, live=False, candidate_count=3)
+                    result = side_runner.run_both(root, timeout=10, live=False, candidate_count=2)
 
-            self.assertEqual(result["candidateMapping"]["A"]["candidateId"], "candidate-3")
-            self.assertEqual(result["candidateMapping"]["B"]["candidateId"], "candidate-1")
-            self.assertIn("candidate-2", result["cancelledCandidates"])
-            for candidate in ("candidate-1", "candidate-2", "candidate-3"):
+            self.assertEqual(result["candidateMapping"]["A"]["candidateId"], "candidate-1")
+            self.assertEqual(result["candidateMapping"]["B"]["candidateId"], "candidate-2")
+            self.assertEqual(result["candidateMapping"]["A"]["modelname"], "auto_model/urm")
+            self.assertEqual(result["candidateMapping"]["B"]["modelname"], "ark/urm-03")
+            self.assertEqual(result["sides"]["A"]["model"], "auto_model/urm")
+            self.assertEqual(result["sides"]["B"]["model"], "ark/urm-03")
+            self.assertLess(result["sides"]["B"]["completionOrder"], result["sides"]["A"]["completionOrder"])
+            self.assertEqual(result["modelPlan"]["diffKeys"], ["modelname"])
+            self.assertEqual(result["cancelledCandidates"], [])
+            for candidate in ("candidate-1", "candidate-2"):
                 self.assertTrue((root / "source" / "candidates" / candidate).is_dir())
-            self.assertTrue((root / "workspace" / "轨迹文件" / "a" / "candidate-3.jsonl").is_file())
-            self.assertTrue((root / "workspace" / "轨迹文件" / "a").is_dir())
-            self.assertTrue((root / "workspace" / "轨迹文件" / "b").is_dir())
+            self.assertTrue((root / "workspace" / "轨迹文件" / "a" / "candidate-1.jsonl").is_file())
+            self.assertTrue((root / "workspace" / "轨迹文件" / "b" / "candidate-2.jsonl").is_file())
 
     def test_candidate_uses_six_actual_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2150,7 +2197,7 @@ class ParallelRunTests(unittest.TestCase):
             (root / "source" / "origin").mkdir(parents=True)
             (root / "source" / "origin" / "README.md").write_text("base", encoding="utf-8")
             write_json(root / "monitor" / "state.json", {"status": "prompt_ready", "taskName": "gate"})
-            with self.assertRaisesRegex(SologsbError, "候选竞速"):
+            with self.assertRaisesRegex(SologsbError, "固定模型"):
                 init_github_repo(root, dry_run=True)
 
     def test_github_repo_base_uses_platform_project_code(self) -> None:
@@ -2204,7 +2251,23 @@ class ParallelPublishTests(unittest.TestCase):
             write_json(root / "monitor" / "state.json", {
                 "status": "semantic_review_required", "owner": "smoke", "repoUrl": str(bare),
                 "remoteUrl": str(bare), "initialSnapshot": initial,
-                "sides": {side: {"status": "staged", "sessionId": f"s-{side}", "tracePath": str(root / "workspace" / "轨迹文件" / side.lower() / f"{side}.jsonl")} for side in ("A", "B")},
+                "modelPlan": {"diffKeys": ["modelname"]},
+                "sides": {
+                    side: {
+                        "status": "staged",
+                        "sessionId": f"s-{side}",
+                        "candidateId": side_runner.side_candidate(side),
+                        "workspacePath": str(root / "source" / side.lower()),
+                        "model": side_runner.AB_MODELS[side],
+                        "baseUrl": "https://relay.example",
+                        "imageDigest": "sha256:test-image",
+                        "declaredContextWindow": 1000000,
+                        "harnessVersion": "2.1.197",
+                        "claudeMaxRetries": "10",
+                        "tracePath": str(root / "workspace" / "轨迹文件" / side.lower() / f"{side}.jsonl"),
+                    }
+                    for side in ("A", "B")
+                },
             })
             result = side_runner.publish_sides(
                 root,
@@ -2226,7 +2289,7 @@ class ParallelPublishTests(unittest.TestCase):
             bare = root / "remote.git"
             subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
             _push_topology(origin, str(bare), initial)
-            mapping = {"A": "candidate-3", "B": "candidate-1"}
+            mapping = {"A": "candidate-1", "B": "candidate-2"}
             for side, candidate in mapping.items():
                 workspace = root / "source" / "candidates" / candidate
                 _clone_branch(str(bare), "main", workspace, initial)
@@ -2254,12 +2317,19 @@ class ParallelPublishTests(unittest.TestCase):
             write_json(root / "monitor" / "state.json", {
                 "status": "semantic_review_required", "owner": "smoke", "repoUrl": str(bare),
                 "remoteUrl": str(bare), "initialSnapshot": initial,
+                "modelPlan": {"diffKeys": ["modelname"]},
                 "sides": {
                     side: {
                         "status": "staged",
                         "sessionId": f"s-{candidate}",
                         "candidateId": candidate,
                         "workspacePath": str(root / "source" / "candidates" / candidate),
+                        "model": side_runner.AB_MODELS[side],
+                        "baseUrl": "https://relay.example",
+                        "imageDigest": "sha256:test-image",
+                        "declaredContextWindow": 1000000,
+                        "harnessVersion": "2.1.197",
+                        "claudeMaxRetries": "10",
                         "tracePath": str(root / "workspace" / "轨迹文件" / side.lower() / f"{candidate}.jsonl"),
                     }
                     for side, candidate in mapping.items()
@@ -2270,21 +2340,21 @@ class ParallelPublishTests(unittest.TestCase):
                 semantic_a=root / "monitor" / "semantic" / "a.review.json",
                 semantic_b=root / "monitor" / "semantic" / "b.review.json",
             )
-            self.assertTrue((root / "source" / "candidates" / "candidate-3").is_dir())
             self.assertTrue((root / "source" / "candidates" / "candidate-1").is_dir())
+            self.assertTrue((root / "source" / "candidates" / "candidate-2").is_dir())
             self.assertEqual(
                 subprocess.run(
                     ["git", "--git-dir", str(bare), "show", "refs/heads/A:result.txt"],
                     check=True, capture_output=True, text=True,
                 ).stdout,
-                "candidate-3",
+                "candidate-1",
             )
             self.assertEqual(
                 subprocess.run(
                     ["git", "--git-dir", str(bare), "show", "refs/heads/B:result.txt"],
                     check=True, capture_output=True, text=True,
                 ).stdout,
-                "candidate-1",
+                "candidate-2",
             )
 
 
@@ -3409,6 +3479,34 @@ class ContainerImageTests(unittest.TestCase):
             finally:
                 importlib.reload(side_runner)
 
+    def test_runtime_probe_injects_and_checks_the_expected_ab_model(self) -> None:
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            captured.append(list(cmd))
+            output = b"2.1.197\nMODEL=ark/urm-03 CONTEXT=1000000 BASE=https://relay.example\n"
+            return subprocess.CompletedProcess(cmd, 0, output, b"")
+
+        with mock.patch.object(side_runner, "run", side_effect=fake_run):
+            info = side_runner._runtime_info(
+                "container-1", "secret", "https://relay.example",
+                expected_model="ark/urm-03",
+            )
+        self.assertEqual(info["model"], "ark/urm-03")
+        self.assertIn("ANTHROPIC_MODEL=ark/urm-03", captured[0])
+        self.assertIn("CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000", captured[0])
+
+        def wrong_model(cmd, **_kwargs):
+            output = b"2.1.197\nMODEL=auto_model/urm CONTEXT=1000000 BASE=https://relay.example\n"
+            return subprocess.CompletedProcess(cmd, 0, output, b"")
+
+        with mock.patch.object(side_runner, "run", side_effect=wrong_model):
+            with self.assertRaisesRegex(SologsbError, "不等于 ark/urm-03"):
+                side_runner._runtime_info(
+                    "container-1", "secret", "https://relay.example",
+                    expected_model="ark/urm-03",
+                )
+
     def test_start_container_does_not_depend_on_image_entrypoint_or_base_url(self) -> None:
         # 新镜像的 entrypoint 放宽了 /workspace 非空检查，并内置了自己的 ANTHROPIC_BASE_URL；
         # 运行器必须绕过 entrypoint、显式传入 Base URL，才不受镜像差异影响。
@@ -3668,6 +3766,38 @@ class DailyQuotaTests(unittest.TestCase):
                 self.assertFalse(self.quota.reserve(lambda: 100)["reserved"])
                 self.assertTrue(self.quota.read_state()["limitReached"])
 
+    def test_overview_today_count_uses_platform_today(self) -> None:
+        payload = {"total": 397, "today": {"submitted": 73, "passed": 73},
+                   "by_date": [{"date": "2000-01-01", "count": 5}]}
+        self.assertEqual(self.quota.overview_today_count(payload), 73)
+
+    def test_overview_today_count_falls_back_to_by_date(self) -> None:
+        today = self.quota.local_today()
+        payload = {"total": 397, "by_date": [{"date": today, "count": 94}]}
+        self.assertEqual(self.quota.overview_today_count(payload), 94)
+
+    def test_overview_today_count_is_none_without_today(self) -> None:
+        self.assertIsNone(self.quota.overview_today_count({"total": 397, "by_date": []}))
+        self.assertIsNone(self.quota.overview_today_count({"today": {"submitted": "未知"}}))
+        self.assertIsNone(self.quota.overview_today_count(None))
+
+    def test_merge_platform_count_keeps_the_larger_and_survives_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env = {self.quota.FLAG_PATH_ENV: str(Path(temp) / "quota.json"), self.quota.DAILY_LIMIT_ENV: "100"}
+            with mock.patch.dict(os.environ, env):
+                self.quota.reserve()
+                state = self.quota.merge_platform_count(lambda: 73)
+                self.assertEqual(state["count"], 73)
+                self.assertEqual(state["platformCount"], 73)
+                # 本机计数更大时不被平台值拉低，平台读不到时也不报错。
+                self.assertEqual(self.quota.merge_platform_count(lambda: 2)["count"], 73)
+
+                def boom() -> int:
+                    raise OSError("平台不可达")
+
+                self.assertEqual(self.quota.merge_platform_count(boom)["count"], 73)
+
+
     def test_platform_overview_can_clear_stale_limit_flag(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "quota.json"
@@ -3686,6 +3816,56 @@ class DailyQuotaTests(unittest.TestCase):
         self.assertFalse(state["limitReached"])
         self.assertEqual(state["platformCount"], 82)
         self.assertFalse(saved["limitReached"])
+
+class PlatformTodayCountTests(unittest.TestCase):
+    """当天提交量以总览接口为准，接口异常才回落到列表接口。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "sologsb_submit_api_count", ROOT / "submission" / "scripts" / "submit_api.py"
+        )
+        cls.submit_api = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(cls.submit_api)
+
+    @staticmethod
+    def _now_utc() -> str:
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def test_overview_is_the_source_of_the_daily_count(self) -> None:
+        urls: list[str] = []
+
+        def fake(method, url, cookie, csrf, *, payload=None, timeout=120):
+            urls.append(url)
+            return {"total": 397, "today": {"submitted": 73, "passed": 73},
+                    "by_date": [{"date": "2026-09-26", "count": 94}]}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake):
+            self.assertEqual(self.submit_api.platform_today_count("https://solo2", "c", "x"), 73)
+        self.assertEqual(urls, ["https://solo2/api/v1/gsb/overview"])
+
+    def test_missing_today_falls_back_to_the_list_interface(self) -> None:
+        def fake(method, url, cookie, csrf, *, payload=None, timeout=120):
+            if url.endswith("/api/v1/gsb/overview"):
+                raise RuntimeError("GET .../overview 返回 HTTP 404")
+            return {"items": [{"submitted_at": self._now_utc()},
+                              {"submitted_at": "2020-01-01T00:00:00Z"}],
+                    "meta": {"total": 2}}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake):
+            self.assertEqual(self.submit_api.platform_today_count("https://solo2", "c", "x"), 1)
+
+    def test_overview_without_today_block_falls_back(self) -> None:
+        def fake(method, url, cookie, csrf, *, payload=None, timeout=120):
+            if url.endswith("/api/v1/gsb/overview"):
+                return {"total": 397, "by_date": []}
+            return {"items": [{"created_at": self._now_utc()}], "meta": {"total": 1}}
+
+        with mock.patch.object(self.submit_api, "request_json", side_effect=fake):
+            self.assertEqual(self.submit_api.platform_today_count("https://solo2", "c", "x"), 1)
 
 
 class SubmitDeferredTests(unittest.TestCase):
@@ -3760,6 +3940,29 @@ class SubmitDeferredTests(unittest.TestCase):
                 )
             self.assertEqual(calls, ["task-0"])
             self.assertEqual(summary["status"], "stopped_daily_limit")
+
+    def test_platform_count_leaves_only_the_remaining_slots(self) -> None:
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            for i in range(4):
+                self._park(base, "2026-09-27", f"task-{i}")
+            clock = [datetime(2026, 9, 28, 0, 0, 5).astimezone()]
+            started: list[str] = []
+
+            env = {self.drainer.daily_quota.FLAG_PATH_ENV: str(base / "quota.json"),
+                   self.drainer.daily_quota.DAILY_LIMIT_ENV: "100"}
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(self.drainer.daily_quota, "local_today", return_value="2026-09-28"):
+                summary = self.drainer.drain(
+                    base, 10.0, execute=True, now=lambda: clock[0],
+                    sleep=lambda s: clock.__setitem__(0, clock[0] + timedelta(seconds=s)),
+                    runner=lambda item, poll: started.append(item["taskName"]) or 0,
+                    platform_count=lambda: 98,
+                )
+            self.assertEqual(started, ["task-0", "task-1"])
+            self.assertEqual(summary["leftForNextDay"], ["task-2", "task-3"])
 
     def _write_result(self, task_root: Path, submission_id: str) -> None:
         path = task_root / "workspace" / "评审文件" / "pre-submit" / "submission-api-result.json"

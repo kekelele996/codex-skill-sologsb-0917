@@ -21,8 +21,9 @@
 
 执行门禁：
 - 所有候选共用同一份 UTF-8 题目提示词，字节完全一致；不得选择“代码理解”。
-- 竞速阶段必须显式执行 `run --side both --candidates 2 --attempts 6 --base-url {{base_url}}`；`{{base_url}}` 取设备配置里的 `claude.baseUrl`，未提供时回退到运行环境的默认值。
-- 前两个结构校验通过的候选按完成顺序映射 A/B；候选目录和候选编号不得改名。
+- 设计提示词前按 `references/difficulty-gate.md` 写 `difficulty-audit.json`，至少两个独立困难轴、至少一个强困难轴、合计至少三个真实源码锚点；`prompt` 必须显式传 `--difficulty-audit`，规则多、字段多、测试多和改动行数多都不能单独证明困难。
+- A/B 固定模型阶段必须显式执行 `run --side both --candidates 2 --attempts 6 --base-url {{base_url}}`；A 使用 `auto_model/urm`，B 使用 `ark/urm-03`，除 modelname 外的参数必须一致。`{{base_url}}` 取设备配置里的 `claude.baseUrl`，未提供时回退到运行环境的默认值。
+- candidate-1 固定映射 A，candidate-2 固定映射 B；两侧完成结构校验后才进入语义审核，候选目录和候选编号不得改名。
 - A/B 映射完成后才运行 `github-init`，创建 GitHub `main`、`A`、`B`。
 - A/B 必须分别完成语义完成审核；两侧都通过后才允许 `publish` 原子发布产物。
 - 遇到 429 `max_parallel_requests` 时先等待 Key 恢复，不得立即重启新候选；恢复后重开时仍使用新容器、新 Claude home 和新 SessionID，实际尝试次数照记。

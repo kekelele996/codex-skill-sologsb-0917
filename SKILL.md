@@ -1,9 +1,9 @@
 ---
 name: sologsb-0917
 description: >
-  运行 0917 期 Pair-wise GSB：同一道困难或地狱题使用完全相同的提示词并行跑 N 个
-  独立首轮候选（单 Key 默认 2 个），前两个干净完成者逻辑映射为 A/B，随后才上传源码并
-  初始化 GitHub 的 main/A/B 三个分支，
+  运行 0917 期 Pair-wise GSB：同一道困难或地狱题使用完全相同的提示词并行跑 A/B 两组，
+  只切换 modelname；A 固定为 auto_model/urm，B 固定为 ark/urm-03，其余运行参数完全一致。
+  两侧完成后才上传源码并初始化 GitHub 的 main/A/B 三个分支，
   在两侧都通过结构校验和语义完成审核后原子发布产物，再校验真实产物，
   生成证据约束的 GSB 结论、官方当前 schema Excel、字段填写说明和两段真实运行录屏。
   用于“sologsb-0917”“Pair-wise GSB”“A/B 两次跑”“GSB 0917”等任务；技能内置审核与
@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.7.4`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.7.4`
-- 精确提交号：运行 `git rev-parse v1.7.4` 获取。
+- 全局版本号：`1.7.5`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.7.5`
+- 精确提交号：运行 `git rev-parse v1.7.5` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -53,27 +53,32 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 所有候选必须使用同一个 UTF-8 提示词文件，发送字节逐字一致。
 - 只允许 `困难`、`地狱`；任务类型不得选择 `代码理解`。
+<!-- temporary-constraint:20260929-no-double-perfect-delivery:start -->
+- 临时约束（仅 2026-09-29，Asia/Shanghai 有效）：A/B 交付完整性必须按各自真实产物、轨迹和复核结果独立评定，5 分只给确实没有可扣点的侧，不得为了规避本约束虚降分数，也不得为了好看虚升分数。若两侧真实结果都为 5 分，命中双满分，任务必须标记为丢弃，停止上传、排队和提交；保留本地产物、轨迹和审核材料供审计。到期后，技能下一次启动时会自动删除本段和 `references/temporary-constraints.json`，本约束随即失效。
+<!-- temporary-constraint:20260929-no-double-perfect-delivery:end -->
+- 困难、地狱题必须先通过 `references/difficulty-gate.md` 的 G16 难度证明：至少两个独立困难轴、至少一个强困难轴、合计至少三个真实源码锚点，并填写 `difficulty-audit.json`；规则多、字段多、页面动作多、测试多或改动行数多都不能单独证明困难。
 - 提示词不得设计成低改动量任务。困难、地狱题建议每个 A/B 至少产生 30 行非测试业务代码改动并跨至少 3 个业务文件。发布阶段仍生成 A/B 产物快照并记录行数门禁失败，平台提交前再执行最终阻断。
 - 发布产物前必须排除 `node_modules`、构建目录（包括 Nuxt 的 `.output`）、缓存和虚拟环境；锁文件随依赖清单发布：模型改了 `package.json`、`go.mod`、`Cargo.toml` 等依赖清单时，同目录（或工作区根目录）的锁文件一起进入产物 commit；`go.sum`、`go.work.sum` 改了就发布；清单没改时锁文件照旧撤回，否则干净检出后安装或构建会失败。提交预检必须从远端 commit 复算改动量并按平台 G11 口径阻断低改动或脏仓库。只有“任一侧业务代码少于 10 行”且这是唯一阻断项时，才允许 `change-volume-line-gate` 例外审批。
 - 例外审批必须绑定 payload 哈希、交付表哈希和改动量复核哈希，批准用户取自设备配置 `solo2.approver`；其他任何门禁失败都不能绕过。
-- 默认先拉取同一初始快照的 2 份独立候选源码，不使用 A/B 目录名，也不改名。
-  固定目录为 `source/candidates/candidate-1..N`，每份源码各自使用独立容器、Claude home、
-  SessionID 和轨迹；默认用 `run --side both --candidates 2` 并行无头执行，需要观察时加 `--live`。
+- 同一道题必须使用两份独立源码：candidate-1 固定为 A，modelname 为 `auto_model/urm`；
+  candidate-2 固定为 B，modelname 为 `ark/urm-03`。除此之外，提示词、Base URL、镜像、上下文窗口、
+  重试、工具、权限和其余运行参数必须完全一致；默认用 `run --side both --candidates 2`
+  并行无头执行，需要观察时加 `--live`。每个候选使用独立容器、Claude home、SessionID 和轨迹。
 - 每个候选只发送一次提示词。只要出现追问、权限询问、重复真人输入、最终 API/网络失败、
   无最终 `end_turn` 或异常退出，就必须销毁该候选工作区和容器，从本地初始快照重新 clone，
   再用新容器、新 Claude home、新 SessionID 从提示词重新开始；每个候选最多六次实际尝试（含首次）。
   Claude Code 自动重连不算一次新尝试，也不能替代上述重启；默认允许自动重连十次。
   已通过结构校验的候选结果保持 staged，不因其他候选失败或终止而作废。
-- 前两个通过结构校验的候选按完成顺序映射为代号 A、B；文件夹和候选编号永不改名，
-  映射写入 `monitor/state.json.candidateMapping`。一旦前两名产生，立即主动停止其余候选，
-  不等待它们完成。
+- candidate-1 永远映射 A，candidate-2 永远映射 B，不按完成顺序交换，也不改名；
+  映射和模型计划写入 `monitor/state.json.candidateMapping` 与 `monitor/model-plan.json`。
+  两侧都通过结构校验后才进入语义审核；任一侧失败时保留另一侧 staged，结果不因失败侧作废。
 - 候选阶段绝不创建 GitHub 仓库、绝不 push。重复启动同一任务根时，`run_candidates` 会先只读探测候选任务锁，占用就直接退出，不再清空状态或重建正在使用的工作区；`_clone_candidate` 也不会删除仍被运行中容器挂载的目录。
 - GitHub 仓库名必须以平台项目标识开头，再跟 3–6 位小写字母数字唯一后缀，例如 `cy-291-a1b2`；平台项目拿不到 `projectCode` 时禁止创建仓库。
 - GitHub 网络红线：所有 GitHub 网络访问，包括 `gh api`、`gh repo view/create/delete`、`git clone/fetch/push/ls-remote`，必须经 Loon 代理。优先使用显式 `SOLOSB_GITHUB_PROXY`，否则自动探测 HTTP `127.0.0.1:17890`，再探测 SOCKS5 `127.0.0.1:17891`；两者不可用时停止作业，禁止裸网直连。
 - Loon 端口都不可达或经代理仍出现 TLS/SSL 故障时，保留真实错误并按基础设施门禁停止，不得反复创建候选仓库。
 - A/B 映射完成后才允许 `github-init` 以原始源码创建 `main/A/B`；A/B 产物先停在 staged，必须两侧都通过语义完成审核，
   才允许通过原子 push 同时发布 A、B。
-- A、B 产物 commit 的父提交必须严格等于初始环境快照；A/B 只是候选映射后的逻辑代号。
+- A、B 产物 commit 的父提交必须严格等于初始环境快照；A/B 固定对应 candidate-1/candidate-2 和两个模型。
 - 所有过程与产物结论必须绑定 `monitor/evidence.json`。文中的文件、报错和缺失判断
   找不到轨迹或命令证据时，停止生成 GSB。
 - GSB 不是只接收 100% 成功的任务。A/B 任一侧即使构建、启动或关键业务路径失败，失败本身也是有效评估结果；必须继续保留真实启动、报错和关键失败画面，不能因为失败而跳过该侧录屏。
@@ -89,6 +94,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 录屏 `ok` 不能只看文件是否生成：`expectedAppFailure=false` 而浏览器/API 非零退出时必须写 `ok=false`、`observedAppFailure=true`，
   `record` 命令返回非零并把状态退回 `gsb_ready`；先归档失败片段，修正 scenario 或应用后重录，未通过前不得进入 `recorded/complete`。
 - 录屏窗口 ID 红线：任何必须录屏的步骤只能使用 `window-id`。Web 题必须分别打开或定位 Terminal.app 与 Chrome 窗口，并记录各自 `windowId`；API/CLI/失败题必须定位 Terminal.app 窗口 ID。窗口缺失时先打开，无法定位或 `windowId<=0` 时立即停止，禁止回退到整屏、裁切、iTerm2 或 headless。
+- 录屏窗口尺寸红线：窗口尺寸只能由计划里的 `browserWindow` 在开录前定好（默认 `40,40,1440,810`，必须 16:9，容差 1.5%）；采集期间禁止改窗口或视口大小（`setViewportSize`、`Browser.setWindowBounds` 等），否则 macOS 会缩放页面并留黑边。采集结束后录制器复核窗口尺寸并写 `windowBoundsAtCaptureStart`/`windowBoundsAtCaptureStop`/`windowBoundsChangedDuringCapture`，尺寸变过即判该片段失败、`record` 返回非零并退回 `gsb_ready`。
 - 每个片段必须写 `<片段>-window-capture.json`，其中必须包含 `captureKind=window-id`、`captureBackend=screen-capture-kit`、`showsCursor=false`、`cursorCaptured=false`、目标 `windowId`、所属 PID、bounds、退出码和采集状态；窗口 ID 缺失、失效、后端不是 ScreenCaptureKit、鼠标排除标记不为 false 或采集状态非 `ok` 时该侧录屏失败。
 - 开录瞬间必须再次确认目标窗口仍在当前 Space、未被最小化，且 `ownerPid + ownerName` 与定位时一致；窗口不在 Terminal.app（本地化名如“终端”，按 bundle id `com.apple.Terminal` 判定）/Google Chrome 白名单内时立即停机。
 - ChatGPT 不属于录制目标。录制器不得最小化、激活、移动或恢复任何 ChatGPT 窗口，也不生成
@@ -103,6 +109,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   验收要求 `status=ok`、`pointerStrategy=none`、`pointerPolicy=host-input-untouched`、`hostInputRespected=true`、`pointerMoved=false`、`mouseButtonsQueried=false`、`parkApplied=false`；指针是否位于窗口内不影响录制，画面出现指针也不得要求重录。
 - Web 题在 Chrome 驱动中设置 `HUMAN_BROWSER_KEEP_FRONT=0`，并给 Chrome 加
   `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`。
+- Chrome 实例隔离红线：每条 Web 录屏必须新起独立的 Chrome 实例，使用本次专属临时 `--user-data-dir` 和启动前取得的空闲调试端口；录制前先快照用户已开的 Chrome 窗口与进程。发出任何 CDP 指令前必须确认端口监听进程属于本次新起的 Chrome，采集前必须确认目标窗口所属进程属于本次实例且命令行带本次临时 profile。禁止连接、驱动、采集、关闭或终止录制前已存在的 Chrome 进程/窗口。每侧必须写 `chrome-instance.json`，至少包含 `status=ok`、`dedicatedInstance=true`、`reusedRunningChrome=false`、`userChromeTouched=false`、`recordingChromePid`、`preExistingChromePids`、`windowId`、`userDataDir`、`debugPort`、`path`；任一项不满足即该侧录屏失败。`finally` 只允许终止本次 Chrome、删除本次临时 profile，并写 `chrome-profile-cleanup.json`；兜底清理只能按本次临时 profile 路径匹配，绝不能通杀用户 Chrome。
 - Web 录制收尾必须读取录制窗口 `history of tab 1` 写真实 `terminal.log`，不能用空文件占位。
 - 录制期间每秒采样最前普通窗口，`recordingWindowFrontmostSamples` 必须为 0；采样报告写
   `frontmost-window-monitor.json`。
@@ -159,6 +166,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - GSB 理由不堆测试或断言数量，改成“后端关键路径完整覆盖”“完整接口流程验证”等业务覆盖描述；`gsb_tools.py` 会直接阻断计数式写法。
 - 低价值环境/工具噪声不直接参与 GSB 评定：解释器或命令未找到、测试 PYTHONPATH 缺失、编辑工具替换文本未匹配、临时工作目录、重跑等，不能作为独立 claim、评分项或胜负依据。标记为 `evaluationExcluded` 的证据不得进入 GSB 理由正文。
 - 完整审核通过后必须直接执行 `submit --execute`，不需要人工审批文件，系统自动记录批准用户（取自设备配置 `solo2.approver`）；不带 `--execute` 只作人工诊断。只有改动量单项失败时才停止并等待设备配置里的审批人批准例外；确认必须重提时才使用 `--force`。
+- 每日提交量统一按平台总览接口 `GET /api/v1/gsb/overview` 的 `today.submitted` 取值（平台口径，含其它设备提交的记录）；本机全局标志只是同一份额度的本地缓存，接口异常时才回落到提交列表接口。`submit --execute` 的额度判断、Bark 状态推送的“今日提交”和 `submit-deferred` 的剩余额度都用这一个口径。
 - 禁止用浏览器模拟点击、Playwright 填表或文件选择器提交 GSB；统一调用 `submission/scripts/submit_api.py`。
 - 最终交付展示硬门禁：`status=complete` 后的最终回复及 SOLO2 推送后的最终回复，必须逐字遵守 `references/final-delivery-format.md`。固定八段顺序为“仓库与初始快照、A / B 会话、提交与轨迹、审核结论、GSB 文案、Excel 与字段说明、两段视频、SOLO2 推送结果、未解决问题”；不得增删二级标题、添加前言/结束语或改写标题。所有本地路径必须为绝对路径，视频必须内嵌，未提交时明确写“未执行（仅本地交付）”，无未解决问题时写“无”。
 
@@ -211,15 +219,17 @@ python3 scripts/status_push.py uninstall
    再下载源码；选中结果和占用锁写入任务目录，供后续审计和 `cleanup` 释放。
 2. 阅读 `source/origin` 和参考规范。**开始设计提示词前**先运行
    `$CODEX_HOME/skills/sologsb-0917/submission/scripts/prompt_dedup.py --task-root ROOT`
-   拉取历史 GSB 的完整 `user_prompt` 列表，并排除当前任务自己的历史提交。基于历史列表设计
-   唯一提示词后，再运行同一脚本并传 `--candidate`；只有 `UNIQUE` 才能进入
-   `prompt --candidate ... --review ...`。提示词必须走固定版本 `ra-人话`。
-3. 运行 `run --side both --candidates 2`（只有独立 Key 且容量确认时才显式提高 N）。困难题单 attempt 默认 7200 秒；
-   运行器先建立本地初始快照并拉取 N 份隔离源码，再并行启动 N 个容器无头执行，每份分别写
+   拉取历史 GSB 的完整 `user_prompt` 列表，并排除当前任务自己的历史提交。按
+   `references/difficulty-gate.md` 建立 `difficulty-audit.json`，逐条记录困难轴、提示词原句、
+   源码锚点和失败后果。基于历史列表设计唯一提示词后，再运行同一脚本并传 `--candidate`；
+   只有 `UNIQUE` 且难度证明通过，才能进入
+   `prompt --candidate ... --review ... --difficulty-audit ...`。提示词必须走固定版本 `ra-人话`。
+3. 运行 `run --side both --candidates 2`。困难题单 attempt 默认 7200 秒；运行器先建立本地
+   初始快照并拉取两份隔离源码，再分别用 `auto_model/urm` 和 `ark/urm-03` 并行无头执行，每份分别写
    原生 JSONL。每个候选中断、异常或没有最终 `end_turn` 时，只销毁该候选现场并重新 clone，
    最多六次实际尝试，失败尝试之间指数退避（30 秒起、上限 300 秒）；自动重连不算新尝试。
-   竞速已有两名完成时，仍在排队等容器名额的候选立即取消；执行进程退出后遗留的候选容器会在下次申请名额时回收。
-   前两个 staged 候选按完成顺序映射 A/B，其余候选立即停止。此步骤不创建 GitHub 仓库、不上传源码。
+   candidate-1 固定映射 A，candidate-2 固定映射 B；两侧都完成结构校验后才进入语义审核，
+   任一侧失败不会取消另一侧。此步骤不创建 GitHub 仓库、不上传源码。
 4. 运行 `github-init`。只有 `candidateMapping` 已包含 A/B 时才允许创建公开仓库，并以原始源码
    创建 `main/A/B` 三支；候选目录保持 `source/candidates/candidate-N` 原名，不复制、不改名为 A/B。
 5. 运行 `semantic --side A` 与 `semantic --side B`（或 `--side both`），读取映射后审核包并写
@@ -246,9 +256,10 @@ python3 scripts/status_push.py uninstall
 9. 为 A、B 分别生成录屏计划和 scenario，再运行 `record --side A/B --plan ...`。
    命令会在锁内执行预检/预构建、环境检查、真实录屏和收尾；另一项目持锁时当前任务等待而不是并发启动。
    默认使用 Terminal.app（后台启动、单窗口、`zsh -f` 干净 shell）；终端只显示相对路径，不暴露真实绝对路径。录制固定当前 Space，不切换 Space；
-   不对 ChatGPT 做任何窗口操作；先在后台打开 Terminal.app/Chrome 窗口并取得数字 `CGWindowID`，开录瞬间复核后只用
+   不对 ChatGPT 做任何窗口操作；Web 录制前先快照用户已开的 Chrome 窗口与进程，再为本次录制新起独立 Chrome 实例：临时 `--user-data-dir`、启动前取空闲调试端口，校验端口监听进程属于本次新起实例后才发 CDP 指令，并校验采集窗口所属进程属于本次实例且命令行带本次临时 profile。禁止连接、驱动、采集或关闭用户正在使用的 Chrome；同一实例隔离门禁不通过就停止该侧。先在后台打开 Terminal.app 和本次独立 Chrome 窗口并取得数字 `CGWindowID`，开录瞬间复核后只用
    ScreenCaptureKit 按窗口 ID 后台采集，不激活录制窗口。若开窗短暂抢到前台，只把用户原应用恢复；默认
    `pointerStrategy=none`，全程不操作鼠标，并强制 `showsCursor=false`，用户仍可正常操作鼠标。结束后检查前台采样、焦点恢复和服务清理。
+   每侧 Web 录屏必须写 `chrome-instance.json`，并在 `finally` 中只终止本次 Chrome、删除本次临时 profile、写 `chrome-profile-cleanup.json`；清理兜底只按本次临时 profile 路径，绝不清理用户 Chrome。
    视频统一保存为 `<项目编号-项目名>-验证A产物.mp4` 和 `<项目编号-项目名>-验证B产物.mp4`。
    成功侧录成功链路，失败侧录真实失败链路；场景脚本必须执行到可观察的最终状态，不能因预期失败而提前停止或伪造成功。
    纯后端/API 题在 `apiRequests` 中模拟多步业务请求（可用 `extract` 提取 token 传给后续请求），断言失败按真实失败结果记录。
@@ -269,9 +280,10 @@ python3 scripts/status_push.py uninstall
 python3 scripts/sologsb.py init --workdir DIR --task-name NAME \
   [--source PATH | --package ZIP | --from-platform --project-code CODE]
 python3 scripts/sologsb.py prompt --task-root ROOT --task-type TYPE \
-  --difficulty 困难 --candidate FILE --review FILE
+  --difficulty 困难 --candidate FILE --review FILE \
+  --difficulty-audit DIFFICULTY_AUDIT.json
 python3 scripts/sologsb.py run --task-root ROOT --side both --candidates 2 --attempts 6 --base-url https://<配置的 claude.baseUrl>
-python3 scripts/sologsb.py github-init --task-root ROOT  # 候选映射完成后才可执行
+python3 scripts/sologsb.py github-init --task-root ROOT  # 固定模型两侧均完成后才可执行
 python3 scripts/sologsb.py run --task-root ROOT --side A --force  # 重跑已映射候选
 python3 scripts/sologsb.py run --task-root ROOT --side B --force  # 重跑已映射候选
 python3 scripts/sologsb.py semantic --task-root ROOT --side A  # 任一侧完成后立即核查
@@ -299,6 +311,8 @@ python3 scripts/sologsb.py version                                       # 打�
 ## 参考资料
 
 - `references/prompt-standard.md`：提示词、难度和查重门禁。
+- `references/difficulty-gate.md`：G16 困难词义、强困难轴、正反例与自检问题。
+- `references/difficulty-audit-template.json`：`--difficulty-audit` 必填模板。
 - `references/workspace-layout.md`：候选目录、映射状态和 GitHub 约定。
 - `references/trace-validation.md`：单轮轨迹硬校验和语义完成审核。
 - `references/semantic-review-template.json`：A/B 语义完成审核模板。
@@ -323,10 +337,13 @@ python3 scripts/sologsb.py version                                       # 打�
 
 ## 完成判定
 
-只有 `status` 同时确认提示词哈希、Git 三支、两份干净轨迹、两个产物快照、
+只有 `status` 同时确认提示词哈希、难度证明、Git 三支、两份干净轨迹、两个产物快照、
 两侧真实验证、A/B `lineGate` 记录、G11 仓库洁净门禁、150–240 字 GSB 理由、A/B 交付完整性打分与描述、官方 schema Excel、字段说明和两段
 1280x720、不超过 90 秒的视频，以及逐片段 `window-capture`、`cursor-guard` 报告、
-`frontmost-window-monitor.json`、`service-cleanup.json` 均存在且状态通过，
+`frontmost-window-monitor.json`、`service-cleanup.json` 均存在且状态通过；每侧 Web 录屏还必须存在
+`chrome-instance.json` 和 `chrome-profile-cleanup.json`，并通过统一 Chrome 实例门禁：
+`status=ok`、`dedicatedInstance=true`、`reusedRunningChrome=false`、`userChromeTouched=false`、
+调试端口和采集窗口均属于本次新起实例且使用本次临时 profile、临时 profile 已删除；
 并且 `recordingMetadata.activationPerformed=false`、`untouched=true`、焦点恢复有记录、服务无残留，
 任务才可标为 `complete`。其中 A/B 任一侧可以是真实失败结果，但不能缺录屏；
 `lineGate` 可以是 `failed`，但必须已生成并记录；平台提交阶段再执行最终阻断或等待例外审批。结论、评分、轨迹、命令输出和视频必须相互一致。最终回复必须严格使用 `references/final-delivery-format.md` 的八段式模板；未提交时明确写“未执行（仅本地交付）”，提交后必须补全 submission id、质检终态和 API 结果路径。标题、顺序、绝对路径或视频内嵌任一缺失，均不得标记交付完成。

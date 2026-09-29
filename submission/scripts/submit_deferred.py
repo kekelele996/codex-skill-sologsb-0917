@@ -40,6 +40,24 @@ def default_base() -> Path:
     return Path(configured).expanduser().resolve() if configured else Path.cwd().resolve()
 
 
+def platform_count_getter() -> Callable[[], int | None] | None:
+    """读平台当天提交量的回调；缺凭据或平台地址时返回 None，不影响本机节奏。"""
+    try:
+        import submit_api
+    except Exception:  # noqa: BLE001 - 只是拿平台额度，导入失败不阻断
+        return None
+    server = str(getattr(submit_api, "DEFAULT_SERVER", "") or "").strip()
+    if not server:
+        return None
+    service = str(getattr(submit_api, "DEFAULT_KEYCHAIN_SERVICE", "") or "").strip()
+
+    def read() -> int | None:
+        cookie, csrf = submit_api.credentials(service)
+        return submit_api.platform_today_count(server, cookie, csrf)
+
+    return read
+
+
 def local_now() -> datetime:
     return datetime.now().astimezone()
 
@@ -175,6 +193,7 @@ def drain(
     now: Callable[[], datetime] = local_now,
     sleep: Callable[[float], None] = time.sleep,
     runner: Callable[[dict[str, Any], float], int] = submit_one,
+    platform_count: Callable[[], int | None] | None = None,
 ) -> dict[str, Any]:
     reconcile(base)
     current = now()
@@ -192,6 +211,9 @@ def drain(
 
     items = due_rows(base, today)
     state = daily_quota.read_state() if execute else {"count": 0, "limit": daily_quota.daily_limit()}
+    if execute and platform_count is not None:
+        # 当天量以平台总览接口为准，别的设备提交的记录也算在同一份额度里。
+        state = daily_quota.merge_platform_count(platform_count)
     remaining = max(0, int(state["limit"]) - int(state.get("count") or 0))
     planned, left_over = items[:remaining], items[remaining:]
     schedule = build_schedule(planned, start, hours)
@@ -250,7 +272,8 @@ def main() -> int:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError(f"已有 submit-deferred 在运行: {lock_path}") from None
-        summary = drain(base, args.hours, execute=args.execute)
+        summary = drain(base, args.hours, execute=args.execute,
+                        platform_count=platform_count_getter() if args.execute else None)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     failed = [r for r in summary["results"] if r["outcome"] == "failed"]
     return 1 if failed else 0

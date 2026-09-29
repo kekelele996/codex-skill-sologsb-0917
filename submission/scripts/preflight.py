@@ -35,7 +35,16 @@ for _parent in Path(__file__).resolve().parents:
         sys.path.insert(0, str(_parent / "scripts"))
         break
 import device_config as _device_config  # noqa: E402
-from common import LOCKFILE_NAMES, SologsbError, ensure_single_side_trace, paired_lockfiles  # noqa: E402
+from common import (  # noqa: E402
+    AB_COMMON_RUN_PARAMETER_KEYS,
+    AB_MODELS,
+    FIXED_CANDIDATE_BY_SIDE,
+    LOCKFILE_NAMES,
+    SologsbError,
+    ensure_single_side_trace,
+    paired_lockfiles,
+)
+from temporary_constraints import evaluate_double_perfect_delivery, prune_expired_policies  # noqa: E402
 
 _device_config.load_and_apply()
 
@@ -1046,6 +1055,50 @@ def parse_remote(url: str) -> tuple[str, str]:
     return "", ""
 
 
+def validate_ab_model_plan(state: dict) -> dict:
+    """A/B 只允许切换 modelname，并固定 candidate-1=A、candidate-2=B。"""
+    sides = state.get("sides") if isinstance(state.get("sides"), dict) else {}
+    mapping = state.get("candidateMapping") if isinstance(state.get("candidateMapping"), dict) else {}
+    models = {
+        side: str(((sides.get(side) or {}).get("model") or "")).strip()
+        for side in ("A", "B")
+    }
+    candidates = {
+        side: str(((mapping.get(side) or {}).get("candidateId") or "")).strip()
+        for side in ("A", "B")
+    }
+    errors: list[str] = []
+    plan = state.get("modelPlan") if isinstance(state.get("modelPlan"), dict) else {}
+    if plan.get("diffKeys") != ["modelname"]:
+        errors.append("modelPlan.diffKeys 必须且只能是 modelname")
+    for key in AB_COMMON_RUN_PARAMETER_KEYS:
+        values = {
+            side: str(((sides.get(side) or {}).get(key) or "")).strip()
+            for side in ("A", "B")
+        }
+        if not all(values.values()):
+            errors.append(f"A/B 缺少共同运行参数 {key}")
+        elif len(set(values.values())) != 1:
+            errors.append(f"A/B 的 {key} 不一致")
+    for side in ("A", "B"):
+        expected_model = AB_MODELS[side]
+        if models[side] != expected_model:
+            errors.append(f"{side} 模型应为 {expected_model}，实际为 {models[side] or '空'}")
+        expected_candidate = FIXED_CANDIDATE_BY_SIDE[side]
+        if candidates[side] != expected_candidate:
+            errors.append(f"{side} 应绑定 {expected_candidate}，实际为 {candidates[side] or '空'}")
+    if models["A"] == models["B"]:
+        errors.append("A/B 模型名不得相同")
+    return {
+        "ok": not errors,
+        "models": models,
+        "expectedModels": dict(AB_MODELS),
+        "candidates": candidates,
+        "expectedCandidates": dict(FIXED_CANDIDATE_BY_SIDE),
+        "errors": errors,
+    }
+
+
 def derived_expected(state: dict, draft: dict) -> dict[str, str]:
     sides = state.get("sides") or {}
     a = sides.get("A") or {}
@@ -1078,6 +1131,8 @@ def derived_expected(state: dict, draft: dict) -> dict[str, str]:
         "b_desc_delivery": str(delivery_b.get("description") or "").strip(),
         "gsb_verdict": str(draft.get("verdict") or ""),
         "gsb_reason": str(draft.get("reason") or "").strip(),
+        "x_a_model_name": str(a.get("model") or ""),
+        "x_b_model_name": str(b.get("model") or ""),
     }
 
 
@@ -1567,6 +1622,7 @@ def classify_change_volume_line_gate(
 
 
 def main() -> int:
+    prune_expired_policies()
     parser = argparse.ArgumentParser(description="Read-only GSB submission preflight")
     parser.add_argument("--task-root", type=Path)
     parser.add_argument("--excel", type=Path)
@@ -1650,6 +1706,13 @@ def main() -> int:
             (blockers if severity == "blocker" else warnings).append(message)
 
     add("state", state.get("status") in {"complete", "recorded", "gsb_ready"}, f"任务状态: {state.get('status') or '缺失'}", evidence={"path": str(state_path)})
+    model_plan_check = validate_ab_model_plan(state)
+    add(
+        "ab-model-plan",
+        model_plan_check["ok"],
+        "A/B 固定模型和候选映射符合规则",
+        evidence=model_plan_check,
+    )
     add("prompt", prompt_path.is_file() and bool(prompt_text.strip()), "Prompt 文件存在且非空", evidence={"path": str(prompt_path)})
     if prompt_path.is_file() and state.get("promptSha256"):
         add("prompt-sha", sha256_file(prompt_path) == str(state.get("promptSha256")), "Prompt SHA-256 与 state 一致")
@@ -1709,6 +1772,15 @@ def main() -> int:
         "A/B 交付完整性打分为 1~5 整数，描述只谈完整性、按实际情况独立撰写且未照抄 GSB 理由",
         evidence=delivery_quality,
     )
+    temporary_delivery_guard = evaluate_double_perfect_delivery(draft)
+    if temporary_delivery_guard.get("active"):
+        add(
+            "temporary-no-double-perfect-delivery",
+            not temporary_delivery_guard.get("violation"),
+            str(temporary_delivery_guard.get("message") or "临时双满分约束未通过"),
+            severity="blocker",
+            evidence=temporary_delivery_guard,
+        )
     for warning in delivery_quality.get("warnings") or []:
         add("delivery-verdict-consistency", False, warning, severity="warning", evidence=delivery_quality)
     delivery_texts = {
@@ -1979,9 +2051,11 @@ def main() -> int:
         },
         "ok": not blockers,
         "status": (
-            "pass" if not blockers
-            else ("line_gate_approval_required" if only_line_gate_blocker else "blocked")
+            "discarded" if temporary_delivery_guard.get("discardRequired")
+            else ("pass" if not blockers
+                  else ("line_gate_approval_required" if only_line_gate_blocker else "blocked"))
         ),
+        "discardRequired": bool(temporary_delivery_guard.get("discardRequired")),
         "approvalRequirement": (
             CHANGE_VOLUME_APPROVAL_SCOPE if only_line_gate_blocker
             else ("none" if not blockers else "blocked")
@@ -2016,6 +2090,7 @@ def main() -> int:
         "deliveryDedupPath": str(delivery_dedup_path),
         "deliveryDedup": delivery_dedup,
         "deliveryQuality": delivery_quality,
+        "temporaryDeliveryGuard": temporary_delivery_guard,
         "codeChange": code_change,
         "changeVolumeLineGate": line_gate_review,
         "submissionPayloadPath": str(payload_path),

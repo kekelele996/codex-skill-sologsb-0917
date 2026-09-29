@@ -1,6 +1,7 @@
 # 录屏规则
 
 - Web：最终画面只允许 Terminal.app 和完整 Chrome 窗口；Terminal.app 启动项目，Chrome 负责真实操作关键验收路径。
+- Chrome 硬红线：每条 Web 录屏必须新起独立 Chrome 实例，使用本次专属临时 `--user-data-dir` 和启动前取得的空闲调试端口。录制前先快照用户已开的 Chrome 窗口和进程；发出任何 CDP 指令前校验调试端口监听进程属于本次新起实例，采集前校验目标窗口所属进程属于本次实例且命令行带本次临时 profile。禁止连接、驱动、采集、关闭或终止用户已开的 Chrome。
 - API/CLI：最终画面只允许 Terminal.app，通过 AppleScript `do script` 在录制窗口里执行真实命令并展示输出。
 - 只允许 `terminalApp=terminal`（旧计划中的 `otty` 自动归一为 `terminal`，`targetApps` 中的 `Otty` 归一为 `Terminal`）；
   Web 题必须同时有 Terminal 和 Chrome，API/CLI/失败题只允许 Terminal。禁止 Otty、iTerm2、桌面模式和整屏采集。
@@ -98,6 +99,16 @@
 }
 ```
 
+## Chrome 独立实例生命周期
+
+- 录制前必须先记录用户当前可见的 Chrome 窗口、全部 Chrome 进程 PID 和窗口 ID，作为 `preExistingChromeWindows`、`preExistingChromePids` 基线；只做只读快照，不激活、不连接、不驱动、不采集、不关闭这些对象。
+- 调试端口不得从固定范围随机猜取。先向系统申请空闲端口，启动前再次确认端口无监听；调试端口已有监听进程时直接失败，不得连接该进程。
+- Chrome 必须直接用 `Google Chrome.app/Contents/MacOS/Google Chrome` 启动，参数包含本次临时 `--user-data-dir`、`--remote-debugging-port=<空闲端口>`、`--remote-debugging-address=127.0.0.1` 和 `--no-startup-window`。不得通过 `open`、LaunchServices 或用户现有 Chrome 的远程调试端口启动/连接。
+- 发出 `/json/version`、`Target.createTarget` 等任何 CDP 指令前，先用监听表确认调试端口 PID：PID 必须属于本次新起的 Chrome 进程树，且其命令行包含本次临时 `--user-data-dir`；PID 命中录制前 `preExistingChromePids`、端口被其他进程占用或 profile 不符时立即失败。
+- CDP 创建窗口后，Quartz 返回的 `ownerPid` 必须属于本次新起 Chrome 进程树，且该进程命令行包含本次临时 `--user-data-dir`；`windowId` 和 `ownerPid` 命中录制前快照时立即失败，禁止把用户窗口当作采集目标。
+- 每侧 Web 录屏写 `chrome-instance.json`，至少包含 `status=ok`、`dedicatedInstance=true`、`reusedRunningChrome=false`、`userChromeTouched=false`、`recordingChromePid`、`preExistingChromePids`、`windowId`、`userDataDir`、`debugPort`、`path`，并记录端口监听 PID、窗口 owner PID、各校验结果和临时 profile 清理结果。任一门禁不通过时该侧录屏失败，`record` 不得写 `ok=true`。
+- `finally` 必须终止本次 Chrome 进程组，并以本次临时 profile 路径作为唯一兜底匹配删除残留进程；随后删除本次临时 profile，写 `chrome-profile-cleanup.json`。不得按应用名、全局 `Google Chrome`、其他 profile 或用户进程列表通杀。
+
 `expectedStatus` 支持数字或数组；`expectContains` 支持字符串或字符串数组；
 `extract.path` 支持 `$.data.token`、`data.token`、`data.items[0].id` 这类写法。
 
@@ -105,8 +116,18 @@
 
 - Terminal、Chrome 都必须先定位具体 `kCGWindowNumber`，再用该 ID 启动 ScreenCaptureKit 录制：
   `SCContentFilter(desktopIndependentWindow:)` 只绑定目标窗口，`SCRecordingOutput` 写入 `.mov`。窗口被其他应用遮挡不影响采集内容。
+- 录制窗口尺寸在计划里用 `browserWindow` 一次性定好：`{"left":40,"top":40,"width":1440,"height":810}`，不写就是默认 `1440x810`。
+  窗口必须保持 16:9（容差 1.5%），常用 `1440x810`、`1280x720`，需要手机断点时写 `820x461`；
+  比例不对时录制器直接报错，不会生成留黑边或页面被拉伸的成片。
+- ScreenCaptureKit 的采集面按开录那一刻的窗口尺寸分配，采集期间再改窗口大小会让 macOS 把页面整体缩放并留出黑边。
+  实测把 `1440x810` 窗口在采集期间改成 `820x560`，成片里的页面被放大 1.45 倍、右侧多出 18% 黑边，页面比例明显失真。
+  因此 scenario 和浏览器驱动里都不许调用 `setViewportSize`、`Browser.setWindowBounds` 或任何改窗口大小的接口；
+  窄版页面要在开录前用 `browserWindow` 声明，不要在录制过程中改窗口。
+- 采集结束后录制器会重新读取该窗口尺寸，把 `windowBoundsAtCaptureStart`、`windowBoundsAtCaptureStop`、
+  `windowBoundsChangedDuringCapture` 写进 `*-window-capture.json`。尺寸发生变化时该片段 `status=failed`，
+  `record` 返回非零并把状态退回 `gsb_ready`，必须先改计划或 scenario 再重录，不能把这种成片当通过。
 - 必须记录 `windowId`、所属 PID、应用名、`ownerBundleId`、归一应用名 `ownerApp`、窗口名和 bounds。Quartz 的应用名是本地化名（中文系统为“终端”），门禁按 bundle id 归一。仅按 PID、标题或“面积最大的窗口”还不够，
-  实际采集必须绑定稳定窗口 ID。
+ 实际采集必须绑定稳定窗口 ID。
 - 不创建、不切换 macOS Space。录制在当前 Space 执行；脚本不得调用 Space 切换或全屏模式。
 - 窗口不存在时按题型打开目标窗口：Web 题先开 Terminal 窗口，再开独立 Chrome；纯终端题只开 Terminal 窗口。打开后仍定位不到具体窗口 ID 时停止作业。
 - 开窗可能短暂把新窗口置前。录制器必须在开窗前记录用户前台应用；仅当最前普通窗口属于本次打开的 Terminal/Chrome 进程时，才把用户原应用恢复。恢复事实写入
@@ -120,7 +141,7 @@
 - 录制器就绪后用信号停止并等待文件落盘。停止器至少保留 4 秒采集时间；最长由看门狗限制为 90 秒，
   避免异常场景无限占用录屏。
 - Web 题的 Terminal 与 Chrome 分别按各自窗口 ID 采集，再拼接成最终视频。不得用同一窗口 ID、PID 粗匹配或标题猜测替代实际目标窗口 ID。
-- Web 题 Chrome 直接运行 `Google Chrome.app/Contents/MacOS/Google Chrome`（不经 `open`/LaunchServices，避免激活），带 `--no-startup-window`，
+- Web 题 Chrome 直接运行 `Google Chrome.app/Contents/MacOS/Google Chrome`（不经 `open`/LaunchServices，避免激活），带本次临时 `--user-data-dir`、空闲 `--remote-debugging-port`、`--remote-debugging-address=127.0.0.1` 和 `--no-startup-window`，
   再通过 CDP `Target.createTarget {newWindow:true, background:true}` 在后台创建 1440x810（16:9）录制窗口，2x 采集后正好铺满 1280x720，无黑边。
 - Web 题 Chrome 必须增加 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`；浏览器驱动传 `HUMAN_BROWSER_KEEP_FRONT=0`，默认值仍为保持旧行为的 `1`。
 - 录制期间每秒采样最前普通窗口并写 `frontmost-window-monitor.json`。录制窗口在最前的采样数必须为 0；非零时该侧 `ok=false`。
@@ -169,10 +190,9 @@
   录制开始前已存在的进程绝不终止。
 - 清理报告写 `service-cleanup.json`，包含 `baselineListeners`、`terminatedAppPortListeners` 和
   `residualAppPortListeners`。后者非空时该侧 `ok=false`。
-- 临时 `chrome-profile` 在 Chrome 退出后默认删除，并由 `chrome-profile-cleanup.json` 记录；设置
-  `SOLOSGB_0917_KEEP_CHROME_PROFILE=1` 可保留用于排障，证据文件不受影响。
+- `finally` 先终止本次 Chrome，再删除本次临时 `chrome-profile`，并由 `chrome-profile-cleanup.json` 记录 `status=removed`、`removed=true`、`profileExistsAfterCleanup=false`；任何情况下都不得清理用户已有 Chrome 或其 profile。
 - `recordingMetadata` 必须写 `activationPerformed=false`、`untouched=true`、`userFrontmostAppAtStart`、
-  `focusRestores`、`frontmostSampling`、`serviceCleanup`、`residualAppPortListeners` 和 `chromeProfileCleanup`。
+  `focusRestores`、`frontmostSampling`、`serviceCleanup`、`residualAppPortListeners`、`chromeInstance` 和 `chromeProfileCleanup`。
 
 ## 全局串行锁
 
