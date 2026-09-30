@@ -1843,11 +1843,13 @@ def main() -> int:
                 severity="warning",
                 evidence={"path": str(difficulty_review_path)},
             )
+    # 两侧允许同一模型；这里只要求两侧都记下了模型名，是否真的调用了它由 ab-model-evidence 复算。
     add(
-        "ab-model-split",
-        bool(model_a and model_b and model_a != model_b),
-        f"A/B 必须使用不同模型：A={model_a or '缺失'}，B={model_b or '缺失'}",
-        evidence={"modelA": model_a, "modelB": model_b},
+        "ab-model-names",
+        bool(model_a and model_b),
+        f"A/B 模型名已记录：A={model_a or '缺失'}，B={model_b or '缺失'}"
+        + ("（两侧同一模型）" if model_a and model_a == model_b else ""),
+        evidence={"modelA": model_a, "modelB": model_b, "sameModel": bool(model_a and model_a == model_b)},
     )
     model_evidence = model_evidence_check(task_root, state)
     add(

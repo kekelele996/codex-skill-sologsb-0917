@@ -25,7 +25,8 @@ FIELDS: dict[str, tuple[str | None, str]] = {
     "claude.apiKey": ("SOLOSB_CLAUDE_KEY", ""),
     "claude.baseUrl": ("SOLOSB_ANTHROPIC_BASE_URL", ""),
     "claude.model": ("SOLOSB_MODEL", "auto_model/urm"),
-    # 0917 fixed pairwise rule: only modelname differs between A and B.
+    # 0917 fixed pairwise rule: modelname is the only parameter that may differ
+    # between A and B; both sides may also use the same model.
     "claude.modelA": ("SOLOSB_A_MODEL", "auto_model/urm"),
     "claude.modelB": ("SOLOSB_B_MODEL", "ark/urm-03"),
     "claude.image": ("SOLOSB_DOCKER_IMAGE", "adminfather/benzhi-claude-code2:20260919"),

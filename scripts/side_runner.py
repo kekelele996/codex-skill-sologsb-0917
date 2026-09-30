@@ -63,16 +63,19 @@ DEFAULT_IMAGE = os.environ.get(
 CANDIDATE_SIDES = {"candidate-1": "A", "candidate-2": "B"}
 
 
-def assert_model_split(plan: dict[str, Any] | None = None) -> None:
-    """2026-09-29：A/B 必须换模型跑，同模型的两侧无法做模型对比。"""
+def assert_models_configured(plan: dict[str, Any] | None = None) -> None:
+    """A/B 两侧都必须有模型名；两侧可以是同一个模型（2026-09-30 起允许）。"""
     plan = plan or model_plan()
     model_a, model_b = plan["A"]["model"], plan["B"]["model"]
-    if not model_a or not model_b or model_a == model_b:
+    if not model_a or not model_b:
         raise SologsbError(
-            "A/B 模型名相同，无法做 Pair-wise 对比："
-            f"A={model_a or '空'}，B={model_b or '空'}；"
-            "请在设备配置里把 claude.modelA / claude.modelB 设成不同模型"
+            f"A/B 模型名缺失：A={model_a or '空'}，B={model_b or '空'}；"
+            "请在设备配置里写好 claude.modelA / claude.modelB"
         )
+
+
+def same_model_pair(plan: dict[str, Any]) -> bool:
+    return plan["A"]["model"] == plan["B"]["model"]
 
 
 # Claude Code 除主模型外，后台小任务和按档位的别名各有一个模型变量；不设就会
@@ -171,7 +174,7 @@ def lock_model_plan(
                 f"{'已锁定' if locked is not None else '设备配置'}为 {plan[side]['model']}"
                 f"（{current['configPath']}）；拒绝启动，请先在调度台「A / B 模型」保存正确配置。"
             )
-    assert_model_split(plan)
+    assert_models_configured(plan)
     plan = dict(plan)
     plan.setdefault("lockedAt", utc_now())
     state["modelPlan"] = plan
@@ -2488,7 +2491,9 @@ def run_candidates(
         "maxAttempts": attempts,
         "tools": "Bash,Read,Write,Edit,Glob,Grep,TodoWrite",
         "safeMode": True,
-        "modelOnlyDifference": True,
+        # 两侧同模型时就没有任何参数差异：这是同模型双跑，不是模型对比。
+        "modelOnlyDifference": not same_model_pair(plan),
+        "sameModel": same_model_pair(plan),
     }
     state.update(
         {
@@ -2501,7 +2506,8 @@ def run_candidates(
             "sides": {},
             "modelPlan": plan,
             "pairExecution": pair_execution,
-            "comparisonRule": "fixed-ab-different-model-same-parameters",
+            "comparisonRule": ("fixed-ab-same-model-same-parameters" if same_model_pair(plan)
+                               else "fixed-ab-different-model-same-parameters"),
             "candidateRaceStartedAt": utc_now(),
         }
     )

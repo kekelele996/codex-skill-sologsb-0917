@@ -18,6 +18,8 @@
 提示词安装前必须填写 `workspace/评审文件/难度论证.json` 并通过
 `references/difficulty-standard.md` 的机器门禁；`routineOnly=true`、缺少题面回指证据，或题面没有并发、失效重算、失败恢复、迁移兼容、权限边界、容量约束、离线合并、跨系统对账等实质复杂度信号时，`prompt` 直接拒绝安装。审阅回合、批注去重、冲突提示和快照修订只算多步实现，不能单独把题目抬到困难或地狱。
 
+2026-09-30 起再加一道门禁：题面命中“单子系统规则堆叠”的四个以上信号族（模式切换、失效重算、历史保留、冲突闸门、批量操作、保存撤销导出）时，`prompt` 直接拒绝安装，除非难度论证补上 `complexityTopology`（`kind`/`promptQuote`/`stateOwners`/`failureOrRecovery`/`whyNotLocalRuleList`/`negativeOutcome`），并证明存在跨系统对账、失败恢复、迁移兼容、并发冲突、权限边界、容量约束、离线合并或独立所有权拆分中的一种真跨界拓扑。`state-invalidation` 不是合法的拓扑类型；同一条口径里的“更新后失效重算”只算规则堆叠。正确改法是把状态所有权拆到两个真实系统、部门或岗位，任一侧更新只影响本侧，失败后能按侧恢复。
+
 ## 设计口径
 
 沿用 `solo2-auto/references/fast-hard-first-round.md` 与

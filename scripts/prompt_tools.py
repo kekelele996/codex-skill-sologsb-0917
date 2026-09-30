@@ -85,6 +85,115 @@ SUBSTANTIVE_COMPLEXITY_PATTERNS = {
     "cross-system-reconciliation": re.compile(r"(对账|跨系统|两套.{0,8}(?:一致|冲突)|外部系统.{0,12}(?:返回|同步|不一致))"),
 }
 
+# 2026-09-30 G16 三次加固：平台把“在同一个核对子系统里堆多条规则”的题面判为中等。
+# 真实废弃案例 #19738（sologsb-1020 · 档案元数据核对台）：题面同时有“两套核对口径切换、
+# 未决分数失效重算、历史结论保留、关键冲突说明、批量跳过、本地保存、撤销重做、导出”，
+# 平台原话是“需要在既有核对子系统内实现多项规则，约束明确、没有架构级设计取舍”，真实难度为中等。
+# 这类题的功能数量看起来不少，但所有权只有一个、失败也只在本地重算，所以不能只靠规则族数量判难。
+# 六个规则族全部只在一个子系统内部生效，命中四个以上就必须额外证明跨边界拓扑，否则阻断。
+RULE_STACK_FAMILIES: dict[str, re.Pattern[str]] = {
+    "mode-switch": re.compile(
+        r"(?:两套|一套|多套|另一套|第二套|两种|多套)[^。；！？，]{0,12}(?:口径|标准|基准|规则|模板|名单|模式)"
+        r"|(?:口径|标准|模式|模板)[^。；！？，]{0,8}(?:切换|来回切换|轮流|互换)"
+    ),
+    "recompute-invalidation": re.compile(
+        r"(?:失效|重算|重新计算|作废|过期|不再有效|重新确认|级联|全部重来)"
+    ),
+    "history-retention": re.compile(
+        r"(?:历史(?:结论|记录|版本|结果|判定)|保留(?:旧|原有|之前|历史)|旧(?:结论|记录|版本|判定)"
+        r"|原样保留|照旧保留|继续可查)"
+    ),
+    "conflict-gate": re.compile(r"(?:冲突|拒绝保存|阻止|拦截|闸门|互斥|矛盾|不一致)"),
+    "batch-operation": re.compile(r"(?:批量|一键|整批|全部(?:跳过|处理|确认|生效)|逐条)"),
+    "persist-undo-export": re.compile(r"(?:本地保存|撤销|重做|导出|另存|持久化保存)"),
+}
+# “命中四个以上”按 ≥4 执行：一个子系统里凑满四族规则就足以说明它是规则堆叠，而不是偶然多写一步。
+RULE_STACK_THRESHOLD = 4
+
+# complexityTopology 只认真正的跨边界拓扑。四个以上规则族命中后，题面必须能指出
+# “谁和谁各自持有状态、失败或恢复怎么发生、为什么它不是本地规则表”。
+TOPOLOGY_KIND_ALIASES: dict[str, str] = {
+    "跨系统对账": "跨系统对账",
+    "cross-system-reconciliation": "跨系统对账",
+    "reconciliation": "跨系统对账",
+    "失败恢复": "失败恢复",
+    "failure-recovery": "失败恢复",
+    "recovery": "失败恢复",
+    "迁移兼容": "迁移兼容",
+    "migration": "迁移兼容",
+    "migration-compatibility": "迁移兼容",
+    "并发冲突": "并发冲突",
+    "concurrency": "并发冲突",
+    "concurrency-conflict": "并发冲突",
+    "权限边界": "权限边界",
+    "permission-boundary": "权限边界",
+    "容量约束": "容量约束",
+    "capacity": "容量约束",
+    "capacity-constraint": "容量约束",
+    "离线合并": "离线合并",
+    "offline-merge": "离线合并",
+    "独立所有权拆分": "独立所有权拆分",
+    "ownership-split": "独立所有权拆分",
+}
+TOPOLOGY_KINDS = (
+    "跨系统对账",
+    "失败恢复",
+    "迁移兼容",
+    "并发冲突",
+    "权限边界",
+    "容量约束",
+    "离线合并",
+    "独立所有权拆分",
+)
+# 明确禁止当复杂拓扑用的伪类型：口径更新后的失效重算只是本地派生状态，不是跨边界拓扑。
+TOPOLOGY_FORBIDDEN_KINDS = {
+    "state-invalidation",
+    "state_invalidation",
+    "invalidation",
+    "失效重算",
+    "状态失效",
+    "失效",
+}
+# 每种合法拓扑对应的题面跨边界模式：promptQuote 既要是题面原句，也要真的体现这种跨界关系。
+TOPOLOGY_BOUNDARY_PATTERNS: dict[str, re.Pattern[str]] = {
+    "跨系统对账": re.compile(
+        r"(?:对账|跨系统|外部系统|双方|两边|两个(?:系统|部门|岗位|班组|房间|库|科室)|"
+        r"(?:两|各)[^。；！？，]{0,6}(?:套|方|边|侧)[^。；！？，]{0,10}(?:口径|标准|基准|账|数据|名单|结果)|"
+        r"(?:两|各)[^。；！？，]{0,6}(?:口径|标准|基准|账|数据|名单|结果))"
+    ),
+    "失败恢复": re.compile(
+        r"(?:失败后[^。；！？]{0,12}(?:恢复|重试|回滚|补偿|找回|保住)"
+        r"|崩溃[^。；！？]{0,12}(?:恢复|找回)"
+        r"|异常[^。；！？]{0,12}(?:恢复|补偿|重试)"
+        r"|断网[^。；！？]{0,12}(?:恢复|重试)"
+        r"|重试[^。；！？]{0,10}(?:失败|中断))"
+    ),
+    "迁移兼容": re.compile(
+        r"(?:(?:旧数据|旧稿|历史数据|已有数据|旧版本|老数据)[^。；！？]{0,12}(?:迁移|升级|兼容|回填|兼容)"
+        r"|(?:迁移|升级)[^。；！？]{0,12}(?:回退|兼容|历史数据|旧))"
+    ),
+    "并发冲突": re.compile(
+        r"(?:并发|同时(?:编辑|保存|提交|修改|操作|核对)|多标签[^。；！？]{0,12}(?:覆盖|冲突)"
+        r"|竞态|抢占|租约|加锁|两人[^。；！？]{0,10}同时|前后脚)"
+    ),
+    "权限边界": re.compile(
+        r"(?:越权|租户|角色[^。；！？]{0,8}(?:权限|边界)|权限[^。；！？]{0,8}(?:拒绝|隔离|边界)"
+        r"|只有[^。；！？]{0,10}(?:能|可|权限))"
+    ),
+    "容量约束": re.compile(
+        r"(?:(?:大批量|超长|超时|容量|性能|限流)[^。；！？]{0,12}(?:拒绝|降级|排队|分批|截断)"
+        r"|(?:拒绝|降级|排队|分批|截断)[^。；！？]{0,12}(?:大批量|超长|容量))"
+    ),
+    "离线合并": re.compile(
+        r"(?:(?:离线|断网)[^。；！？]{0,15}(?:合并|同步|恢复|冲突)"
+        r"|(?:网络恢复|重新连接|回到网络)[^。；！？]{0,15}(?:合并|同步|冲突))"
+    ),
+    "独立所有权拆分": re.compile(
+        r"(?:各(?:自|管各的|维护)|分别(?:维护|负责|记账|记录|持有)|独立(?:维护|拥有|归属|负责)"
+        r"|分开(?:记|维护|保存)|互不(?:覆盖|干扰|影响)|归属|(?:两个|两边)[^。；！？]{0,10}各自)"
+    ),
+}
+
 
 def _history_records(history_path: Path | None) -> list[dict[str, Any]]:
     if history_path is None or not history_path.is_file():
@@ -116,12 +225,95 @@ def _history_passed(item: dict[str, Any]) -> bool:
 
 def difficulty_signal_hints(prompt_text: str) -> dict[str, Any]:
     """记录题面里能识别到的复杂信号，只作提示与留痕，不参与判定。"""
+    stacked = rule_stack_families(prompt_text)
     return {
         "families": sorted(
             name for name, pattern in PROMPT_SIGNAL_HINTS.items() if pattern.search(prompt_text)
         ),
         "mediumShapeMatched": bool(MEDIUM_SHAPE_RE.search(prompt_text)),
+        "ruleStackFamilies": stacked,
+        "ruleStackCount": len(stacked),
+        "ruleStackBlocked": len(stacked) >= RULE_STACK_THRESHOLD,
     }
+
+
+def rule_stack_families(prompt_text: str) -> list[str]:
+    """统计“单子系统规则堆叠”的六个信号族，命中 ≥4 族就必须补 complexityTopology。"""
+    return sorted(name for name, pattern in RULE_STACK_FAMILIES.items() if pattern.search(prompt_text))
+
+
+def _topology_kind(value: Any) -> str:
+    raw = str(value or "").strip()
+    if raw in TOPOLOGY_FORBIDDEN_KINDS:
+        return raw
+    return TOPOLOGY_KIND_ALIASES.get(raw, "")
+
+
+def _validate_complexity_topology(
+    data: dict[str, Any],
+    *,
+    prompt_text: str,
+    clean_prompt: str,
+    stack: list[str],
+) -> list[str]:
+    """规则堆叠命中后，难度论证必须补一份可核对的跨边界拓扑。"""
+    errors: list[str] = []
+    labels = "、".join(stack)
+    topology = data.get("complexityTopology")
+    if not isinstance(topology, dict):
+        errors.append(
+            f"题面命中“单子系统规则堆叠”的 {len(stack)} 个信号族（{labels}）：这些规则都发生在同一个"
+            "子系统内部，平台会判为中等。必须在 difficulty-review.json 补 complexityTopology，"
+            "写清跨系统对账、失败恢复、迁移兼容、并发冲突、权限边界、容量约束、离线合并或独立所有权拆分"
+            "中的哪一种真跨界拓扑成立，才能继续标困难或地狱"
+        )
+        return errors
+
+    raw_kind = str(topology.get("kind") or "").strip()
+    kind = _topology_kind(raw_kind)
+    if not raw_kind:
+        errors.append("complexityTopology.kind 不能为空")
+    elif raw_kind in TOPOLOGY_FORBIDDEN_KINDS:
+        errors.append(
+            f"complexityTopology.kind={raw_kind} 不能作为复杂拓扑类型：口径更新后失效重算只是本地派生"
+            "状态，只有‘口径更新后失效重算’不能证明困难，必须换成真正的跨边界拓扑"
+        )
+    elif not kind:
+        errors.append(
+            "complexityTopology.kind 必须是以下之一："
+            + "、".join(TOPOLOGY_KINDS)
+            + "（可写英文别名 cross-system-reconciliation / failure-recovery / migration / "
+            "concurrency / permission-boundary / capacity / offline-merge / ownership-split）"
+        )
+
+    quote = str(topology.get("promptQuote") or "").strip()
+    normalized_quote = _normalize(quote)
+    if len(normalized_quote) < 12:
+        errors.append("complexityTopology.promptQuote 至少引用 12 字题面原句")
+    elif normalized_quote not in clean_prompt:
+        errors.append(f"complexityTopology.promptQuote 不是题面原句，无法核对：{quote}")
+    elif raw_kind in TOPOLOGY_KINDS and not TOPOLOGY_BOUNDARY_PATTERNS[raw_kind].search(quote):
+        errors.append(
+            f"complexityTopology.promptQuote 没有体现所声明的跨边界拓扑（{raw_kind}）："
+            "这一句必须本身就能看出跨边界的归属、对账、恢复或拆分关系"
+        )
+
+    owners = [str(item).strip() for item in (topology.get("stateOwners") or []) if str(item).strip()]
+    if len(owners) < 2:
+        errors.append("complexityTopology.stateOwners 至少列出 2 个各自持有状态的系统、部门或岗位")
+    for name in owners:
+        if _normalize(name) not in clean_prompt:
+            errors.append(f"complexityTopology.stateOwners 里的“{name}”没有出现在题面原文里")
+
+    if not _nonempty_text(topology.get("failureOrRecovery"), 20):
+        errors.append("complexityTopology.failureOrRecovery 至少 20 字，写清失败、恢复或补偿发生在哪一侧")
+    if not _nonempty_text(topology.get("whyNotLocalRuleList"), 30):
+        errors.append(
+            "complexityTopology.whyNotLocalRuleList 至少 30 字，写清为什么它不是一个子系统内部的规则表"
+        )
+    if not _nonempty_text(topology.get("negativeOutcome"), 12):
+        errors.append("complexityTopology.negativeOutcome 至少 12 字，写清跨界拓扑错了会出现什么可见后果")
+    return errors
 
 
 def validate_difficulty_evidence(
@@ -276,6 +468,19 @@ def validate_difficulty_evidence(
                 "题面命中平台“直接判为中等”的常见形态（在既有模块补视图/清单/预览/字段…），"
                 "必须在 mediumShapeDefense 里写清它不是只加一层，并给出题面依据"
             )
+
+    # 2026-09-30 三次加固：≥4 个规则族命中就说明题面是“单子系统规则堆叠”，
+    # 必须用 complexityTopology 证明它真的跨了边界，否则直接阻断。
+    stacked = rule_stack_families(prompt_text)
+    if len(stacked) >= RULE_STACK_THRESHOLD:
+        errors.extend(
+            _validate_complexity_topology(
+                data,
+                prompt_text=prompt_text,
+                clean_prompt=clean_prompt,
+                stack=stacked,
+            )
+        )
     return errors
 
 
@@ -462,6 +667,7 @@ def validate_difficulty_review(
         "errors": errors,
         "passed": passed,
         "signalsPassed": passed_count,
+        "ruleStackFamilies": rule_stack_families(prompt_text) if prompt_text else [],
     }
 
 
@@ -516,6 +722,14 @@ def validate_candidate(
         warnings.append("题面没有识别到并发/失效/原子性/迁移/权限/恢复/容量类复杂信号，复核时重点看这一项")
     if hints["mediumShapeMatched"]:
         warnings.append("题面命中“在既有模块补一层”的中等形态，必须已填写 mediumShapeDefense")
+    if hints["ruleStackBlocked"]:
+        warnings.append(
+            "题面命中“单子系统规则堆叠”的 "
+            + str(hints["ruleStackCount"])
+            + " 个信号族（"
+            + "、".join(hints["ruleStackFamilies"])
+            + "），难度论证必须补齐 complexityTopology，否则阻断"
+        )
     rigid = PROMPT_RIGID_RE.findall(clean)
     if len(rigid) > PROMPT_MAX_RIGID:
         errors.append(
@@ -572,6 +786,7 @@ def validate_candidate(
         "errors": errors,
         "warnings": warnings,
         "difficultyReview": difficulty_review,
+        "difficultyHints": hints,
     }
 
 

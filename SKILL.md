@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.8.1`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.8.1`
-- 精确提交号：运行 `git rev-parse v1.8.1` 获取。
+- 全局版本号：`1.8.2`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.8.2`
+- 精确提交号：运行 `git rev-parse v1.8.2` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -141,7 +141,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   不能替代轨迹校验、语义完成审核或产物证据。
 - 2026-09-23 官方表单（fingerprint `954e9db2d25afeb4`，23 个字段全部必填）删除了“备注”，新增 `A/B-交付完整性`（1~5 整数）和 `A/B-交付完整性描述`。草稿必须提供 `delivery.A/B.score/description/evidenceIds`，打分与写法见 `references/delivery-scoring.md`：只写完整性，两侧独立撰写，允许与 GSB 理由少量重合但不得照抄，A、B 两段之间和与历史数据之间都按 G12 查重。1.7.7 起交付完整性从严：默认 4 分，5 分需要至少 2 条本侧通过证据（构建或启动 + 功能级）、描述写明“逐条核对了”并给出一项边界处理的实测结果；结论分出胜负时禁止双满分，负方最高 4 分。另外每侧必评代码实现（1~5），写在 `delivery.<side>.quality.code`：交付完整性 5 分要求代码实现不低于 4 分，代码实现 2 分及以下时交付完整性最高 3 分，锚点见 `references/delivery-scoring.md`。美观度不参与评估（视觉识别易误判）。
 - 2026-09-29 G16 加固（1.7.9）：当天 `sologsb-1007` 的一条数据被平台按 G16 废弃，原因是题面只做了“在既有页面补一个对照视图 + 局部只读守卫 + 给草稿加一个字段”，而难度论证只是自由文字自证。从本版本起难度论证必须回指题面与真实语料，缺一项即阻断：`platformSignals`（三项信号逐项作答，`promptQuote` 必须是题面原句子串）、`crossObjectInvariant`（至少两个对象名必须出现在题面里，并写清不变量与背离后果）、`corpusEvidence`（`nearestDiscardedId` 必须是真实 G16 废弃样本、`nearestPassedId` 必须是质检通过样本，并写清差别与借鉴点）、`substantiveComplexity`（题面原句必须真的出现并发、失效重算、失败恢复、迁移兼容、权限边界、容量、离线合并或跨系统对账等信号）、以及命中中等形态时的 `mediumShapeDefense`。当天追加的 `#19600` 已加入废弃样本：审阅回合、批注去重、冲突提示和快照修订只算多步实现，不能再自证为困难或地狱。样本清单见 `references/g16-discarded-samples.json`，判定标准见 `references/difficulty-standard.md`。`MEDIUM_SHAPE_RE` 只是摩擦规则不是判难器：当日真实语料回归为 7 条 G16 废弃命中 3 条、40 条通过命中 10 条，命中只要求补写自辩，没命中也不代表题面够难。
-- 2026-09-29 A/B 模型分离（1.7.9）：A/B 必须换模型跑（默认 `claude.modelA=auto_model/urm`、`claude.modelB=ark/urm-03`）。`run` 开跑前会校验两者不同；提交预检新增 `ab-model-split`，两侧模型名相同直接阻断。同模型的两侧不构成模型对比，出现即报废重跑。
+- 2026-09-30 A/B 可同模型（1.8.0，取代 1.7.9 的“A/B 必须换模型”）：`claude.modelA` / `claude.modelB` 可以设成同一个模型（默认仍是 `auto_model/urm` / `ark/urm-03`）。`run` 只要求两侧都有模型名；同模型时 `pairExecution.sameModel=true`、`comparisonRule=fixed-ab-same-model-same-parameters`。提交预检的 `ab-model-split` 改为 `ab-model-names`（只校验两侧都记下了模型名），每侧是否真的调用了锁定模型仍由 `ab-model-evidence` 从交付轨迹复算。A/B 依旧按 candidate-1=A、candidate-2=B 区分，SessionID、容器、工作区、轨迹各自独立，与模型名无关。
 - 2026-09-30 轨迹模型审核（1.8.0）：`system/init` 的 `model` 只是客户端回显 `ANTHROPIC_MODEL`，不能证明网关实际用了哪个模型。
   执行器在候选轮询里增量读轨迹，以网关的真实回应为准：每条 `assistant` 事件的 `message.model`（API 响应的模型名，
   `<synthetic>` 除外）和 `result` 事件 `modelUsage` 的全部键（含后台小任务）都必须等于
@@ -163,6 +163,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 - 2026-09-30 平台规则 G18（1.8.1，`references/g18-daily-full-score.md`）：同一人当天首次提交的数据里，A、B 两侧交付完整性都打满分的占比不得超过 10%，当天满 10 条后开始计算；一旦超过，当天之后再提交的两侧满分数据一律作废，非满分数据不受影响，返修无效。
   口径：分母是当天已创建的提交条数（含当前这条），分子是其中两侧都等于 5 的条数，`> 10%` 才算超限。提交预检用实时接口复核并写 `monitor/g18-daily-full-score.json`，命中即出阻断项 `g18-daily-full-score`；实测 2026-09-29 的 2 条双满分数据就是这样被废弃的。
   挽回顺序：先按本侧真实证据复核分数，确实不到 5 分就据实下调，禁止为了占比压分；两侧证据都撑得住 5 分时，这条阻断是唯一阻断项，`preflight` 记为 `g18_full_score_deferred`，`submit_api.py` 不上传不提交，直接走 `submit_deferred` 的次日再提交路径（返回码 3，状态 `deferred_g18_full_score`），把数据留到当天计数清零后再交。
+- 2026-09-30 G16 三次加固（1.8.2，单子系统规则堆叠）：当天一条数据（`#19738`，`sologsb-1020 · 档案元数据核对台`）被平台按 G16 废弃，题面有“两套核对口径切换、未决分数失效重算、历史结论保留、关键冲突说明、批量跳过、本地保存、撤销重做、导出”，平台原话是“需要在既有核对子系统内实现多项规则，约束明确、没有架构级设计取舍”，真实难度为中等。从本版本起 `prompt_tools` 统计六个规则族（`mode-switch` 模式/口径切换、`recompute-invalidation` 失效重算、`history-retention` 历史保留、`conflict-gate` 冲突闸门、`batch-operation` 批量操作、`persist-undo-export` 保存撤销导出），命中四个以上（含四个）即判为“单子系统规则堆叠”，`validate_difficulty_review` 直接阻断，除非难度论证提供 `complexityTopology`。`complexityTopology` 必须给出 `kind`、`promptQuote`、`stateOwners`、`failureOrRecovery`、`whyNotLocalRuleList`、`negativeOutcome`；`kind` 只允许跨系统对账、失败恢复、迁移兼容、并发冲突、权限边界、容量约束、离线合并、独立所有权拆分；`state-invalidation` 不是合法拓扑类型，只有“口径更新后失效重算”不能证明困难；`promptQuote` 必须是题面原句并匹配所声明的跨边界模式；`stateOwners` 至少两个且名称必须出现在题面里；`whyNotLocalRuleList` 至少 30 字。正确改法是把状态所有权拆到两个真实系统、部门或岗位，任一侧更新只影响本侧，失败后按侧恢复；靠加规则、加按钮、加导出去凑难度一律按中等处理。复盘见 `references/lessons-learned-20260930-g16-rule-stacking.md`，样本见 `references/g16-discarded-samples.json`（`id=19738`，`shapeTag=单子系统规则堆叠`）。
 - 红线：A/B 交付完整性描述必须与本侧轨迹对应，不得出现对立意见。锚点必须在本侧原始轨迹中存在，分数和描述不得与本侧真实复核结果、引用证据、GSB 理由或 GSB 结论相反（详见 `references/delivery-scoring.md` 红线一）。本地（容器外）编写的任何测试和自动化脚本，包括验收、冒烟、Playwright、录制场景，都不参与交付完整性描述：不写进描述，不引用其证据，也不作为分数依据（红线二）。有页面的项目和之前一样引用录屏证据；纯后端 API 项目的录屏排除，改用验证计划的 `probe` 接口探活作为证据。描述和理由都直接写“请求了登录接口，返回404”这种主观直述，不写“从录屏来看”“根据编写的测试”。
 - GSB 理由不用先交代背景，开头直接写 A 侧方案做了什么；不得用“这次冲突在……”“本题冲突在……”等元描述开场。通顺度正反对照见 `references/reason-writing-rules.md` 的“2026-09-27 通顺度对照”。
 - GSB 理由与题目提示词都要写得像人话：理由按“一侧一段话”组织，相邻句不用同一称谓起头、每侧称谓最多 3 次；不写电报体，全文最多 6 句，结论前至少 2 处“结果”“导致”“但”“却”这类因果或转折衔接，不把两件事压成“先提交标题未更新”式短语，结论前必须点明判准和扣分点（2026-09-24 电报体打回后改为阻断）；句子不能以“检查”“核对”等动作直接起头而没有交代是哪一侧，两侧打平时结论统一写“因此选择Same”，不写“打平”，也不写“选A”“选B”（2026-09-25）；提示词像业务方交代需求，硬性措辞最多 3 处、分号最多 2 个，不用“刷新后……一致”式模板收尾。
@@ -247,7 +248,7 @@ python3 scripts/status_push.py uninstall
    `workspace/评审文件/难度论证.json` 说明多模块整合、关键设计取舍和复杂技术关注点；
    `困难` 至少满足两项且其中一项必须是后两项之一，`地狱` 三项都必须满足，
    并额外通过 `hellSignal` 证明开放方案判断、隐蔽约束、架构级取舍或多步深水调试；
-   `routineOnly=true` 直接阻断。1.7.9 起还要先读 `references/g16-discarded-samples.json`，并从当前历史缓存里挑真实样本填 `corpusEvidence`；同时补齐 `platformSignals`（每项都要引用题面原句）、`crossObjectInvariant`（对象名必须出现在题面里）、`substantiveComplexity`（题面必须真的出现并发、失效重算、失败恢复、迁移兼容、权限边界、容量、离线合并或跨系统对账等信号）和命中中等形态时的 `mediumShapeDefense`。审阅回合、批注去重、冲突提示和快照修订属于多步实现，不能单独作为困难或地狱证据；任何一项引不到题面都会在 `prompt` 阶段阻断。提示词必须走固定版本 `ra-人话`。
+   `routineOnly=true` 直接阻断。1.7.9 起还要先读 `references/g16-discarded-samples.json`，并从当前历史缓存里挑真实样本填 `corpusEvidence`；同时补齐 `platformSignals`（每项都要引用题面原句）、`crossObjectInvariant`（对象名必须出现在题面里）、`substantiveComplexity`（题面必须真的出现并发、失效重算、失败恢复、迁移兼容、权限边界、容量、离线合并或跨系统对账等信号）和命中中等形态时的 `mediumShapeDefense`。1.8.2 起还要先看规则堆叠：题面命中模式切换、失效重算、历史保留、冲突闸门、批量操作、保存撤销导出这六族里的四个以上时，必须补 `complexityTopology`（`kind`/`promptQuote`/`stateOwners`/`failureOrRecovery`/`whyNotLocalRuleList`/`negativeOutcome`），证明存在跨系统对账、失败恢复、迁移兼容、并发冲突、权限边界、容量约束、离线合并或独立所有权拆分中的一种真跨界拓扑，否则 `prompt` 直接阻断。审阅回合、批注去重、冲突提示和快照修订属于多步实现，不能单独作为困难或地狱证据；任何一项引不到题面都会在 `prompt` 阶段阻断。提示词必须走固定版本 `ra-人话`。
 3. 运行 `run --side both --candidates 2`。困难题单 attempt 默认 7200 秒；
    运行器先建立本地初始快照并拉取两份隔离源码，再并行启动两个容器无头执行，每份分别写
    原生 JSONL。candidate-1 固定使用 `auto_model/urm` 并映射 A，candidate-2 固定使用
@@ -338,7 +339,7 @@ python3 scripts/sologsb.py version                                       # 打�
 
 - `references/prompt-standard.md`：提示词和查重门禁。
 - `references/difficulty-standard.md`：困难/地狱题的 G16/G17 判定、反例与强制难度论证。
-- `references/difficulty-review-template.json`：难度论证 JSON 模板（含 1.7.9 起强制的回指与实质复杂度字段）。
+- `references/difficulty-review-template.json`：难度论证 JSON 模板（含 1.7.9 起强制的回指与实质复杂度字段，以及 1.8.2 起强制的 `complexityTopology`）。
 - `references/g16-discarded-samples.json`：平台 G16 真实废弃题面样本，出题前必须逐条读。
 - `references/workspace-layout.md`：候选目录、映射状态和 GitHub 约定。
 - `references/trace-validation.md`：单轮轨迹硬校验和语义完成审核。
@@ -358,6 +359,7 @@ python3 scripts/sologsb.py version                                       # 打�
 - `references/lessons-learned-20260917.md`：0917 实测避坑与固定处理顺序。
 - `references/lessons-learned-20260927-next-export.md`：Next.js 静态导出 `out/` 与 `*.tsbuildinfo` 的发布排除修复。
 - `references/lessons-learned-20260927-angular-cache.md`：Angular `.angular/` 缓存发布污染与重建恢复。
+- `references/lessons-learned-20260930-g16-rule-stacking.md`：2026-09-30 `#19738` 单子系统规则堆叠复盘、六个规则族、`complexityTopology` 要求与正确改写边界。
 - `references/key-concurrency.md`：单 Key 并发、429 恢复和监控台执行门禁。
 - `references/monitor-prompt-template.md`：可直接复制到监控台的优化提示词模板。
 - `references/field-guide-template.md`：当前 schema 字段填写说明模板。

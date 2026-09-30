@@ -114,3 +114,45 @@
 候选修改和冻结快照派生修订，功能步骤不少，但平台仍判为中等，因为缺少架构级取舍和题面级复杂状态。
 因此“有导入、有去重、有冲突、有版本”不构成实质复杂度证明；本地 `substantiveComplexity`
 会在 `prompt` 阶段直接阻断这类题。
+
+## 2026-09-30 G16 三次加固（单子系统规则堆叠）
+
+背景：本日一条已提交数据（`#19738`，项目 `sologsb-1020 · 档案元数据核对台`）被平台按 G16 废弃。
+题面同时包含两套核对口径切换、未决分数失效重算、历史结论保留、关键冲突说明、批量跳过、本地保存、
+撤销重做和导出，读起来规则很多，但平台的原话是“需要在既有核对子系统内实现多项规则，约束明确、
+没有架构级设计取舍”，真实难度判为中等。
+
+复盘结论：**规则族数量不等于难度**。上面这些规则全部发生在同一个核对子系统内部，状态只有一份所有者，
+失败也只是本地重算，所以既没有跨模块所有权，也没有真正的恢复或对账。为了让机器门禁能挡住这类题，
+`scripts/prompt_tools.py` 新增“单子系统规则堆叠”识别：
+
+六个信号族（`RULE_STACK_FAMILIES`）：
+
+1. `mode-switch`：两套/多套核对口径、标准或模板之间的切换。
+2. `recompute-invalidation`：失效、重算、作废、过期、重新确认这类派生状态失效。
+3. `history-retention`：历史结论、旧版本、旧记录的原样保留。
+4. `conflict-gate`：冲突、拒绝保存、拦截、闸门这类阻断规则。
+5. `batch-operation`：批量、一键、整批、逐条这类批量处理。
+6. `persist-undo-export`：本地保存、撤销、重做、导出这类结果处理。
+
+规则与门禁：
+
+- 题面命中 **四个以上**（`RULE_STACK_THRESHOLD = 4`，含四个）规则族时，视为“单子系统规则堆叠”，
+  `validate_difficulty_review` 直接阻断，除非 `difficulty-review.json` 提供 `complexityTopology`。
+- `complexityTopology` 必须同时给出六个字段：`kind`、`promptQuote`、`stateOwners`、
+  `failureOrRecovery`、`whyNotLocalRuleList`、`negativeOutcome`。
+- `kind` 只允许 `跨系统对账`、`失败恢复`、`迁移兼容`、`并发冲突`、`权限边界`、`容量约束`、
+  `离线合并`、`独立所有权拆分`（英文别名 `cross-system-reconciliation`、`failure-recovery`、
+  `migration`、`concurrency`、`permission-boundary`、`capacity`、`offline-merge`、`ownership-split`
+  同样可用）。
+- `state-invalidation`（以及“失效重算”“状态失效”）**不得**作为复杂拓扑类型。只有“口径更新后
+  失效重算”不能证明困难：它只是本地派生状态，是规则堆叠的第一族，不是跨边界拓扑。
+- `promptQuote` 必须是题面原句，并且要真的匹配所声明的那种跨边界模式；只引一句和跨边界无关的
+  题面文字（例如“关键冲突要写清来源”）会被单独报错。
+- `stateOwners` 至少两个，名称必须出现在题面原文里，代表各自持有状态的系统、部门或岗位。
+- `whyNotLocalRuleList` 至少 30 字，写清为什么它不是一个子系统内部顺序执行的规则表。
+- `failureOrRecovery` 至少 20 字、`negativeOutcome` 至少 12 字。
+
+正确改写边界：把同一条业务闭环里的状态所有权拆到两个真实系统、部门或岗位，让任一侧更新只影响本侧，
+并给出失败后按侧恢复的路径；再把这条跨边界关系写进 `complexityTopology`。不能靠加规则、加按钮、
+加导出格式来通过门禁；没有真实跨边界拓扑时，题目应当降到中等或换题。

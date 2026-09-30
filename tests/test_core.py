@@ -4737,3 +4737,76 @@ class ModelAuditArchiveTests(unittest.TestCase):
                     side_runner.run_candidates(root, candidate_count=2)
             self.assertFalse((root / "monitor" / "model-audit.json").exists())
             self.assertEqual(len(list((root / "monitor").glob("model-audit.*.json"))), 1)
+
+
+class SameModelPairTests(unittest.TestCase):
+    """2026-09-30：A、B 可以用同一个模型；锁定、审核、提交预检都按侧独立判断。"""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in ("SOLOSB_A_MODEL", "SOLOSB_B_MODEL"):
+            os.environ.pop(name, None)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        config = Path(self.temp.name) / "device.json"
+        config.write_text(json.dumps({"configVersion": 1,
+                                      "claude": {"modelA": "same/x", "modelB": "same/x"}}), encoding="utf-8")
+        os.environ["SOLOSB_CONFIG"] = str(config)
+
+    def test_plan_locks_the_same_model_for_both_sides(self) -> None:
+        state: dict = {}
+        plan = side_runner.lock_model_plan(state, expected={"A": "same/x", "B": "same/x"})
+        self.assertEqual(side_runner.plan_models(plan), {"A": "same/x", "B": "same/x"})
+        self.assertTrue(side_runner.same_model_pair(plan))
+        self.assertEqual(side_runner.model_for_candidate("candidate-1", "", plan), "same/x")
+        self.assertEqual(side_runner.model_for_candidate("candidate-2", "", plan), "same/x")
+
+    def test_run_records_same_model_rule(self) -> None:
+        root = Path(self.temp.name) / "task"
+        (root / "monitor").mkdir(parents=True)
+        origin = root / "source" / "origin"
+        origin.mkdir(parents=True)
+        (origin / "README.md").write_text("base", encoding="utf-8")
+        prompt = root / "prompt.txt"
+        prompt.write_text("prompt", encoding="utf-8")
+        write_json(root / "monitor" / "state.json", {
+            "status": "prompt_ready", "taskName": "same", "promptPath": str(prompt),
+            "promptSha256": sha256_file(prompt),
+        })
+        with mock.patch.object(side_runner, "_ensure_origin_commit", return_value="0" * 40), \
+             mock.patch.object(side_runner, "anthropic_base_url", return_value="https://relay.example"), \
+             mock.patch.object(side_runner, "_clone_candidate", side_effect=SologsbError("stop after state")):
+            with self.assertRaisesRegex(SologsbError, "stop after state"):
+                side_runner.run_candidates(root, candidate_count=2)
+        state = read_json(root / "monitor" / "state.json", {})
+        self.assertEqual(state["modelPlan"]["A"]["model"], "same/x")
+        self.assertEqual(state["modelPlan"]["B"]["model"], "same/x")
+        self.assertTrue(state["pairExecution"]["sameModel"])
+        self.assertFalse(state["pairExecution"]["modelOnlyDifference"])
+        self.assertEqual(state["comparisonRule"], "fixed-ab-same-model-same-parameters")
+
+    def test_audit_still_catches_one_side_on_another_model(self) -> None:
+        path = Path(self.temp.name) / "b.jsonl"
+        path.write_text(json.dumps({"type": "assistant", "message": {"id": "m", "model": "other/y"}}) + "\n",
+                        encoding="utf-8")
+        self.assertEqual(side_runner.audit_trace_models(path, "same/x")["violation"]["observed"], "other/y")
+
+    def test_preflight_passes_same_model_with_matching_traces(self) -> None:
+        path = str(ROOT / "submission" / "scripts")
+        if path not in sys.path:
+            sys.path.insert(0, path)
+        import preflight
+
+        root = Path(self.temp.name)
+        sides = {}
+        for side in ("A", "B"):
+            trace = root / f"{side}.jsonl"
+            trace.write_text(json.dumps({"type": "assistant", "message": {"id": side, "model": "same/x"}}) + "\n",
+                             encoding="utf-8")
+            sides[side] = {"model": "same/x", "tracePath": str(trace)}
+        state = {"sides": sides, "modelPlan": {"A": {"model": "same/x"}, "B": {"model": "same/x"},
+                                               "lockedAt": "2026-09-30T00:00:00Z"}}
+        result = preflight.model_evidence_check(root, state)
+        self.assertTrue(result["ok"], result)
