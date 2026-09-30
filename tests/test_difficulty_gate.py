@@ -10,9 +10,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from common import write_json  # noqa: E402
 from prompt_tools import (  # noqa: E402
+    HELL_PROMPT_MARKERS,
     MEDIUM_SHAPE_RE,
     RULE_STACK_FAMILIES,
     RULE_STACK_THRESHOLD,
+    hell_prompt_markers,
     rule_stack_families,
     validate_difficulty_review,
 )
@@ -481,3 +483,186 @@ class DifficultyTemplateScaffoldTests(unittest.TestCase):
             for key in ("platformSignals", "crossObjectInvariant", "corpusEvidence", "substantiveComplexity"):
                 self.assertIn(key, data)
             self.assertFalse(prompt_tools.ensure_difficulty_template(target))
+
+
+# 2026-09-30 G17 实测：题面带容量排队、失效重算、离线合并和升级迁移，但全部在一个本地库里，
+# 平台判回「困难」并要求改档重提。这段原文用于回归新的地狱门禁。
+HELL_INFLATION_PROMPT = (
+    "蜂场这季想把安排落到执行。技术员挑好地块和蜂群，按投放点容量排蜂群，排不下的箱数先排队，"
+    "并说清是哪个点还差几箱。地块花期或投放点坐标一改动，引用过它的排季安排就要失效重算，"
+    "重算前不能当作可执行的方案导出。外勤离线改完，回驻地按编号合并进来，两边都动过的先列出来复核。"
+    "老浏览器里上一季的数据，升级后地块、蜂群、投放点、路线一条都不能丢。"
+)
+
+# 真正的地狱形态：现场条件不足，方案由执行者自行确定；并且题面本身给出两条互相牵制的约束。
+HELL_PROMPT = (
+    "蜂场和托管服务队各自维护一套排季数据，技术员在现场没网，排布方案要由执行者自行确定事实来源。"
+    "既要保住已经投放的执行进度，又要让改期的排季安排立刻失效重算。"
+    "两边都动过的记录按编号合并，冲突时以服务队确认的结论为准。"
+    "断网恢复后要按侧对账，失败后保住上一次结果并允许重试，导出也要能查。"
+)
+
+
+def _hell_review(prompt: str = HELL_PROMPT, *, with_hell_quote: bool = True, with_tradeoff_quote: bool = True) -> dict:
+    data = _base_review(prompt)
+    data["difficulty"] = "地狱"
+    data["verdict"] = "地狱"
+    data["signals"]["multiModule"] = {
+        "passed": True,
+        "modules": ["排季安排", "外勤离线记录", "服务队确认结论"],
+        "crossModuleInvariant": "两边都动过的记录按编号合并后只能留一份结论，服务队确认的结论优先于本地排季安排",
+        "evidence": "排季安排、外勤离线记录和服务队确认结论共用同一条合并链路，导出复用同一份结果",
+    }
+    data["signals"]["designTradeoff"] = {
+        "passed": True,
+        "conflict": "已经投放的执行进度要保住，改了花期的排季安排又必须立刻失效重算，两条要求互相牵制",
+        "decision": "必须决定事实来源与失效边界：只重算被改动引用的安排，同时保留已经投放的执行进度",
+        "whyNotRoutine": "不是普通字段校验，选错会让在园蜂群被重排或让过期安排继续被导出执行",
+        "promptQuote": (
+            "既要保住已经投放的执行进度，又要让改期的排季安排立刻失效重算" if with_tradeoff_quote else ""
+        ),
+        "evidence": "题面同时要求保住执行进度和让改动后的安排失效，说明两条约束必须同时成立",
+    }
+    data["signals"]["complexConcern"] = {
+        "passed": True,
+        "kinds": ["state-machine", "failure-recovery"],
+        "technicalRisk": "断网期间两侧各自改数据，恢复后按侧对账与失效重算交织，容易拿旧结果顶替新结论",
+        "observableFailure": "恢复后同一条记录出现两份结论，导出文件带着过期安排发给服务队",
+        "evidence": "题面要求断网恢复后按侧对账，并在失败后保住上一次结果再重试",
+    }
+    data["platformSignals"] = {
+        "multiModule": {
+            "answer": "排季安排、外勤离线记录和服务队确认结论是三条链路，合并后必须对同一条记录收口",
+            "promptQuote": "两边都动过的记录按编号合并",
+            "ifViolated": "合并后同一编号留下两份结论，导出对不上服务队的确认结果",
+        },
+        "designTradeoff": {
+            "answer": "必须决定事实来源与失效边界：保住执行进度还是整批重算，只能选一个作为主线",
+            "promptQuote": "既要保住已经投放的执行进度，又要让改期的排季安排立刻失效重算",
+            "ifViolated": "要么把在园进度一起作废，要么过期安排继续被当成可执行方案",
+        },
+        "complexConcern": {
+            "answer": "断网两侧各自改数据后要按侧对账并在失败后恢复，属于跨侧一致性与失败恢复问题",
+            "promptQuote": "断网恢复后要按侧对账，失败后保住上一次结果并允许重试",
+            "ifViolated": "恢复后两侧结论互相覆盖，核对员分不清哪一份有效",
+        },
+    }
+    data["crossObjectInvariant"] = {
+        "objects": ["排季安排", "记录"],
+        "invariant": "两边都动过的记录合并后只能保留一份结论，排季安排必须引用这份确认过的结论",
+        "divergenceFailure": "排季安排引用了被覆盖的旧结论，导出结果与服务队确认的不一致",
+    }
+    data["corpusEvidence"] = {
+        "nearestDiscardedId": 19738,
+        "differenceFromDiscarded": "废弃样本把口径切换、失效重算、冲突说明和导出堆在一个核对台里，只有一个所有者；本题把状态拆到蜂场、服务队两侧并要求按侧对账",
+        "nearestPassedId": 9002,
+        "borrowedComplexity": "借鉴通过样本里派生状态随上游变化失效的做法，再把所有权拆成蜂场与服务队两侧",
+    }
+    data["substantiveComplexity"] = {
+        "kinds": ["cross-system-reconciliation", "state-invalidation"],
+        "promptQuote": "既要保住已经投放的执行进度，又要让改期的排季安排立刻失效重算",
+        "whyHard": "断网两侧各自修改后要按侧对账，并让被改动的安排失效重算，同时保住已经投放的执行进度",
+        "visibleFailure": "恢复后旧结论覆盖新结论，排季安排带着过期数据被导出执行",
+    }
+    data["mediumShapeDefense"] = (
+        "题面不只是加一层：状态分在蜂场和服务队两侧，断网恢复后要按侧对账并保留失败前结果，"
+        "只靠一张本地规则表做不到"
+    )
+    if with_hell_quote:
+        data["hellSignal"] = {
+            "passed": True,
+            "kinds": ["open-ended", "cross-system-recovery"],
+            "promptQuote": "排布方案要由执行者自行确定事实来源",
+            "reason": "现场没网且两侧各自维护数据，执行者必须先确定事实来源和失效边界，题面没有给出具体方案",
+            "evidence": "题面写明现场没网、方案由执行者自行确定事实来源，并要求断网恢复后按侧对账",
+        }
+    else:
+        data["hellSignal"] = {
+            "passed": True,
+            "kinds": ["open-ended", "cross-system-recovery"],
+            "reason": "现场没网且两侧各自维护数据，执行者必须先确定事实来源和失效边界",
+            "evidence": "题面写明现场没网、方案由执行者自行确定事实来源，并要求断网恢复后按侧对账",
+        }
+    return data
+
+
+class HellDifficultyGateTests(unittest.TestCase):
+    """2026-09-30 G17：地狱必须由题面原句支撑，否则改填困难。"""
+
+    def _validate(self, review: dict, prompt: str, difficulty: str = "地狱") -> dict:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            prompt_path = base / "prompt.md"
+            prompt_path.write_text(prompt, encoding="utf-8")
+            review_path = base / "difficulty.json"
+            write_json(review_path, review)
+            write_json(base / "history.json", HISTORY_ITEMS)
+            return validate_difficulty_review(
+                review_path,
+                difficulty,
+                prompt_text=prompt_path.read_text(encoding="utf-8"),
+                history_path=base / "history.json",
+            )
+
+    def test_hell_marker_helper_detects_hell_features(self) -> None:
+        self.assertEqual(hell_prompt_markers(HELL_INFLATION_PROMPT), [])
+        markers = hell_prompt_markers(HELL_PROMPT)
+        self.assertIn("open-ended", markers)
+        self.assertIn("cross-system-recovery", markers)
+        for pattern in HELL_PROMPT_MARKERS.values():
+            self.assertTrue(pattern.pattern)
+
+    def test_inflated_prompt_cannot_be_hell(self) -> None:
+        # 本次真实题面：容量排队 + 失效重算 + 离线合并 + 升级迁移，但题面没有地狱级特征。
+        result = self._validate(_hell_review(HELL_PROMPT), HELL_INFLATION_PROMPT)
+        self.assertFalse(result["ok"])
+        joined = " ".join(result["errors"])
+        self.assertIn("不是题面原句", joined)
+        self.assertIn("改填「困难」", joined)
+
+    def test_missing_hell_quote_is_blocked(self) -> None:
+        result = self._validate(_hell_review(with_hell_quote=False), HELL_PROMPT)
+        self.assertFalse(result["ok"])
+        joined = " ".join(result["errors"])
+        self.assertIn("hellSignal.promptQuote", joined)
+        self.assertIn("改填「困难」", joined)
+
+    def test_hell_quote_must_match_declared_kind(self) -> None:
+        review = _hell_review()
+        review["hellSignal"]["promptQuote"] = "两边都动过的记录按编号合并"
+        result = self._validate(review, HELL_PROMPT)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("没有体现所声明的地狱级特征" in error for error in result["errors"]))
+
+    def test_missing_tradeoff_quote_is_blocked(self) -> None:
+        result = self._validate(_hell_review(with_tradeoff_quote=False), HELL_PROMPT)
+        self.assertFalse(result["ok"])
+        joined = " ".join(result["errors"])
+        self.assertIn("designTradeoff.promptQuote", joined)
+        self.assertIn("改填「困难」", joined)
+
+    def test_tradeoff_quote_must_show_two_constraints(self) -> None:
+        review = _hell_review()
+        review["signals"]["designTradeoff"]["promptQuote"] = "两边都动过的记录按编号合并"
+        result = self._validate(review, HELL_PROMPT)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("互相牵制" in error for error in result["errors"]))
+
+    def test_prompt_backed_hell_review_passes(self) -> None:
+        result = self._validate(_hell_review(), HELL_PROMPT)
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertIn("open-ended", result["hellPromptMarkers"])
+
+    def test_difficulty_field_is_downgraded_not_ignored(self) -> None:
+        # 同一份难度论证去掉地狱原句后：标困难可以过（不要求地狱证据），标地狱被拦。
+        hard_review = _hell_review(with_hell_quote=False, with_tradeoff_quote=False)
+        hard_review["difficulty"] = "困难"
+        hard_review["verdict"] = "困难"
+        hard_review.pop("hellSignal", None)
+        hard_result = self._validate(hard_review, HELL_PROMPT, "困难")
+        self.assertTrue(hard_result["ok"], hard_result["errors"])
+
+        hell_review = _hell_review(with_hell_quote=False, with_tradeoff_quote=False)
+        hell_result = self._validate(hell_review, HELL_PROMPT, "地狱")
+        self.assertFalse(hell_result["ok"])
+        self.assertIn("hellSignal.promptQuote", " ".join(hell_result["errors"]))

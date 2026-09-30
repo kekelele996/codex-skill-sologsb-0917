@@ -552,9 +552,44 @@ HELL_SIGNAL_KINDS = {
     "cross-system-recovery",
 }
 
+# 2026-09-30 G17 实测（sologsb-1117 · 蜜蜂授粉路线规划器）：题面把容量排队、引用失效重算、
+# 离线合并冲突复核、旧数据升级迁移串成一条本地链路，三项平台信号里只有多模块整合和复杂技术
+# 关注点成立，平台原话是“涉及容量排队、引用失效重算、离线合并冲突复核、旧数据升级迁移，多模块
+# 约束交织，但需求边界明确”，结论是“难度标高了，请改填困难”。说明只靠自述“开放/隐蔽/架构”
+# 挡不住难度虚高，地狱必须由题面原句本身证明。
+HELL_PROMPT_MARKERS: dict[str, re.Pattern[str]] = {
+    "open-ended": re.compile(
+        r"(开放|由执行者(自行)?(确定|决定)|方案(自定|自行确定)|自行设计|没有给出(具体|明确)(做法|方案)"
+        r"|需要在[^。；]{0,16}之间(选|做|权衡)|自己(定|决定)(方案|做法|边界))"
+    ),
+    "hidden-constraints": re.compile(
+        r"(隐蔽|不易察觉|隐含|没有明说|未明说|藏在|互相牵制|互相制约|环环相扣|牵一发动全身"
+        r"|只有[^。；]{0,12}才(知道|暴露|发现))"
+    ),
+    "architecture-level": re.compile(
+        r"(架构|整体方案|事务边界|数据所有权|所有权|分层设计|跨系统|跨库|跨端|边界划分|服务拆分)"
+    ),
+    "multi-step-debugging": re.compile(
+        r"(深水|多步调试|逐层排查|反复排查|疑难|难以复现|偶发|竞态|时序错乱|需要调试)"
+    ),
+    "cross-system-recovery": re.compile(
+        r"(跨系统|对账|补偿|双写|重启后恢复|断网后恢复|故障后恢复|人工对账)"
+    ),
+}
+# 关键设计取舍必须由题面原句体现“两条约束互相牵制”，不能只写在难度论证的自由文字里。
+TRADEOFF_MARKER_RE = re.compile(
+    r"(但|却|既要|又要|同时要|互相矛盾|互相牵制|互相制约|取舍|二选一|顾此失彼|宁可|优先级冲突)"
+)
+
 
 def _nonempty_text(value: Any, minimum: int = 12) -> bool:
     return len(_normalize(str(value or ""))) >= minimum
+
+
+def hell_prompt_markers(prompt_text: str, kinds: list[str] | None = None) -> list[str]:
+    """返回题面里能由原句支撑的地狱级信号族，只认题面文字，不看难度论证自述。"""
+    names = [name for name in (kinds or HELL_PROMPT_MARKERS.keys()) if name in HELL_PROMPT_MARKERS]
+    return sorted(name for name in names if HELL_PROMPT_MARKERS[name].search(prompt_text))
 
 
 def validate_difficulty_review(
@@ -638,16 +673,66 @@ def validate_difficulty_review(
         hell = data.get("hellSignal") if isinstance(data.get("hellSignal"), dict) else {}
         if hell.get("passed") is not True:
             errors.append("地狱题还必须提供 hellSignal.passed=true，证明题目存在开放方案判断、隐蔽约束、架构级取舍或多步深水调试")
-        kinds = hell.get("kinds")
-        if not isinstance(kinds, list) or not kinds:
+        hell_kinds = hell.get("kinds")
+        if not isinstance(hell_kinds, list) or not hell_kinds:
             errors.append("hellSignal.kinds 必须是非空数组")
+            hell_kinds = []
         else:
-            unknown = sorted({str(item) for item in kinds if str(item) not in HELL_SIGNAL_KINDS})
+            unknown = sorted({str(item) for item in hell_kinds if str(item) not in HELL_SIGNAL_KINDS})
             if unknown:
                 errors.append("hellSignal.kinds 含未知类型: " + "、".join(unknown))
         for key in ("reason", "evidence"):
             if not _nonempty_text(hell.get(key), 20):
                 errors.append(f"hellSignal 缺少至少 20 字的 {key}")
+        # 2026-09-30 G17：难度标高的真实原因是“地狱级特征”和“关键设计取舍”只写在自述里。
+        # 从本版本起，地狱必须由题面原句证明这两项，引不到题面就说明只能填困难。
+        if prompt_text:
+            clean_prompt_text = _normalize(prompt_text)
+            hell_quote_raw = str(hell.get("promptQuote") or "")
+            hell_quote = _normalize(hell_quote_raw)
+            if len(hell_quote) < 12:
+                errors.append(
+                    "地狱题必须在 hellSignal.promptQuote 里逐字引用至少 12 字的题面原句，"
+                    "证明开放方案判断、隐蔽约束、架构级取舍或多步深水调试；引不到题面就改填「困难」"
+                )
+            elif hell_quote not in clean_prompt_text:
+                errors.append(
+                    f"hellSignal.promptQuote 不是题面原句，无法核对：{hell_quote_raw}"
+                    "；引不到题面原句就改填「困难」"
+                )
+            elif not [
+                name
+                for name in hell_kinds
+                if str(name) in HELL_PROMPT_MARKERS
+                and HELL_PROMPT_MARKERS[str(name)].search(hell_quote_raw)
+            ]:
+                errors.append(
+                    "hellSignal.promptQuote 没有体现所声明的地狱级特征（"
+                    + "、".join(str(item) for item in hell_kinds)
+                    + "）；题面本身看不出地狱级特征时请改填「困难」"
+                )
+            tradeoff_quote_raw = str(tradeoff.get("promptQuote") or "")
+            tradeoff_quote = _normalize(tradeoff_quote_raw)
+            if not passed["designTradeoff"]:
+                errors.append(
+                    "地狱题必须同时满足关键设计取舍；题面只是在同一个子系统里做确定性排布或"
+                    "多步实现时请改填「困难」"
+                )
+            elif len(tradeoff_quote) < 12:
+                errors.append(
+                    "地狱题必须在 signals.designTradeoff.promptQuote 里逐字引用至少 12 字题面原句，"
+                    "证明两条业务约束互相牵制；引不到题面原句就改填「困难」"
+                )
+            elif tradeoff_quote not in clean_prompt_text:
+                errors.append(
+                    f"designTradeoff.promptQuote 不是题面原句，无法核对：{tradeoff_quote_raw}"
+                    "；引不到题面原句就改填「困难」"
+                )
+            elif not TRADEOFF_MARKER_RE.search(tradeoff_quote_raw):
+                errors.append(
+                    "designTradeoff.promptQuote 没有体现两条互相牵制的约束"
+                    "（例如题面里出现“但/却/既要…又要/取舍”）；只有确定性规则时请改填「困难」"
+                )
     if prompt_text:
         errors.extend(
             validate_difficulty_evidence(
@@ -668,6 +753,7 @@ def validate_difficulty_review(
         "passed": passed,
         "signalsPassed": passed_count,
         "ruleStackFamilies": rule_stack_families(prompt_text) if prompt_text else [],
+        "hellPromptMarkers": hell_prompt_markers(prompt_text) if prompt_text else [],
     }
 
 
