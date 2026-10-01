@@ -12,9 +12,11 @@ from common import write_json  # noqa: E402
 from prompt_tools import (  # noqa: E402
     HELL_PROMPT_MARKERS,
     MEDIUM_SHAPE_RE,
+    P3_EASY_FACET_LABELS,
     RULE_STACK_FAMILIES,
     RULE_STACK_THRESHOLD,
     hell_prompt_markers,
+    p3_easy_facets,
     rule_stack_families,
     validate_difficulty_review,
 )
@@ -80,6 +82,86 @@ TOPOLOGY_PROMPT = (
     "对账失败后保住上一次结果并允许重试，导出也能查。"
 )
 
+# 2026-10-01 真废弃样本（submission 20713，`sologsb-1115 · 昆虫标本采集记录台`）：一条自包含的
+# “分队离线记录合并回主台账”题面以「困难」提交后被平台按 P3 废弃，命中修改范围、上下文依赖、
+# 交互轮次、技术广度四项，真实难度判为中等。文本取自本次任务的提示词原文。
+P3_DISCARDED_PROMPT = (
+    "野外调查分队离线各自记标本，回营地要把各自那份合并回队里的主台账。"
+    "同一个标本编号两边都动过时，分类和采集信息认先登记的那份，鉴定结论和保藏柜位却不能被后来这份盖掉；"
+    "采集地代码相同而坐标差得远的，先摆出来让队长挑。"
+    "合并失败后这一批要整体回滚，已经并好的留着等重试，同一份记录再并一次不多出条目。"
+)
+
+# 同一道题按平台 P3 意见改硬后的形态：把状态所有权拆到分队那一份和队里编目库两侧，
+# 两边各自持有记录，合并要求跨侧对账与按侧恢复，并把改动摊到既有模块上。
+P3_HARDENED_PROMPT = (
+    "野外分队在本机离线记标本，队里的编目库是另一套台账，两边各自持有自己的记录。"
+    + P3_DISCARDED_PROMPT
+)
+
+
+def _p3_quotes(prompt: str, preferred: dict[str, str] | None = None) -> dict[str, str]:
+    """优先用给好的原句；取不到时从题面截一段，保证测试数据始终落在题面上。"""
+    preferred = preferred or {}
+    out: dict[str, str] = {}
+    for key in ("scope", "context", "rounds", "breadth"):
+        value = str(preferred.get(key) or "")
+        out[key] = value if value and value in prompt else prompt[:16]
+    return out
+
+
+def _p3_floor(
+    prompt: str,
+    *,
+    quotes: dict[str, str] | None = None,
+    hit: list[str],
+    cross_passed: bool,
+    modules: list[str] | None = None,
+    cross_quote: str = "",
+    one_round: bool = False,
+) -> dict:
+    """按真实题面拼一份 p3DifficultyFloor，避免测试里出现题面原句对不上的假数据。"""
+    quotes = _p3_quotes(prompt, quotes)
+    facets = {}
+    for key in ("scope", "context", "rounds", "breadth"):
+        quote = quotes[key]
+        assert quote in prompt, f"{key} 的测试引用必须来自题面"
+        facets[key] = {
+            "hit": key in hit,
+            "promptQuote": quote,
+            "counter": (
+                f"{P3_EASY_FACET_LABELS[key]}这一项在本题里由题面原句限定，"
+                "反证是改动要同时守住两侧各自的记录，不能靠单端一次合并收尾"
+            ),
+        }
+    return {
+        "facets": facets,
+        "crossModuleOrArchitecture": {
+            "passed": cross_passed,
+            "modules": modules or [],
+            "quote": cross_quote,
+            "whyArchitecture": (
+                "两侧各自持有记录，任一侧更新只影响本侧，合并要按侧对账并在失败后按侧恢复，"
+                "不是同一张本地规则表能顺序执行完的改动"
+            )
+            if cross_passed
+            else "",
+        },
+        "repoContextDependency": {
+            "required": True,
+            "whatMustBeRead": "既有标本、鉴定、保藏与采集地四类记录的结构和既有编号规则",
+            "evidence": "题面要求按编号比对并保护鉴定结论与柜位，必须先读懂仓库里的既有字段与约束",
+        },
+        "oneRoundEstimate": {
+            "canModelFinishInOneRound": one_round,
+            "why": (
+                "要同时改数据结构、持久化与两个既有模块的入口，并按侧恢复，一轮改不完"
+            )
+            if not one_round
+            else "题面是一条自包含的合并规则，按顺序实现一次导入加一次确认即可完成",
+        },
+    }
+
 
 def _topology_review(prompt: str = TOPOLOGY_PROMPT, *, with_topology: bool = True) -> dict:
     data = _base_review(prompt)
@@ -133,6 +215,20 @@ def _topology_review(prompt: str = TOPOLOGY_PROMPT, *, with_topology: bool = Tru
     data["mediumShapeDefense"] = (
         "题面虽然是在既有核对台上加口径，但所有权分在档案室和整理室两侧，"
         "只重算受影响的一侧并在失败后按侧恢复，靠一张本地规则表做不到"
+    )
+    owners = [name for name in ("档案室", "整理室") if name in prompt]
+    data["p3DifficultyFloor"] = _p3_floor(
+        prompt,
+        quotes={
+            "scope": "请做两次对账：整理室先给未决分数",
+            "context": "任一基准更新后只重算受影响的那一份",
+            "rounds": "对账失败后保住上一次结果并允许重试",
+            "breadth": "核对员要给档案件打分，两边口径常常对不上",
+        },
+        hit=p3_easy_facets(prompt),
+        cross_passed=bool(owners),
+        modules=owners,
+        cross_quote="档案室和整理室各有一套编目基准" if owners else "",
     )
     if with_topology:
         data["complexityTopology"] = {
@@ -211,6 +307,20 @@ def _base_review(prompt: str, *, with_evidence: bool = True, medium_defense: boo
             "题面确实是在既有编辑器上补一层遮盖，但遮盖状态由片段正文与时间码派生，"
             "正文一变就必须整体失效并重新确认，缺了这条导出就会露出原话"
         )
+    tracks = [name for name in ("原音轨", "校订轨") if name in prompt]
+    data["p3DifficultyFloor"] = _p3_floor(
+        prompt,
+        quotes={
+            "scope": "校订员来回切换对时间，常改错段或动到原音",
+            "context": "片段正文或时间码一变，原有遮盖就失效并需重新确认",
+            "rounds": "两个遮盖范围重叠时拒绝保存并指出冲突",
+            "breadth": "导出公开 SRT 时已确认范围显示已遮盖",
+        },
+        hit=p3_easy_facets(prompt),
+        cross_passed=bool(tracks),
+        modules=tracks,
+        cross_quote="点一侧片段两侧一起定位，原音轨只读，校订轨可改" if tracks else "",
+    )
     return data
 
 
@@ -224,6 +334,58 @@ class DifficultyGateTests(unittest.TestCase):
         history_path = base / "history.json"
         write_json(history_path, HISTORY_ITEMS)
         return review_path, prompt_path
+
+    def _validate(self, temp: str, review: dict, prompt: str) -> dict:
+        review_path, prompt_path = self._write(temp, review, prompt)
+        return validate_difficulty_review(
+            review_path,
+            "困难",
+            prompt_text=prompt_path.read_text(encoding="utf-8"),
+            history_path=Path(temp) / "history.json",
+        )
+
+    def test_p3_facet_detector_matches_real_discarded_prompt(self) -> None:
+        labels = [P3_EASY_FACET_LABELS[name] for name in p3_easy_facets(P3_DISCARDED_PROMPT)]
+        self.assertEqual(sorted(labels), sorted(["修改范围", "上下文依赖", "交互轮次", "技术广度"]))
+        self.assertEqual([], p3_easy_facets(HARD_PROMPT))
+        self.assertEqual([], p3_easy_facets(TOPOLOGY_PROMPT))
+
+    def test_p3_floor_missing_is_blocked(self) -> None:
+        review = _base_review(HARD_PROMPT)
+        review.pop("p3DifficultyFloor")
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._validate(temp, review, HARD_PROMPT)
+            self.assertFalse(result["ok"])
+            self.assertTrue(any("p3DifficultyFloor" in error for error in result["errors"]))
+
+    def test_p3_real_discarded_prompt_is_blocked(self) -> None:
+        review = _base_review(P3_DISCARDED_PROMPT)
+        review["p3DifficultyFloor"] = _p3_floor(
+            P3_DISCARDED_PROMPT,
+            quotes={
+                "scope": "回营地要把各自那份合并回队里的主台账",
+                "context": "同一个标本编号两边都动过时",
+                "rounds": "同一份记录再并一次不多出条目",
+                "breadth": "野外调查分队离线各自记标本",
+            },
+            hit=["scope", "context", "rounds", "breadth"],
+            cross_passed=False,
+            one_round=True,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._validate(temp, review, P3_DISCARDED_PROMPT)
+            self.assertFalse(result["ok"])
+            joined = " ".join(result["errors"])
+            self.assertIn("P3 拒收线", joined)
+            self.assertIn("自包含的合并", joined)
+            self.assertIn("canModelFinishInOneRound", joined)
+
+    def test_p3_hardened_prompt_passes(self) -> None:
+        review = _p3_hardened_review()
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._validate(temp, review, P3_HARDENED_PROMPT)
+            self.assertTrue(result["ok"], result["errors"])
+            self.assertEqual(4, len(result["p3Facets"]))
 
     def test_medium_shape_is_detected(self) -> None:
         self.assertTrue(MEDIUM_SHAPE_RE.search(MEDIUM_PROMPT))
@@ -666,3 +828,61 @@ class HellDifficultyGateTests(unittest.TestCase):
         hell_result = self._validate(hell_review, HELL_PROMPT, "地狱")
         self.assertFalse(hell_result["ok"])
         self.assertIn("hellSignal.promptQuote", " ".join(hell_result["errors"]))
+def _p3_hardened_review(prompt: str = P3_HARDENED_PROMPT) -> dict:
+    """改硬后的同一道题：题面自己给出两个持有状态的端，难度论证逐项回指题面。"""
+    data = _base_review(prompt)
+    data["platformSignals"] = {
+        "multiModule": {
+            "answer": "分队那份记录和队里的编目库各自持有状态，合并要把两侧记录收口到同一条标本编号上",
+            "promptQuote": "回营地要把各自那份合并回队里的主台账",
+            "ifViolated": "两侧各留一份记录，主台账里同一编号出现互相矛盾的两套信息",
+        },
+        "designTradeoff": {
+            "answer": "要尽量把分队那份并进来，又不能让它覆盖编目库已经采用的鉴定结论和保藏柜位",
+            "promptQuote": "鉴定结论和保藏柜位却不能被后来这份盖掉",
+            "ifViolated": "按后到覆盖会把队里已经核过的结论冲掉，标本追溯链断开",
+        },
+        "complexConcern": {
+            "answer": "跨两端合并要一次成功或整批回滚，重复并入还要去重，属于跨侧一致性与失败恢复",
+            "promptQuote": "合并失败后这一批要整体回滚",
+            "ifViolated": "中途失败会留下半截数据，重复导入还会把同一份标本记成多条",
+        },
+    }
+    data["crossObjectInvariant"] = {
+        "objects": ["标本编号", "鉴定结论", "保藏柜位"],
+        "invariant": "同一个标本编号在两侧合并后只能对应一份生效鉴定结论和一份保藏柜位，分队那份不能改写它",
+        "divergenceFailure": "两侧对不上时同一编号会同时出现两份结论与柜位，保藏记录找不到唯一归属",
+    }
+    data["substantiveComplexity"] = {
+        "kinds": ["offline-merge", "failure-recovery"],
+        "promptQuote": "野外调查分队离线各自记标本，回营地要把各自那份合并回队里的主台账",
+        "whyHard": "两侧各自持有记录，合并要选冲突字段的归属方，失败后整批回滚并允许按侧重试，缺一处就破坏唯一性",
+        "visibleFailure": "合并失败后主台账留下只有鉴定没有标本的残缺记录，重复并入把同一编号记成多条",
+    }
+    data["signals"]["complexConcern"] = {
+        "passed": True,
+        "kinds": ["offline-sync", "idempotency", "failure-recovery"],
+        "technicalRisk": "两侧各自持有记录，合并要同时落标本、鉴定和柜位，失败会留下半截数据，重复并入还会累加",
+        "observableFailure": "合并中途出错后主台账出现有鉴定记录却没有对应标本，或者同一编号挂着两条柜位记录",
+        "evidence": "题面要求失败整批回滚、已并好的留着等重试，并要求同一份记录再并一次不多出条目",
+    }
+    data["corpusEvidence"] = {
+        "nearestDiscardedId": 9001,
+        "differenceFromDiscarded": "废弃样本只是在既有卡片上做预览式批量替换，没有两侧各自持有记录，也没有冲突字段归属",
+        "nearestPassedId": 9002,
+        "borrowedComplexity": "借鉴通过样本里派生状态随上游变化失效再重新确认的做法，改到两侧记录合并与按侧恢复上",
+    }
+    data["p3DifficultyFloor"] = _p3_floor(
+        prompt,
+        quotes={
+            "scope": "回营地要把各自那份合并回队里的主台账",
+            "context": "同一个标本编号两边都动过时",
+            "rounds": "同一份记录再并一次不多出条目",
+            "breadth": "野外调查分队离线各自记标本",
+        },
+        hit=p3_easy_facets(prompt),
+        cross_passed=True,
+        modules=["野外分队", "编目库"],
+        cross_quote="队里的编目库是另一套台账，两边各自持有自己的记录",
+    )
+    return data

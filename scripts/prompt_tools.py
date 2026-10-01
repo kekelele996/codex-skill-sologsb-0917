@@ -110,6 +110,58 @@ RULE_STACK_FAMILIES: dict[str, re.Pattern[str]] = {
 # “命中四个以上”按 ≥4 执行：一个子系统里凑满四族规则就足以说明它是规则堆叠，而不是偶然多写一步。
 RULE_STACK_THRESHOLD = 4
 
+# 2026-10-01 平台规则 P3（题目难度下限）：当天 `sologsb-1115 · 昆虫标本采集记录台` 的一条数据
+# （submission 20713）以「困难」提交后被平台按 P3 废弃：“命中题目规则 P3（题目难度过于简单）……
+# 本题命中 4 项：修改范围、上下文依赖、交互轮次、技术广度……判定的题目真实难度档位为「中等」……
+# 该条数据作废，不可返修：难度是题目本身的属性”。G16/G17 回答的是“够不够难”，回答不了
+# “是不是一条自包含的合并规格”。平台把「过于简单」拆成四个可数特征，命中两项及以上一律拒收，
+# 所以本版本再补一层难度下限门禁：题面里能识别的特征必须逐项在 difficulty-review.json 里
+# 自报并给出反证；命中两项以上时还要证明它真的跨模块、模型一轮做不完，否则 `prompt` 直接阻断。
+P3_EASY_FACETS = ("scope", "context", "rounds", "breadth")
+P3_EASY_FACET_LABELS = {
+    "scope": "修改范围",
+    "context": "上下文依赖",
+    "rounds": "交互轮次",
+    "breadth": "技术广度",
+}
+# 这四组只是“提示器”，用来把题面里可能被平台判成过于简单的写法标出来，不做自动判难：
+# - scope：改动落在一条自包含流程上（把某份记录、清单、草稿或数据包合并/并账/对账回一处）
+# - context：判据被写死在题面里（同一个编号、同一份记录、按编号比对），不需要读懂仓库既有结构
+# - rounds：题面可以用一次导入加一次确认收尾，或只说“再并一次不多出条目”
+# - breadth：只在一台机器、一个端上记和存，不涉及并发、权限、容量、迁移或跨系统
+P3_FACET_HINTS: dict[str, re.Pattern[str]] = {
+    "scope": re.compile(
+        r"(?:合并|并账|对账|合入|并回|导回|汇总)[^。；！？]{0,14}(?:台账|清单|记录|草稿|备份|数据包|文件|表格)"
+        r"|(?:台账|清单|草稿|备份|数据包)[^。；！？]{0,10}(?:合并|并账|对账|合入|并回)"
+    ),
+    "context": re.compile(
+        r"(?:同一个|同一份|同编号|按编号|依据|只按)[^。；！？]{0,12}(?:编号|记录|字段|规则|条款|口径)"
+    ),
+    "rounds": re.compile(
+        r"(?:再(?:并|导|合|提)一次|重复(?:导入|并入|提交|并账)|同一份[^。；！？]{0,8}再|一次(?:导入|合并|并账))"
+    ),
+    "breadth": re.compile(
+        r"(?:离线|本机|本地|单机|一个人|各自)[^。；！？]{0,12}(?:记|存|录入|登记|填|改)"
+    ),
+}
+P3_HIT_THRESHOLD = 2
+# 平台 P3 的“修改范围”在实测里对应这种自包含形态：把一份记录/清单/草稿/数据包合并或对账回一处。
+P3_SELF_CONTAINED_RE = re.compile(
+    r"(?:合并|并账|对账|合入|并回|导回)[^。；！？]{0,14}(?:台账|清单|草稿|备份|数据包|文件|表格)"
+)
+# 允许把命中两项以上的题面救回来的跨边界写法：题面本身要出现两个各自持有状态的系统、部门、岗位或端。
+P3_CROSS_BOUNDARY_RE = re.compile(
+    r"(?:跨系统|跨库|跨端|跨部门|两个(?:系统|部门|岗位|班组|科室|库|端)|两边各自|各(?:自|管各的|维护)"
+    r"|两边|双方|两侧|各有|分区|租户|接口|服务端|并发|权限|容量|限流"
+    r"|离线[^。；！？]{0,8}多端|多端[^。；！？]{0,8}离线"
+    r"|按侧恢复|按侧重试|对账失败)"
+)
+
+
+def p3_easy_facets(prompt_text: str) -> list[str]:
+    """列出题面里能识别的“过于简单”特征，供出题人自检与留痕，不单独作为判难依据。"""
+    return sorted(name for name, pattern in P3_FACET_HINTS.items() if pattern.search(prompt_text))
+
 # complexityTopology 只认真正的跨边界拓扑。四个以上规则族命中后，题面必须能指出
 # “谁和谁各自持有状态、失败或恢复怎么发生、为什么它不是本地规则表”。
 TOPOLOGY_KIND_ALIASES: dict[str, str] = {
@@ -218,6 +270,16 @@ def _history_discard_kind(item: dict[str, Any]) -> str:
     return ""
 
 
+# 平台废弃题目时命中的规则名：G16/G17 是难度，P3 是难度下限（2026-10-01 起）。真实语料里
+# 还出现过只给“已废弃”状态、不给规则名的记录，所以 DISCARDED 也认。
+DISCARD_RULE_KINDS = {
+    "DISCARDED",
+    "G16",
+    "G17",
+    "P3",
+}
+
+
 def _history_passed(item: dict[str, Any]) -> bool:
     status = str(item.get("status") or item.get("status_label") or "")
     return "质检通过" in status or status.upper() in {"QC_PASSED", "PASSED"}
@@ -226,6 +288,7 @@ def _history_passed(item: dict[str, Any]) -> bool:
 def difficulty_signal_hints(prompt_text: str) -> dict[str, Any]:
     """记录题面里能识别到的复杂信号，只作提示与留痕，不参与判定。"""
     stacked = rule_stack_families(prompt_text)
+    easy = p3_easy_facets(prompt_text)
     return {
         "families": sorted(
             name for name, pattern in PROMPT_SIGNAL_HINTS.items() if pattern.search(prompt_text)
@@ -234,6 +297,11 @@ def difficulty_signal_hints(prompt_text: str) -> dict[str, Any]:
         "ruleStackFamilies": stacked,
         "ruleStackCount": len(stacked),
         "ruleStackBlocked": len(stacked) >= RULE_STACK_THRESHOLD,
+        "p3Facets": easy,
+        "p3FacetLabels": [P3_EASY_FACET_LABELS[name] for name in easy],
+        "p3FacetHitCount": len(easy),
+        "p3ThresholdReached": len(easy) >= P3_HIT_THRESHOLD,
+        "p3SelfContainedShape": bool(P3_SELF_CONTAINED_RE.search(prompt_text)),
     }
 
 
@@ -313,6 +381,136 @@ def _validate_complexity_topology(
         )
     if not _nonempty_text(topology.get("negativeOutcome"), 12):
         errors.append("complexityTopology.negativeOutcome 至少 12 字，写清跨界拓扑错了会出现什么可见后果")
+    return errors
+
+
+def _validate_p3_difficulty_floor(
+    data: dict[str, Any],
+    *,
+    prompt_text: str,
+    clean_prompt: str,
+) -> list[str]:
+    """平台 P3 难度下限：四项「过于简单」特征逐项自证，命中两项以上要有跨模块与一轮做不完的证据。
+
+    2026-10-01 实测：一条自包含的“分队离线记录合并回主台账”题面以「困难」提交后被平台按 P3
+    废弃，判定真实难度「中等」，理由是同时命中修改范围、上下文依赖、交互轮次、技术广度四项。
+    这一层门禁只做两件事：把题面里能识别的特征摊开要求逐项自证，命中达到拒收线时要求真的跨模块。
+    """
+    errors: list[str] = []
+    hinted = p3_easy_facets(prompt_text)
+    self_contained = bool(P3_SELF_CONTAINED_RE.search(prompt_text))
+    floor = data.get("p3DifficultyFloor")
+    if not isinstance(floor, dict):
+        errors.append(
+            "难度论证缺少 p3DifficultyFloor：平台 P3 把「过于简单」拆成修改范围、上下文依赖、"
+            "交互轮次、技术广度四项，命中两项及以上一律拒收；必须逐项引用题面原句、写清反证，"
+            "并回答要不要先读懂仓库既有结构、改动是不是跨模块或架构级、模型能不能一轮做完"
+        )
+        return errors
+
+    facets = floor.get("facets")
+    if not isinstance(facets, dict):
+        errors.append("p3DifficultyFloor.facets 必须是对象，逐项写 scope/context/rounds/breadth")
+        facets = {}
+    claimed: list[str] = []
+    for key in P3_EASY_FACETS:
+        label = P3_EASY_FACET_LABELS[key]
+        entry = facets.get(key)
+        if not isinstance(entry, dict):
+            errors.append(f"p3DifficultyFloor.facets 缺少 {key}（{label}）")
+            continue
+        if not isinstance(entry.get("hit"), bool):
+            errors.append(f"p3DifficultyFloor.facets.{key}.hit 必须是 true/false（{label} 是否命中）")
+        quote = _normalize(str(entry.get("promptQuote") or ""))
+        if len(quote) < 12:
+            errors.append(f"p3DifficultyFloor.facets.{key}.promptQuote 至少引用 12 字题面原句")
+        elif quote not in clean_prompt:
+            errors.append(
+                f"p3DifficultyFloor.facets.{key}.promptQuote 不是题面原句，无法核对："
+                f"{entry.get('promptQuote')}"
+            )
+        if not _nonempty_text(entry.get("counter"), 20):
+            errors.append(
+                f"p3DifficultyFloor.facets.{key}.counter 至少 20 字：写清 {label} 这一项为什么不成立，"
+                "或者改法已经把它抵消"
+            )
+        if entry.get("hit") is True:
+            claimed.append(key)
+
+    # 题面提示命中的项一律计入拒收线：自报未命中也要在 counter 里说清，不能靠少报躲过阈值。
+    hit_keys = sorted(set(claimed) | set(hinted))
+    hit_count = len(hit_keys)
+
+    cross = floor.get("crossModuleOrArchitecture")
+    if not isinstance(cross, dict):
+        errors.append(
+            "p3DifficultyFloor.crossModuleOrArchitecture 必填：写清本题跨了哪些既有模块、系统或岗位"
+        )
+        cross = {}
+    if not isinstance(cross.get("passed"), bool):
+        errors.append("p3DifficultyFloor.crossModuleOrArchitecture.passed 必须是 true/false")
+    modules = [str(item).strip() for item in (cross.get("modules") or []) if str(item).strip()]
+    if cross.get("passed") is True:
+        if len(modules) < 2:
+            errors.append("crossModuleOrArchitecture.modules 至少列出 2 个各自持有状态的模块、系统或岗位")
+        for name in modules:
+            if _normalize(name) not in clean_prompt:
+                errors.append(f"crossModuleOrArchitecture.modules 里的“{name}”没有出现在题面原文里")
+        quote = str(cross.get("quote") or "")
+        clean_quote = _normalize(quote)
+        if len(clean_quote) < 12:
+            errors.append("crossModuleOrArchitecture.quote 至少引用 12 字题面原句")
+        elif clean_quote not in clean_prompt:
+            errors.append(f"crossModuleOrArchitecture.quote 不是题面原句，无法核对：{quote}")
+        elif not P3_CROSS_BOUNDARY_RE.search(quote):
+            errors.append(
+                "crossModuleOrArchitecture.quote 没有体现跨模块或跨系统边界：这一句要能看出两个"
+                "各自持有状态的系统、部门、岗位或端"
+            )
+        if not _nonempty_text(cross.get("whyArchitecture"), 30):
+            errors.append("crossModuleOrArchitecture.whyArchitecture 至少 30 字")
+
+    repo_context = floor.get("repoContextDependency")
+    if not isinstance(repo_context, dict):
+        errors.append(
+            "p3DifficultyFloor.repoContextDependency 必填：写清要不要先读懂仓库既有结构、数据模型或既有约束"
+        )
+        repo_context = {}
+    if not isinstance(repo_context.get("required"), bool):
+        errors.append("p3DifficultyFloor.repoContextDependency.required 必须是 true/false")
+    if not _nonempty_text(repo_context.get("whatMustBeRead"), 20):
+        errors.append("p3DifficultyFloor.repoContextDependency.whatMustBeRead 至少 20 字")
+    if not _nonempty_text(repo_context.get("evidence"), 20):
+        errors.append("p3DifficultyFloor.repoContextDependency.evidence 至少 20 字")
+
+    one_round = floor.get("oneRoundEstimate")
+    if not isinstance(one_round, dict):
+        errors.append("p3DifficultyFloor.oneRoundEstimate 必填：写清模型能不能一轮做完")
+        one_round = {}
+    if not isinstance(one_round.get("canModelFinishInOneRound"), bool):
+        errors.append("p3DifficultyFloor.oneRoundEstimate.canModelFinishInOneRound 必须是 true/false")
+    if not _nonempty_text(one_round.get("why"), 30):
+        errors.append("p3DifficultyFloor.oneRoundEstimate.why 至少 30 字")
+
+    if hit_count >= P3_HIT_THRESHOLD:
+        labels = "、".join(P3_EASY_FACET_LABELS[name] for name in hit_keys)
+        if cross.get("passed") is not True:
+            errors.append(
+                f"题面命中「过于简单」特征 {hit_count} 项（{labels}），达到平台 P3 拒收线："
+                "必须证明改动落在两个以上既有模块或真实系统边界上，否则改成跨模块/架构级题目或换题"
+            )
+        if one_round.get("canModelFinishInOneRound") is not False:
+            errors.append(
+                f"题面命中「过于简单」特征 {hit_count} 项（{labels}）："
+                "p3DifficultyFloor.oneRoundEstimate.canModelFinishInOneRound 必须是 false，"
+                "并写清为什么一轮做不完"
+            )
+    if self_contained and cross.get("passed") is not True:
+        errors.append(
+            "题面是自包含的合并/对账规格（把一份台账、清单、草稿、备份或数据包合回一处），"
+            "正是平台 P3 判「修改范围」过于简单的形态：要么把状态所有权拆到两个以上既有模块或"
+            "真实系统，要么改题"
+        )
     return errors
 
 
@@ -399,10 +597,10 @@ def validate_difficulty_evidence(
         item = by_id.get(discarded_id_int)
         if item is None:
             errors.append(f"corpusEvidence.nearestDiscardedId={discarded_id_int} 在历史缓存里不存在")
-        elif _history_discard_kind(item) not in {"G16", "DISCARDED"}:
+        elif _history_discard_kind(item) not in DISCARD_RULE_KINDS:
             errors.append(
                 f"corpusEvidence.nearestDiscardedId={discarded_id_int} 不是被废弃的样本，"
-                "必须挑一条真实的 G16 难度废弃记录"
+                "必须挑一条真实的难度废弃记录（G16/G17/P3 或平台状态为已废弃）"
             )
     if not _nonempty_text(corpus.get("differenceFromDiscarded"), 20):
         errors.append("corpusEvidence.differenceFromDiscarded 至少 20 字，逐点写清与废弃样本的差别")
@@ -468,6 +666,11 @@ def validate_difficulty_evidence(
                 "题面命中平台“直接判为中等”的常见形态（在既有模块补视图/清单/预览/字段…），"
                 "必须在 mediumShapeDefense 里写清它不是只加一层，并给出题面依据"
             )
+
+    # 2026-10-01 一次加固：平台 P3 先判“是不是过于简单”，G16/G17 够不到这一层。
+    errors.extend(
+        _validate_p3_difficulty_floor(data, prompt_text=prompt_text, clean_prompt=clean_prompt)
+    )
 
     # 2026-09-30 三次加固：≥4 个规则族命中就说明题面是“单子系统规则堆叠”，
     # 必须用 complexityTopology 证明它真的跨了边界，否则直接阻断。
@@ -754,6 +957,10 @@ def validate_difficulty_review(
         "signalsPassed": passed_count,
         "ruleStackFamilies": rule_stack_families(prompt_text) if prompt_text else [],
         "hellPromptMarkers": hell_prompt_markers(prompt_text) if prompt_text else [],
+        "p3Facets": p3_easy_facets(prompt_text) if prompt_text else [],
+        "p3FacetLabels": (
+            [P3_EASY_FACET_LABELS[name] for name in p3_easy_facets(prompt_text)] if prompt_text else []
+        ),
     }
 
 
@@ -815,6 +1022,14 @@ def validate_candidate(
             + " 个信号族（"
             + "、".join(hints["ruleStackFamilies"])
             + "），难度论证必须补齐 complexityTopology，否则阻断"
+        )
+    if hints["p3FacetHitCount"]:
+        warnings.append(
+            "题面命中平台 P3「过于简单」特征 "
+            + str(hints["p3FacetHitCount"])
+            + " 项（"
+            + "、".join(hints["p3FacetLabels"])
+            + "），难度论证必须逐项自证 p3DifficultyFloor，命中两项以上还要证明跨模块且一轮做不完"
         )
     rigid = PROMPT_RIGID_RE.findall(clean)
     if len(rigid) > PROMPT_MAX_RIGID:

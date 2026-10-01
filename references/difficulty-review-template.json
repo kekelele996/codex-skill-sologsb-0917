@@ -90,6 +90,48 @@
     "reason": "写清为什么题面达到地狱级而不是困难，至少 20 字",
     "evidence": "写清可回指题面或源码的证据，至少 20 字"
   },
+  "p3DifficultyFloor": {
+    "facets": {
+      "scope": {
+        "hit": false,
+        "promptQuote": "逐字引用题面里与修改范围有关的原句（至少 12 字）",
+        "counter": "这一项为什么不算过于简单，或改法已经把它抵消，至少 20 字"
+      },
+      "context": {
+        "hit": false,
+        "promptQuote": "逐字引用题面里与上下文依赖有关的原句（至少 12 字）",
+        "counter": "题面没有把判据写死在同一份记录上，必须先读懂仓库既有结构，至少 20 字"
+      },
+      "rounds": {
+        "hit": false,
+        "promptQuote": "逐字引用题面里与交互轮次有关的原句（至少 12 字）",
+        "counter": "为什么不是一次导入加一次确认就能收尾，至少 20 字"
+      },
+      "breadth": {
+        "hit": false,
+        "promptQuote": "逐字引用题面里与技术广度有关的原句（至少 12 字）",
+        "counter": "为什么改动不止本机单端逻辑，至少 20 字"
+      }
+    },
+    "crossModuleOrArchitecture": {
+      "passed": true,
+      "modules": [
+        "题面里真实出现的既有模块或系统边界A",
+        "题面里真实出现的既有模块或系统边界B"
+      ],
+      "quote": "题面里体现两个持有状态的系统、部门、岗位或端的原句（至少 12 字）",
+      "whyArchitecture": "写清为什么这不是同一张本地规则表能顺序执行完的改动，至少 30 字"
+    },
+    "repoContextDependency": {
+      "required": true,
+      "whatMustBeRead": "动手前必须先读懂的既有结构、数据模型或约束，至少 20 字",
+      "evidence": "可回指源码或需求的证据，至少 20 字"
+    },
+    "oneRoundEstimate": {
+      "canModelFinishInOneRound": false,
+      "why": "写清为什么模型一轮做不完（跨模块、跨系统或需要多步调试），至少 30 字"
+    }
+  },
   "routineOnly": false,
   "verdict": "困难",
   "reviewedBy": "Codex"

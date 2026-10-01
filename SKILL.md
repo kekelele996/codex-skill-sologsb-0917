@@ -22,9 +22,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.9.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.9.0`
-- 精确提交号：运行 `git rev-parse v1.9.0` 获取。
+- 全局版本号：`1.10.0`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.10.0`
+- 精确提交号：运行 `git rev-parse v1.10.0` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -165,6 +165,7 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   挽回顺序：先按本侧真实证据复核分数，确实不到 5 分就据实下调，禁止为了占比压分；两侧证据都撑得住 5 分时，这条阻断是唯一阻断项，`preflight` 记为 `g18_full_score_deferred`，`submit_api.py` 不上传不提交，直接走 `submit_deferred` 的次日再提交路径（返回码 3，状态 `deferred_g18_full_score`），把数据留到当天计数清零后再交。
 - 2026-09-30 G16 三次加固（1.8.2，单子系统规则堆叠）：当天一条数据（`#19738`，`sologsb-1020 · 档案元数据核对台`）被平台按 G16 废弃，题面有“两套核对口径切换、未决分数失效重算、历史结论保留、关键冲突说明、批量跳过、本地保存、撤销重做、导出”，平台原话是“需要在既有核对子系统内实现多项规则，约束明确、没有架构级设计取舍”，真实难度为中等。从本版本起 `prompt_tools` 统计六个规则族（`mode-switch` 模式/口径切换、`recompute-invalidation` 失效重算、`history-retention` 历史保留、`conflict-gate` 冲突闸门、`batch-operation` 批量操作、`persist-undo-export` 保存撤销导出），命中四个以上（含四个）即判为“单子系统规则堆叠”，`validate_difficulty_review` 直接阻断，除非难度论证提供 `complexityTopology`。`complexityTopology` 必须给出 `kind`、`promptQuote`、`stateOwners`、`failureOrRecovery`、`whyNotLocalRuleList`、`negativeOutcome`；`kind` 只允许跨系统对账、失败恢复、迁移兼容、并发冲突、权限边界、容量约束、离线合并、独立所有权拆分；`state-invalidation` 不是合法拓扑类型，只有“口径更新后失效重算”不能证明困难；`promptQuote` 必须是题面原句并匹配所声明的跨边界模式；`stateOwners` 至少两个且名称必须出现在题面里；`whyNotLocalRuleList` 至少 30 字。正确改法是把状态所有权拆到两个真实系统、部门或岗位，任一侧更新只影响本侧，失败后按侧恢复；靠加规则、加按钮、加导出去凑难度一律按中等处理。复盘见 `references/lessons-learned-20260930-g16-rule-stacking.md`，样本见 `references/g16-discarded-samples.json`（`id=19738`，`shapeTag=单子系统规则堆叠`）。
 - 2026-09-30 G17 加固（1.9.0，难度不得标高）：当天一条数据（`submission 20067`，`sologsb-1117 · 蜜蜂授粉路线规划器`）以「地狱」提交后被平台判 `PENDING_FIX`，原话是“本题面判定的真实难度为「困难」……没有体现地狱级特征 —— 需求高度开放或约束隐蔽、需要架构级判断或多步复杂的调试验证、正确性依赖大量边界场景……请把任务难度改为「困难」后重新提交”。平台把三项信号拆开算：多模块整合 ✓、关键设计取舍 ✗、复杂技术关注点 ✓ → 真实难度「困难」，地狱级特征 ✗。复盘结论是“确定性排布 + 把结果同步到页面与导出”这种形态即使带事务、幂等和迁移也只到困难，而当时的本地门禁只要求 `hellSignal` 的三项自由文字自证，不回看题面。从本版本起，标「地狱」必须额外满足两条题面回指：`hellSignal.promptQuote` 至少 12 字题面原句且本身能匹配所声明的地狱类别（`HELL_PROMPT_MARKERS`：开放方案判断、隐蔽约束、架构级取舍、多步深水调试、跨系统恢复），`signals.designTradeoff.promptQuote` 至少 12 字题面原句且句内出现“但/却/既要…又要/取舍/互相牵制”这类两条约束互相牵制的表述（`TRADEOFF_MARKER_RE`）；引不到题面原句时 `validate_difficulty_review` 直接阻断并提示改填「困难」，`validate_difficulty_review` 同时返回 `hellPromptMarkers` 供自检。操作口径是**拿不准就填困难**：困难题标成地狱会被平台打回改档重提，地狱题标成困难不会被扣分。复盘见 `references/lessons-learned-20260930-g17-hell-inflation.md`。
+- 2026-10-01 P3 难度下限（1.10.0，难度只够中等也不收）：当天一条数据（`submission 20713`，`sologsb-1115 · 昆虫标本采集记录台`）以「困难」提交后被平台按 `qc_hit_rule=P3` 废弃，原话是“命中题目规则 P3（题目难度过于简单）：题目难度过于简单，不符合收录标准……本题命中 4 项……判定的题目真实难度档位为「中等」。该条数据作废，不可返修”。平台把「过于简单」拆成四项可数特征，**同时命中两项及以上一律拒收**：修改范围、上下文依赖、交互轮次、技术广度；档位说明是“自包含的合并规格，需实现冲突取舍、回滚与幂等，但无跨模块整合或架构设计”。G16/G17 回答的是“够不够难”，回答不了“是不是一条自包含的规格”，所以从本版本起难度论证必须补 `p3DifficultyFloor`：四项特征逐项给出 `hit`、题面原句 `promptQuote`（至少 12 字，回题面核对）和 `counter`（至少 20 字反证），再回答 `repoContextDependency`（要不要先读懂仓库既有结构）、`crossModuleOrArchitecture`（`modules` 与 `quote` 都必须出现在题面里）、`oneRoundEstimate`（能不能一轮做完）。提示命中的特征与自报命中合计达到两项时，必须 `crossModuleOrArchitecture.passed=true` 且 `canModelFinishInOneRound=false`；题面本身是自包含的合并/对账规格（`P3_SELF_CONTAINED_RE`）却拿不出跨模块证据时直接阻断。`validate_difficulty_review` 同时返回 `p3Facets` / `p3FacetLabels` 供自检，`corpusEvidence.nearestDiscardedId` 的可接受范围放宽到 `G16/G17/P3/DISCARDED`。复盘见 `references/lessons-learned-20261001-p3-too-easy.md`，样本见 `references/p3-discarded-samples.json`（`id=20713`，`shapeTag=自包含的合并规格`）。
 - 红线：A/B 交付完整性描述必须与本侧轨迹对应，不得出现对立意见。锚点必须在本侧原始轨迹中存在，分数和描述不得与本侧真实复核结果、引用证据、GSB 理由或 GSB 结论相反（详见 `references/delivery-scoring.md` 红线一）。本地（容器外）编写的任何测试和自动化脚本，包括验收、冒烟、Playwright、录制场景，都不参与交付完整性描述：不写进描述，不引用其证据，也不作为分数依据（红线二）。有页面的项目和之前一样引用录屏证据；纯后端 API 项目的录屏排除，改用验证计划的 `probe` 接口探活作为证据。描述和理由都直接写“请求了登录接口，返回404”这种主观直述，不写“从录屏来看”“根据编写的测试”。
 - GSB 理由不用先交代背景，开头直接写 A 侧方案做了什么；不得用“这次冲突在……”“本题冲突在……”等元描述开场。通顺度正反对照见 `references/reason-writing-rules.md` 的“2026-09-27 通顺度对照”。
 - GSB 理由与题目提示词都要写得像人话：理由按“一侧一段话”组织，相邻句不用同一称谓起头、每侧称谓最多 3 次；不写电报体，全文最多 6 句，结论前至少 2 处“结果”“导致”“但”“却”这类因果或转折衔接，不把两件事压成“先提交标题未更新”式短语，结论前必须点明判准和扣分点（2026-09-24 电报体打回后改为阻断）；句子不能以“检查”“核对”等动作直接起头而没有交代是哪一侧，两侧打平时结论统一写“因此选择Same”，不写“打平”，也不写“选A”“选B”（2026-09-25）；提示词像业务方交代需求，硬性措辞最多 3 处、分号最多 2 个，不用“刷新后……一致”式模板收尾。
@@ -248,8 +249,14 @@ python3 scripts/status_push.py uninstall
    `prompt --candidate ... --review ... --difficulty-review ...`。困难/地狱题必须先在
    `workspace/评审文件/难度论证.json` 说明多模块整合、关键设计取舍和复杂技术关注点；
    `困难` 至少满足两项且其中一项必须是后两项之一，`地狱` 三项都必须满足，
-   并额外通过 `hellSignal` 证明开放方案判断、隐蔽约束、架构级取舍或多步深水调试；
-   `routineOnly=true` 直接阻断。1.7.9 起还要先读 `references/g16-discarded-samples.json`，并从当前历史缓存里挑真实样本填 `corpusEvidence`；同时补齐 `platformSignals`（每项都要引用题面原句）、`crossObjectInvariant`（对象名必须出现在题面里）、`substantiveComplexity`（题面必须真的出现并发、失效重算、失败恢复、迁移兼容、权限边界、容量、离线合并或跨系统对账等信号）和命中中等形态时的 `mediumShapeDefense`。1.8.2 起还要先看规则堆叠：题面命中模式切换、失效重算、历史保留、冲突闸门、批量操作、保存撤销导出这六族里的四个以上时，必须补 `complexityTopology`（`kind`/`promptQuote`/`stateOwners`/`failureOrRecovery`/`whyNotLocalRuleList`/`negativeOutcome`），证明存在跨系统对账、失败恢复、迁移兼容、并发冲突、权限边界、容量约束、离线合并或独立所有权拆分中的一种真跨界拓扑，否则 `prompt` 直接阻断。1.9.0 起标「地狱」还要过题面回指：`hellSignal.promptQuote` 与 `signals.designTradeoff.promptQuote` 都必须是至少 12 字的题面原句，前者要能匹配开放方案判断、隐蔽约束、架构级取舍、多步深水调试或跨系统恢复中的一类，后者要能看出两条约束互相牵制；引不到这样的原句就改填「困难」，拿不准也一律填「困难」。审阅回合、批注去重、冲突提示和快照修订属于多步实现，不能单独作为困难或地狱证据；任何一项引不到题面都会在 `prompt` 阶段阻断。提示词必须走固定版本 `ra-人话`。
+  并额外通过 `hellSignal` 证明开放方案判断、隐蔽约束、架构级取舍或多步深水调试；
+  `routineOnly=true` 直接阻断。1.7.9 起还要先读 `references/g16-discarded-samples.json`，并从当前历史缓存里挑真实样本填 `corpusEvidence`；同时补齐 `platformSignals`（每项都要引用题面原句）、`crossObjectInvariant`（对象名必须出现在题面里）、`substantiveComplexity`（题面必须真的出现并发、失效重算、失败恢复、迁移兼容、权限边界、容量、离线合并或跨系统对账等信号）和命中中等形态时的 `mediumShapeDefense`。1.8.2 起还要先看规则堆叠：题面命中模式切换、失效重算、历史保留、冲突闸门、批量操作、保存撤销导出这六族里的四个以上时，必须补 `complexityTopology`（`kind`/`promptQuote`/`stateOwners`/`failureOrRecovery`/`whyNotLocalRuleList`/`negativeOutcome`），证明存在跨系统对账、失败恢复、迁移兼容、并发冲突、权限边界、容量约束、离线合并或独立所有权拆分中的一种真跨界拓扑，否则 `prompt` 直接阻断。1.9.0 起标「地狱」还要过题面回指：`hellSignal.promptQuote` 与 `signals.designTradeoff.promptQuote` 都必须是至少 12 字的题面原句，前者要能匹配开放方案判断、隐蔽约束、架构级取舍、多步深水调试或跨系统恢复中的一类，后者要能看出两条约束互相牵制；引不到这样的原句就改填「困难」，拿不准也一律填「困难」。审阅回合、批注去重、冲突提示和快照修订属于多步实现，不能单独作为困难或地狱证据；任何一项引不到题面都会在 `prompt` 阶段阻断。提示词必须走固定版本 `ra-人话`。
+   1.10.0 起还要过难度下限：先读 `references/p3-discarded-samples.json`，再按
+   `p3DifficultyFloor` 逐项自证修改范围、上下文依赖、交互轮次、技术广度四项「过于简单」特征
+   （每项给出 `hit`、题面原句 `promptQuote` 与 `counter` 反证），并回答 `repoContextDependency`、
+   `crossModuleOrArchitecture`、`oneRoundEstimate`。命中两项及以上时，题面必须自己写出两个持有
+   状态的系统、部门或岗位，并证明模型一轮做不完；题面是自包含的合并/对账规格却拿不出跨模块证据
+   时 `prompt` 直接阻断，只能改题面，不能改难度字段。
 3. 运行 `run --side both --candidates 2`。困难题单 attempt 默认 7200 秒；
    运行器先建立本地初始快照并拉取两份隔离源码，再并行启动两个容器无头执行，每份分别写
    原生 JSONL。candidate-1 固定使用 `auto_model/urm` 并映射 A，candidate-2 固定使用
@@ -342,6 +349,7 @@ python3 scripts/sologsb.py version                                       # 打�
 - `references/difficulty-standard.md`：困难/地狱题的 G16/G17 判定、反例与强制难度论证。
 - `references/difficulty-review-template.json`：难度论证 JSON 模板（含 1.7.9 起强制的回指与实质复杂度字段，以及 1.8.2 起强制的 `complexityTopology`）。
 - `references/g16-discarded-samples.json`：平台 G16 真实废弃题面样本，出题前必须逐条读。
+- `references/p3-discarded-samples.json`：平台 P3（题目难度过于简单）真实废弃样本，1.10.0 起出题前必须逐条读。
 - `references/workspace-layout.md`：候选目录、映射状态和 GitHub 约定。
 - `references/trace-validation.md`：单轮轨迹硬校验和语义完成审核。
 - `references/semantic-review-template.json`：A/B 语义完成审核模板。
@@ -362,6 +370,7 @@ python3 scripts/sologsb.py version                                       # 打�
 - `references/lessons-learned-20260927-angular-cache.md`：Angular `.angular/` 缓存发布污染与重建恢复。
 - `references/lessons-learned-20260930-g16-rule-stacking.md`：2026-09-30 `#19738` 单子系统规则堆叠复盘、六个规则族、`complexityTopology` 要求与正确改写边界。
 - `references/lessons-learned-20260930-g17-hell-inflation.md`：2026-09-30 `sologsb-1117` 难度标高（地狱实为困难）复盘、地狱级特征与关键设计取舍的题面原句门禁，以及“拿不准就填困难”的操作口径。
+- `references/lessons-learned-20261001-p3-too-easy.md`：2026-10-01 `sologsb-1115` 自包含合并规格被判中等的复盘、P3 四项特征、`p3DifficultyFloor` 门禁与正确改写边界。
 - `references/key-concurrency.md`：单 Key 并发、429 恢复和监控台执行门禁。
 - `references/monitor-prompt-template.md`：可直接复制到监控台的优化提示词模板。
 - `references/field-guide-template.md`：当前 schema 字段填写说明模板。
