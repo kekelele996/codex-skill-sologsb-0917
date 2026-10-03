@@ -51,7 +51,11 @@ from model_audit import (  # noqa: F401  (re-exported for callers and tests)
     ModelCallAudit,
     ModelConfigError,
     SYNTHETIC_MODELS,
+    alternating_uses_a_model,
     audit_trace_models,
+    b_alternate_policy,
+    normalize_b_alternate,
+    resolve_b_alternate,
     resolve_models,
     trace_init_model,
 )
@@ -117,11 +121,13 @@ def model_plan() -> dict[str, Any]:
     """按当前设备配置生成 A/B 模型计划（尚未锁定到任务）。"""
     try:
         resolved = resolve_models()
+        alternate = resolve_b_alternate()
     except ModelConfigError as exc:
         raise SologsbError(str(exc)) from exc
     return {
         "A": {"candidateId": "candidate-1", "model": resolved["A"], "source": resolved["sources"]["A"]},
         "B": {"candidateId": "candidate-2", "model": resolved["B"], "source": resolved["sources"]["B"]},
+        "bAlternate": alternate,
         "configPath": resolved["configPath"],
         "ignoredEnv": resolved["ignoredEnv"],
     }
@@ -141,6 +147,17 @@ def task_model_plan(state: dict[str, Any]) -> dict[str, Any] | None:
 
 def plan_models(plan: dict[str, Any]) -> dict[str, str]:
     return {side: str(plan[side]["model"]).strip() for side in SIDES}
+
+
+def plan_b_alternate(plan: dict[str, Any] | None) -> dict[str, Any]:
+    """任务里的 B 侧交替开关；老计划没有这一项时按“关闭”处理。"""
+    data = plan if isinstance(plan, dict) else {}
+    return normalize_b_alternate(data.get("bAlternate") or data.get("bFallback"))
+
+
+def alternate_model_for(plan: dict[str, Any] | None) -> str:
+    """B 侧交替时换上的模型：本任务的 A 侧模型。"""
+    return model_for_side("A", plan)
 
 
 def lock_model_plan(
@@ -165,6 +182,15 @@ def lock_model_plan(
                 f"但当前设备配置是 A={current['A']['model']}、B={current['B']['model']}（{current['configPath']}）；"
                 "同一任务不得换模型。请恢复设备配置，或为新模型新建任务。"
             )
+        if b_alternate_policy(plan_b_alternate(locked)) != b_alternate_policy(current.get("bAlternate")):
+            locked_policy = b_alternate_policy(plan_b_alternate(locked))
+            current_policy = b_alternate_policy(current.get("bAlternate"))
+            raise SologsbError(
+                "本任务已锁定 B 侧模型交替开关"
+                f"（{'开启' if locked_policy['enabled'] else '关闭'}），"
+                f"但当前设备配置是{'开启' if current_policy['enabled'] else '关闭'}；"
+                "同一任务不得中途改动这个开关。请在调度台恢复开关，或为新任务重新排队。"
+            )
     else:
         plan = current
     for side, model in wanted.items():
@@ -176,6 +202,8 @@ def lock_model_plan(
             )
     assert_models_configured(plan)
     plan = dict(plan)
+    plan["bAlternate"] = normalize_b_alternate(plan.get("bAlternate") or plan.get("bFallback"))
+    plan.pop("bFallback", None)
     plan.setdefault("lockedAt", utc_now())
     state["modelPlan"] = plan
     return plan
@@ -198,6 +226,29 @@ def model_for_candidate(candidate: str, mapped_side: str = "", plan: dict[str, A
     raise SologsbError(
         f"模型对比固定为 candidate-1=A、candidate-2=B，不支持 {candidate}"
     )
+
+
+def model_for_attempt(
+    candidate: str,
+    mapped_side: str,
+    plan: dict[str, Any] | None,
+    attempt: int,
+    attempts: int,
+) -> tuple[str, bool]:
+    """本次尝试实际使用的模型，以及它是不是交替换上的 A 侧模型。
+
+    只有 B 侧会交替：开关打开时奇数次跑 B 侧模型、偶数次跑 A 侧模型；
+    A 侧、开关关闭、以及 A/B 本就是同一个模型时都返回计划里的原模型。
+    """
+    side = str(mapped_side or CANDIDATE_SIDES.get(candidate, "")).strip().upper()
+    primary = model_for_candidate(candidate, mapped_side, plan)
+    if side != "B":
+        return primary, False
+    if alternating_uses_a_model(plan_b_alternate(plan), attempt):
+        model_a = alternate_model_for(plan)
+        if model_a and model_a != primary:
+            return model_a, True
+    return primary, False
 
 
 def _require_task_plan(task_root: Path, state: dict[str, Any]) -> dict[str, Any]:
@@ -1246,6 +1297,13 @@ GENERATED_PATH_EXCLUDES = (
     ".vite/", ".svelte-kit/", "target/", "vendor/", "__pycache__/", ".venv/", "venv/", ".cache/",
     "*.tsbuildinfo",
 )
+# Astro 把 `astro dev/build/preview` 的运行时状态写在 `.astro/` 下，而仓库本身会提交
+# `.astro/content.d.ts`、`.astro/types.d.ts`，所以不能整目录排除。这里按文件精确排除预览
+# 服务器产生的状态与日志（preview.json / preview.log），避免它们混进 A/B 产物快照。
+GENERATED_PATH_EXCLUDES_EXACT = (
+    ".astro/preview.json",
+    ".astro/preview.log",
+)
 # 锁文件不写进 .git/info/exclude：模型改了依赖清单时要随清单一起发布，
 # 没改清单时才在 stage 后撤回（见 _unstage_generated_paths）。
 BUSINESS_SOURCE_EXTENSIONS = {
@@ -1266,14 +1324,25 @@ def _install_generated_path_excludes(repo: Path) -> None:
         kept = [line for line in existing.splitlines() if not is_lockfile(line.strip())]
         # 已存在 marker 时也要补齐后续新增的生成物规则，避免旧任务沿用不完整排除清单。
         present = {line.strip() for line in kept}
-        missing = [item for item in GENERATED_PATH_EXCLUDES if item not in present]
+        missing = [
+            item
+            for item in (*GENERATED_PATH_EXCLUDES, *GENERATED_PATH_EXCLUDES_EXACT)
+            if item not in present
+        ]
         if missing:
             kept.extend(missing)
         text = "\n".join(kept).rstrip() + "\n"
         if text != existing:
             exclude.write_text(text, encoding="utf-8")
         return
-    text = existing.rstrip() + "\n\n" + marker + "\n" + "\n".join(GENERATED_PATH_EXCLUDES) + "\n"
+    text = (
+        existing.rstrip()
+        + "\n\n"
+        + marker
+        + "\n"
+        + "\n".join((*GENERATED_PATH_EXCLUDES, *GENERATED_PATH_EXCLUDES_EXACT))
+        + "\n"
+    )
     exclude.write_text(text.lstrip("\n"), encoding="utf-8")
 
 
@@ -1281,6 +1350,9 @@ def _is_generated_path(path: str) -> bool:
     parts = [part for part in Path(path).parts if part not in {"", "."}]
     name = parts[-1] if parts else ""
     generated_dirs = {item.rstrip("/") for item in GENERATED_PATH_EXCLUDES if not any(ch in item for ch in "*?[")}
+    normalized = "/".join(parts)
+    if normalized in GENERATED_PATH_EXCLUDES_EXACT:
+        return True
     return any(part in generated_dirs for part in parts) or name.endswith(".tsbuildinfo")
 
 
@@ -1630,6 +1702,8 @@ def _run_candidate_attempt(
     live: bool,
     mapped_side: str = "",
     stop_event: Any = None,
+    model_override: str = "",
+    attempts: int = 0,
 ) -> dict[str, Any]:
     initial_sha = str(state["initialSnapshot"])
     repo = _clone_candidate(task_root, state, candidate)
@@ -1643,7 +1717,10 @@ def _run_candidate_attempt(
     base_url = anthropic_base_url()
     image_digest = _ensure_image(DEFAULT_IMAGE)
     task_plan = _require_task_plan(task_root, state)
-    model = model_for_candidate(candidate, mapped_side, task_plan)
+    planned_model = model_for_candidate(candidate, mapped_side, task_plan)
+    model = str(model_override or "").strip() or planned_model
+    alternate = plan_b_alternate(task_plan)
+    alternated = bool(model != planned_model)
     container = ""
     container_slot: _ContainerReservation | None = None
     try:
@@ -1690,6 +1767,10 @@ def _run_candidate_attempt(
             "harnessVersion": harness_version,
             "model": runtime_info["model"],
             "modelname": runtime_info["model"],
+            "plannedModel": planned_model,
+            "modelAlternated": alternated,
+            "alternateModel": alternate_model_for(task_plan) if alternate["enabled"] else "",
+            "attemptsAllowed": int(attempts or attempt),
             "imageDigest": image_digest,
             "declaredContextWindow": runtime_info["contextWindow"],
             "baseUrl": runtime_info["baseUrl"],
@@ -1726,7 +1807,8 @@ def _run_candidate_attempt(
             if live:
                 _emit_live(
                     candidate,
-                    f"开始首轮 attempt={attempt} session={session_id} "
+                    f"开始首轮 attempt={attempt} session={session_id} model={model}"
+                    f"{'（与 A 侧模型交替）' if alternated else ''} "
                     f"prompt={str(state.get('promptSha256') or '')[:12]} container={container}",
                 )
             try:
@@ -2123,14 +2205,19 @@ def _run_candidate_locked(
             }
             _record_candidate_state(task_root, candidate, canceled)
             return canceled
+        attempt_model, attempt_alternated = model_for_attempt(
+            candidate, mapped_side, task_plan, attempt, attempts
+        )
         _record_candidate_state(
             task_root,
             candidate,
             {
                 "candidateId": candidate,
                 "mappedSide": mapped_side,
-                "model": model_for_candidate(candidate, mapped_side, task_plan),
-                "modelname": model_for_candidate(candidate, mapped_side, task_plan),
+                "model": attempt_model,
+                "modelname": attempt_model,
+                "plannedModel": model_for_candidate(candidate, mapped_side, task_plan),
+                "modelAlternated": attempt_alternated,
                 "status": "running",
                 "attempt": attempt,
                 "startedAt": utc_now(),
@@ -2148,6 +2235,8 @@ def _run_candidate_locked(
                 live=live,
                 mapped_side=mapped_side,
                 stop_event=stop_event,
+                model_override=attempt_model,
+                attempts=attempts,
             )
         except CandidateCancelled as exc:
             result = {
@@ -2211,6 +2300,8 @@ def _run_candidate_locked(
         "candidateId": candidate,
         "mappedSide": mapped_side,
         "attempt": attempts,
+        "model": model_for_attempt(candidate, mapped_side, task_plan, attempts, attempts)[0],
+        "plannedModel": model_for_candidate(candidate, mapped_side, task_plan),
         "status": "blocked",
         "error": f"{candidate} 连续 {attempts} 次运行均不干净: {last_error}",
         "finishedAt": utc_now(),
@@ -2253,15 +2344,22 @@ def _record_side_state(task_root: Path, side: str, record: dict[str, Any]) -> di
         sides = state.setdefault("sides", {})
         sides[side] = record
         if record.get("status") in {"staged", "clean"} and record.get("candidateId"):
+            planned = (record.get("plannedModel") or record.get("model")
+                       or model_for_side(side, task_model_plan(state)))
             state.setdefault("candidateMapping", {})[side] = {
                 "candidateId": record.get("candidateId"),
                 "candidateFolder": record.get("candidateFolder", ""),
                 "workspacePath": record.get("workspacePath", ""),
                 "completionOrder": record.get("completionOrder", 0),
                 "finishedAt": record.get("finishedAt", ""),
-                "model": record.get("model") or model_for_side(side, task_model_plan(state)),
+                # model 一律写这次真实跑完的模型；发生回退时它就是回退模型，
+                # 表单的模型名称字段直接读这里，所以必须如实。
+                "model": (record.get("model") or record.get("modelname")
+                          or model_for_side(side, task_model_plan(state))),
                 "modelname": (record.get("modelname") or record.get("model")
                               or model_for_side(side, task_model_plan(state))),
+                "plannedModel": planned,
+                "modelAlternated": bool(record.get("modelAlternated")),
             }
         if task_model_plan(state) is None:
             lock_model_plan(state)
@@ -2494,6 +2592,12 @@ def run_candidates(
         # 两侧同模型时就没有任何参数差异：这是同模型双跑，不是模型对比。
         "modelOnlyDifference": not same_model_pair(plan),
         "sameModel": same_model_pair(plan),
+        # B 侧交替：开启后 B 侧奇数次跑 B 侧模型、偶数次跑 A 侧模型。
+        "bAlternate": {
+            **plan_b_alternate(plan),
+            "alternateModel": alternate_model_for(plan),
+            "models": [plan["B"]["model"], plan["A"]["model"]],
+        },
     }
     state.update(
         {
@@ -2577,7 +2681,15 @@ def run_candidates(
     fixed = (("candidate-1", "A"), ("candidate-2", "B"))
     for candidate, side in fixed:
         result = dict(results.get(candidate) or {})
-        candidate_model = model_for_candidate(candidate, side, plan)
+        planned_model = model_for_candidate(candidate, side, plan)
+        # 表单和交付表里的模型名必须写容器真实调用的模型：B 侧走到回退时，
+        # 这里记的就是回退模型，而不是计划里的那个。
+        candidate_model = str(result.get("model") or result.get("modelname") or planned_model)
+        alternate_info = {
+            "plannedModel": planned_model,
+            "modelAlternated": bool(result.get("modelAlternated")),
+            "alternatePolicy": plan_b_alternate(plan),
+        }
         if result.get("status") == "staged":
             side_record = _side_record_from_candidate(
                 task_root=task_root,
@@ -2598,6 +2710,7 @@ def run_candidates(
                     "finishedAt": utc_now(),
                     "model": candidate_model,
                     "modelname": candidate_model,
+                    **alternate_info,
                 }
             )
             sides[side] = side_record
@@ -2609,6 +2722,7 @@ def run_candidates(
                 "finishedAt": side_record["finishedAt"],
                 "model": candidate_model,
                 "modelname": candidate_model,
+                **alternate_info,
             }
             candidate_record = dict(candidates.get(candidate) or result)
             candidate_record.update(
@@ -2619,6 +2733,7 @@ def run_candidates(
                     "finishedAt": mapping[side]["finishedAt"],
                     "model": candidate_model,
                     "modelname": candidate_model,
+                    **alternate_info,
                 }
             )
             candidates[candidate] = candidate_record
@@ -2634,6 +2749,7 @@ def run_candidates(
                 "finishedAt": utc_now(),
                 "model": candidate_model,
                 "modelname": candidate_model,
+                **alternate_info,
             }
             sides[side] = failed_record
             candidates[candidate] = failed_record

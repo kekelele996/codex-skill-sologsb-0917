@@ -54,6 +54,7 @@ from side_runner import (
     run_side,
 )
 from source_ingest import ingest_source
+from task_resume import resume_task
 from trace_validator import validate_single_round
 
 STOP_TASKS_PATH = Path(os.environ.get(
@@ -165,6 +166,7 @@ def cmd_github_init(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    """按调度台锁定的 A/B 模型与 B 侧回退策略启动候选。"""
     root = task_root_from_arg(args.task_root)
     if args.base_url:
         os.environ["SOLOSB_ANTHROPIC_BASE_URL"] = str(args.base_url).strip().rstrip("/")
@@ -538,6 +540,14 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     return 0 if cleanup_result.get("ok") else 1
 
 
+def cmd_resume(args: argparse.Namespace) -> int:
+    """解除停止名单并把被监控台关闭的任务恢复到可继续发布的状态。"""
+    root = task_root_from_arg(args.task_root)
+    result = resume_task(root, stop_path=STOP_TASKS_PATH, reason=args.reason or "")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     info = skill_version_info()
     print(json.dumps({
@@ -625,6 +635,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="调度台给本任务配置的 B 侧模型；与设备配置或已锁定计划不一致时拒绝启动",
     )
+    # 2026-10-03 早先一版提示词曾把换模型参数写进 run 命令；现在只看设备配置里的
+    # `claude.bAlternateEnabled` 开关。已经排出去的提示词可能还带着这几个参数，
+    # 这里接受但忽略，避免在跑的任务因为参数不认识直接失败。
+    run_parser.add_argument("--b-fallback-model", default="", help=argparse.SUPPRESS)
+    run_parser.add_argument("--b-fallback-after", type=int, default=-1, help=argparse.SUPPRESS)
+    run_parser.add_argument("--no-b-fallback", action="store_true", help=argparse.SUPPRESS)
     run_parser.add_argument("--force", action="store_true", help="丢弃已映射 A/B 候选的现有尝试并重跑；跨多次 force 必须手动累计实际次数")
     visibility = run_parser.add_mutually_exclusive_group()
     visibility.add_argument(
@@ -707,27 +723,45 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="检查最终本地交付")
     status.add_argument("--task-root", required=True)
-    status.set_defaults(func=cmd_status)
+    status.set_defaults(func=cmd_status, allow_stopped=True)
 
     release_claim = sub.add_parser("release-claim", help="只释放平台项目占用锁（幂等），不删容器和文件")
     release_claim.add_argument("--task-root", required=True)
     release_claim.add_argument("--if-finished", action="store_true", help="仅当已有非返修提交记录时释放")
-    release_claim.set_defaults(func=cmd_release_claim)
+    release_claim.set_defaults(func=cmd_release_claim, allow_stopped=True)
 
     cleanup = sub.add_parser("cleanup", help="清理本任务容器和验证 clone")
     cleanup.add_argument("--task-root", required=True)
     cleanup.add_argument("--keep-verify", action="store_true")
-    cleanup.set_defaults(func=cmd_cleanup)
+    cleanup.set_defaults(func=cmd_cleanup, allow_stopped=True)
+
+    resume = sub.add_parser(
+        "resume",
+        help="解除停止名单并把被监控台关闭、但 A/B 候选已 staged 的任务恢复到可继续发布",
+    )
+    resume.add_argument("--task-root", required=True)
+    resume.add_argument("--reason", default="", help="恢复原因，写入 monitor/resume.json 审计")
+    resume.set_defaults(func=cmd_resume, allow_stopped=True)
     return parser
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    stop_marker = _find_stop_marker(args)
+    # 只读与清理类命令（status / cleanup / release-claim / resume）不受停止名单约束：
+    # 任务被监控台关闭后，操作员仍要能查看现状、清理容器，并用 resume 显式恢复发布。
+    stop_marker = "" if getattr(args, "allow_stopped", False) else _find_stop_marker(args)
     if stop_marker:
         print(
-            json.dumps({"status": "stopped", "error": f"任务已在停止名单: {stop_marker}"}, ensure_ascii=False, indent=2),
+            json.dumps(
+                {
+                    "status": "stopped",
+                    "error": f"任务已在停止名单: {stop_marker}",
+                    "hint": "确认继续请先运行 resume --task-root <ROOT>；查看或清理可分别用 status、cleanup",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
             file=sys.stderr,
         )
         return 78

@@ -10,6 +10,8 @@
   不静默退回默认模型。
 - ``ModelCallAudit``：以网关实际回应为准——每条 assistant 的 ``message.model``
   与 result 的 ``modelUsage``——而不是 init 事件里客户端回显的 ANTHROPIC_MODEL。
+- ``resolve_b_alternate`` / ``alternating_uses_a_model``：B 侧两个模型交替尝试的
+  开关与“第几次尝试该跑 A 侧模型”的唯一口径，执行器和提交预检共用。
 """
 from __future__ import annotations
 
@@ -26,6 +28,10 @@ DEFAULT_MODELS = {
     "B": device_config.FIELDS["claude.modelB"][1],
 }
 MODEL_FIELDS = {"A": "claude.modelA", "B": "claude.modelB"}
+B_ALTERNATE_FIELD = "claude.bAlternateEnabled"
+# 2026-10-03 早先一版把开关放在这个字段上，读不到新字段时按旧字段兜底。
+LEGACY_B_FALLBACK_FIELD = "claude.bFallbackEnabled"
+_TRUTHY = {"1", "true", "yes", "on", "enabled", "enable", "开", "开启", "打开"}
 # 容器启动后最先写的就是 system/init 事件；只读文件头部即可拿到回显。
 MODEL_AUDIT_READ_BYTES = 256 * 1024
 
@@ -63,6 +69,74 @@ def resolve_models(path: Path | None = None) -> dict[str, Any]:
         "configPath": str(target),
         "ignoredEnv": ignored_env,
     }
+
+
+def _resolve_text(data: dict[str, Any], dotted: str, default: str = "") -> tuple[str, str]:
+    """设备配置里的一项及其来源：config > env > default，与 resolve_models 同口径。"""
+    env_name, code_default = device_config.FIELDS.get(dotted, (None, ""))
+    from_file = str(device_config.get_path(data, dotted) or "").strip()
+    if from_file:
+        return from_file, "config"
+    from_env = str(os.environ.get(env_name, "") or "").strip() if env_name else ""
+    if from_env:
+        return from_env, "env"
+    return str(default if default != "" else code_default), "default"
+
+
+def resolve_b_alternate(path: Path | None = None) -> dict[str, Any]:
+    """B 侧交替开关：打开后 B 侧两个模型交替尝试。
+
+    奇数次尝试跑 ``claude.modelB``，偶数次跑 ``claude.modelA``；只有一个布尔开关，
+    不额外配置模型名。关闭时行为与改动前完全一致（B 侧只用 ``claude.modelB``）。
+    """
+    target = Path(path) if path is not None else device_config.config_path()
+    try:
+        data = device_config.load(target)
+    except device_config.ConfigError as exc:
+        raise ModelConfigError(f"设备配置无法读取，拒绝用默认交替开关顶替：{exc}") from exc
+    enabled_text, enabled_source = _resolve_text(data, B_ALTERNATE_FIELD, "")
+    if enabled_source == "default":
+        # 新字段完全没写（配置和环境变量都没有）时才看早先一版的字段名。
+        enabled_text, enabled_source = _resolve_text(data, LEGACY_B_FALLBACK_FIELD, "0")
+    return {
+        "enabled": enabled_text.strip().lower() in _TRUTHY,
+        "source": {"enabled": enabled_source},
+    }
+
+
+def normalize_b_alternate(fallback: Any) -> dict[str, Any]:
+    """把任意来源（state.modelPlan.bAlternate）归一成一个只读开关字典。"""
+    data = fallback if isinstance(fallback, dict) else {}
+    source = data.get("source") if isinstance(data.get("source"), dict) else {}
+    return {
+        "enabled": bool(data.get("enabled")),
+        "source": {"enabled": str(source.get("enabled") or "")},
+    }
+
+
+def b_alternate_policy(fallback: Any) -> dict[str, Any]:
+    """只保留开关状态，用于比较“任务锁定策略”与“当前设备配置”。"""
+    return {"enabled": normalize_b_alternate(fallback)["enabled"]}
+
+
+def alternating_uses_a_model(fallback: Any, attempt: int) -> bool:
+    """这一次尝试该不该跑 A 侧模型。
+
+    开关打开时，第 1、2 次先用 A 侧模型；从第 3 次起两个模型交替——
+    第 3 次跑 B 侧模型、第 4 次跑 A 侧模型、第 5 次回到 B 侧模型，如此往复。
+    开关关闭时恒为 False（B 侧只跑 ``claude.modelB``）。
+    """
+    if not normalize_b_alternate(fallback)["enabled"]:
+        return False
+    try:
+        number = int(attempt)
+    except (TypeError, ValueError):
+        return False
+    if number < 1:
+        return False
+    if number <= 2:
+        return True
+    return number % 2 == 0
 
 
 def trace_init_model(path: Path | None) -> str:

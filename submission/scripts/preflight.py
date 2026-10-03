@@ -36,7 +36,11 @@ for _parent in Path(__file__).resolve().parents:
         break
 import device_config as _device_config  # noqa: E402
 from common import LOCKFILE_NAMES, SologsbError, ensure_single_side_trace, paired_lockfiles  # noqa: E402
-from model_audit import audit_trace_models  # noqa: E402
+from model_audit import (  # noqa: E402
+    alternating_uses_a_model,
+    audit_trace_models,
+    b_alternate_policy,
+)
 
 _device_config.load_and_apply()
 
@@ -1348,7 +1352,7 @@ def read_excel(path: Path, schema: dict) -> dict:
         result["errors"].append("Excel 表头顺序与页面字段快照不一致")
     for field in schema.get("fields") or []:
         label = str(field.get("label") or "")
-        if field.get("required") and not values.get(label, "").strip():
+        if (field.get("is_required") or field.get("required")) and not values.get(label, "").strip():
             result["missingRequired"].append(label)
     result["ok"] = not result["errors"] and not result["missingRequired"]
     return result
@@ -1356,7 +1360,10 @@ def read_excel(path: Path, schema: dict) -> dict:
 
 def compare_excel(excel: dict, expected: dict, schema: dict) -> list[str]:
     mismatches = []
-    by_label = {str(item.get("label") or ""): item.get("key") for item in schema.get("fields") or []}
+    by_label = {
+        str(item.get("label") or ""): (item.get("field_key") or item.get("key"))
+        for item in schema.get("fields") or []
+    }
     for key, target in expected.items():
         label = next((label for label, candidate in by_label.items() if candidate == key), "")
         if not label:
@@ -1666,48 +1673,130 @@ def classify_change_volume_line_gate(
     }
 
 
+def alternating_expected_model(plan: dict, side: str, attempt: int) -> tuple[str, bool]:
+    """本侧第 attempt 次尝试按规则该跑哪个模型；返回 (模型, 是否交替换到 A 侧)。"""
+    planned = str((plan.get(side) or {}).get("model") or "").strip()
+    if side != "B":
+        return planned, False
+    switch = b_alternate_policy(plan.get("bAlternate") or plan.get("bFallback"))
+    if not switch["enabled"] or not alternating_uses_a_model({"enabled": True}, attempt):
+        return planned, False
+    model_a = str((plan.get("A") or {}).get("model") or "").strip()
+    if model_a and model_a != planned:
+        return model_a, True
+    return planned, False
+
+
 def model_evidence_check(task_root: Path, state: dict) -> dict:
-    """红线：A/B 交付轨迹里网关实际回应的模型必须等于本任务锁定的模型。
+    """红线：A/B 交付轨迹里网关实际回应的模型必须等于该次尝试应跑的模型。
 
     不信任 state 里写下的 model 字段，直接从两侧交付轨迹复算
     （assistant.message.model / modelUsage），与 modelPlan 逐侧比对。
     模型计划锁定机制上线前开跑（modelPlan 没有 lockedAt）的旧任务只提示不阻断。
+
+    2026-10-03 起 B 侧可以两个模型交替跑：开关打开时奇数次尝试跑 B 侧模型、
+    偶数次跑 A 侧模型。这里按“这次尝试该跑哪个模型”复核轨迹，
+    交付的这次尝试与规则一致才算通过。
     """
     plan = state.get("modelPlan") if isinstance(state.get("modelPlan"), dict) else {}
     sides = state.get("sides") if isinstance(state.get("sides"), dict) else {}
     legacy = not plan.get("lockedAt")
-    evidence: dict = {"plan": {side: (plan.get(side) or {}).get("model") for side in ("A", "B")}, "sides": {}}
+    switch = b_alternate_policy(plan.get("bAlternate") or plan.get("bFallback"))
+    evidence: dict = {
+        "plan": {side: (plan.get(side) or {}).get("model") for side in ("A", "B")},
+        "bAlternate": {**switch, "alternateModel": str((plan.get("A") or {}).get("model") or "")},
+        "sides": {},
+    }
     problems: list[str] = []
     for side in ("A", "B"):
         record = sides.get(side) if isinstance(sides.get(side), dict) else {}
-        expected = str((plan.get(side) or {}).get("model") or "").strip()
-        recorded = str(record.get("model") or "").strip()
-        if not expected:
+        planned = str((plan.get(side) or {}).get("model") or "").strip()
+        if not planned:
             problems.append(f"{side} 侧缺少锁定模型")
             continue
+        attempt = _as_int(record.get("attempt")) or 1
+        expected, alternated = alternating_expected_model(plan, side, attempt)
+        recorded = str(record.get("model") or "").strip()
         if recorded and recorded != expected:
-            problems.append(f"{side} 侧记录模型 {recorded} ≠ 锁定模型 {expected}")
+            problems.append(
+                f"{side} 侧记录模型 {recorded} ≠ 第 {attempt} 次尝试应跑的模型 {expected}"
+            )
         result = audit_trace_models(Path(str(record.get("tracePath") or "")).expanduser(), expected)
         evidence["sides"][side] = {
+            "planned": planned,
             "expected": expected,
             "recorded": recorded,
+            "attempt": attempt,
+            "alternated": alternated,
             "responseModels": result.get("responseModels"),
             "tracePath": result.get("path") or str(record.get("tracePath") or ""),
             "ok": result.get("ok"),
         }
         if not result.get("ok"):
             violation = result.get("violation") or {}
+            label = "该次尝试的 A 侧模型" if alternated else "该次尝试的锁定模型"
             problems.append(
-                f"{side} 侧轨迹实际模型「{violation.get('observed') or '无'}」≠ 锁定模型 {expected}"
+                f"{side} 侧轨迹实际模型「{violation.get('observed') or '无'}」≠ {label} {expected}"
                 f"（{violation.get('source') or ''}{'；' + violation['detail'] if violation.get('detail') else ''}"
                 f"{result.get('error') or ''}）"
             )
+    flat = "A/B 轨迹实际调用模型与本次尝试应跑的模型一致"
+    side_b = evidence["sides"].get("B") or {}
+    if side_b.get("alternated"):
+        flat += f"（B 侧第 {side_b.get('attempt')} 次尝试交替换跑 A 侧模型）"
+    message = flat if not problems else "A/B 模型证据不通过：" + "；".join(problems)
+    return {"ok": not problems, "message": message, "severity": "warning" if legacy else "blocker", "evidence": evidence}
+
+
+def b_alternate_evidence_check(state: dict) -> dict:
+    """B 侧交替必须和开关、尝试序号一致，交付的模型就是那次真跑的模型。
+
+    开关关闭时 B 侧只能跑自己的模型；开关打开时第 1、3、5 次跑 B 侧模型，
+    第 2、4、6 次跑 A 侧模型，交付的那次尝试和这个规则不符就阻断。
+    """
+    plan = state.get("modelPlan") if isinstance(state.get("modelPlan"), dict) else {}
+    record = (state.get("sides") or {}).get("B") or {}
+    record = record if isinstance(record, dict) else {}
+    switch = b_alternate_policy(plan.get("bAlternate") or plan.get("bFallback"))
+    planned = str((plan.get("B") or {}).get("model") or "").strip()
+    model_a = str((plan.get("A") or {}).get("model") or "").strip()
+    attempt = _as_int(record.get("attempt")) or 1
+    delivered = str(record.get("model") or "").strip()
+    expected, alternated = alternating_expected_model(plan, "B", attempt)
+    evidence = {
+        "enabled": switch["enabled"],
+        "plannedModel": planned,
+        "alternateModel": model_a,
+        "deliveredModel": delivered,
+        "attempt": attempt,
+        "expectedModel": expected,
+        "alternated": alternated,
+        "tracePath": str(record.get("tracePath") or ""),
+    }
+    problems: list[str] = []
+    if not delivered:
+        problems.append("B 侧没有记录交付模型，无法核对交替规则")
+    elif not expected:
+        problems.append("B 侧缺少锁定模型")
+    elif delivered != expected:
+        problems.append(
+            f"B 侧交付模型 {delivered} 与第 {attempt} 次尝试应跑的模型 {expected} 不一致"
+            f"（开关{'已开启' if switch['enabled'] else '已关闭'}）"
+        )
     ok = not problems
     message = (
-        "A/B 轨迹实际调用模型与本任务锁定模型一致"
-        if ok else "A/B 模型证据不通过：" + "；".join(problems)
+        (f"B 侧第 {attempt} 次尝试交替换跑 A 侧模型 {delivered}" if alternated
+         else f"B 侧未交替，交付模型为 {delivered or planned or '未知'}")
+        if ok else "B 侧交替证据不通过：" + "；".join(problems)
     )
-    return {"ok": ok, "message": message, "severity": "warning" if legacy else "blocker", "evidence": evidence}
+    return {"ok": ok, "message": message, "severity": "blocker", "evidence": evidence}
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def main() -> int:
@@ -1859,6 +1948,14 @@ def main() -> int:
         severity=model_evidence["severity"],
         evidence=model_evidence["evidence"],
     )
+    alternate_evidence = b_alternate_evidence_check(state)
+    add(
+        "b-alternate-evidence",
+        alternate_evidence["ok"],
+        alternate_evidence["message"],
+        severity=alternate_evidence["severity"],
+        evidence=alternate_evidence["evidence"],
+    )
     add("prompt-dedup", bool(prompt_dedup) and prompt_dedup.get("decision") == "UNIQUE", f"历史 GSB 提示词去重: {prompt_dedup.get('decision') or 'BLOCKED'}", evidence={"path": str(dedup_path), "decision": prompt_dedup.get("decision"), "matches": prompt_dedup.get("matches", []), "error": history_error})
     add("gsb-reason-history", bool(reason_history), "历史 GSB 理由列表已抽取", evidence={"path": str(reason_history_path), "total": reason_history.get("total", 0)})
     reason_decision = str(reason_dedup.get("decision") or "BLOCKED")
@@ -1983,7 +2080,14 @@ def main() -> int:
     add("excel-values", not mismatches, "Excel 与 task root 当前值一致", evidence={"mismatches": mismatches})
     if mismatches:
         blockers.extend(mismatches)
-    repro_field = next((field for field in schema.get("fields") or [] if field.get("key") == "repro_level"), {})
+    repro_field = next(
+        (
+            field
+            for field in schema.get("fields") or []
+            if (field.get("field_key") or field.get("key")) == "repro_level"
+        ),
+        {},
+    )
     repro_options = {str(item) for item in repro_field.get("options") or []}
     repro_actual = str((excel.get("values") or {}).get("环境可复现等级") or "").strip()
     repro_ok = bool(repro_options) and repro_actual in repro_options
@@ -2079,7 +2183,11 @@ def main() -> int:
             add("repo-hygiene", False, "远端 Git 不可用，无法检查依赖目录和锁文件", evidence=remote)
             add("code-volume", False, "远端 Git 不可用，无法检查 G11 改动量", evidence=remote)
 
-    required = [field for field in schema.get("fields") or [] if field.get("required")]
+    required = [
+        field
+        for field in schema.get("fields") or []
+        if (field.get("is_required") or field.get("required"))
+    ]
     form = schema.get("form") or {}
     add(
         "schema-page",
@@ -2178,11 +2286,19 @@ def main() -> int:
         "b_trace": trace_results.get("B", {}).get("upload", {}),
         "b_video": video_results.get("B", {}),
     }
-    schema_fields = {field.get("key"): field for field in schema.get("fields") or []}
+    schema_fields = {
+        (field.get("field_key") or field.get("key")): field
+        for field in schema.get("fields") or []
+    }
     payload_fields = {
         str(schema_fields.get(key, {}).get("label") or key): value
         for key, value in expected.items()
-        if str(schema_fields.get(key, {}).get("type") or "") not in {"attachment", "video"}
+        if str(
+            schema_fields.get(key, {}).get("field_type")
+            or schema_fields.get(key, {}).get("type")
+            or ""
+        )
+        not in {"attachment", "video"}
     }
     payload_uploads = {
         "A-轨迹文件": {"path": trace_results.get("A", {}).get("upload", {}).get("path", ""), "kind": "trace", "sha256": trace_results.get("A", {}).get("upload", {}).get("sha256", "")},

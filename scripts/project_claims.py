@@ -417,10 +417,15 @@ def mark_claim_self_released(task_root: Path, lock_path: Path, reason: str) -> N
 def release_claim_if_finished(task_root: Path) -> dict[str, Any]:
     """Release the claim when the task's submission no longer needs it."""
     reason = claim_release_reason(task_root)
-    if not reason or reason == "task_claim_missing":
-        return {"status": "kept" if not reason else "not_found", "reason": reason}
+    if not reason:
+        return {"status": "kept", "ok": True, "reason": ""}
+    if reason == "task_claim_missing":
+        # 已经没有被占用的项目锁是正常终态：锁可能由持有进程自释放，或本任务是从
+        # 监控台关闭状态恢复后提交的。这里不要报成 not_found，避免交付输出看起来有残留。
+        return {"status": "no_claim", "ok": True, "reason": reason}
     result = release_project_claim(task_root)
     result["reason"] = reason
+    result.setdefault("ok", result.get("status") == "released")
     return result
 
 
@@ -453,7 +458,7 @@ def release_project_claim(task_root: Path) -> dict[str, Any]:
     claim_path = task_root / "monitor" / "platform-claim.json"
     claim = read_json(claim_path, {})
     if not isinstance(claim, dict) or not claim:
-        return {"status": "not_found"}
+        return {"status": "no_claim", "ok": True, "reason": "task_claim_missing"}
     base_url = str(claim.get("baseUrl") or "").strip()
     if base_url:
         with platform_selection_lock(base_url):

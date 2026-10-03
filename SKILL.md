@@ -3,7 +3,8 @@ name: sologsb-0917
 description: >
   运行 0917 期 Pair-wise GSB：同一道困难或地狱题使用完全相同的提示词并行跑两个
   独立首轮候选，仅切换 modelname：candidate-1=A=auto_model/urm，
-  candidate-2=B=ark/urm-03；随后才上传源码并初始化 GitHub 的 main/A/B 三个分支，
+  candidate-2=B=ark/urm-03（调度台开关打开时，B 侧先用 auto_model/urm 跑两次、
+  之后两个模型交替，表单按实际模型如实填写）；随后才上传源码并初始化 GitHub 的 main/A/B 三个分支，
   在两侧都通过结构校验和语义完成审核后原子发布产物，再校验真实产物，
   生成证据约束的 GSB 结论、官方当前 schema Excel、字段填写说明和两段真实运行录屏。
   用于“sologsb-0917”“Pair-wise GSB”“A/B 两次跑”“GSB 0917”等任务；技能内置审核与
@@ -22,9 +23,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 - 仓库：https://github.com/kekelele996/codex-skill-sologsb-0917
 - 跟踪分支：`main`
-- 全局版本号：`1.10.0`（语义化版本，整个技能统一只用这一个版本号）
-- 发布标签：`v1.10.0`
-- 精确提交号：运行 `git rev-parse v1.10.0` 获取。
+- 全局版本号：`1.12.1`（语义化版本，整个技能统一只用这一个版本号）
+- 发布标签：`v1.12.1`
+- 精确提交号：运行 `git rev-parse v1.12.1` 获取。
 - 机器可读版本：技能根目录的 `VERSION` 文件，是全局版本号的唯一来源；
   命令行用 `python3 scripts/sologsb.py --version` 或 `python3 scripts/sologsb.py version` 读取。
 - 改版本时只改 `VERSION` 的 `version` 与 `release_tag` 两行，再同步本节文字，
@@ -51,6 +52,10 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 ## 固定红线
 
+- 2026-10-03 B 侧先跑两次 A 侧模型再交替（1.12.0）：调度台「A / B 模型」里只有一个开关 `claude.bAlternateEnabled`（默认关闭）。打开后，B 侧不再只跑 `ark/urm-03`：第 1、2 次先用 A 侧模型 `auto_model/urm`，从第 3 次起两个模型交替——第 3、5 次跑 B 侧模型 `ark/urm-03`，第 4、6 次跑 A 侧模型 `auto_model/urm`。交替模型固定取 `claude.modelA`，不额外配置模型名，也不额外配置次数。某次尝试成功就以那次真正跑的模型交付，表单、Excel、字段说明与最终交付里的 `B-模型名称` 一律按实际使用的模型如实填写，并写明交付的是第几次尝试。开关与 A/B 模型名一起在任务首次开跑时锁进 `state.modelPlan.bAlternate`，中途改开关会在改动任何状态之前被拒绝启动；`bAlternate.enabled=false` 时（含旧任务）行为与改动前完全一致，B 侧所有尝试都只跑 `claude.modelB`。A 侧不交替，A/B 的候选编号、SessionID、容器、工作区与轨迹各自独立不变。轨迹模型审核按“这一次尝试该跑哪个模型”逐次核对：前两次必须是 A 侧模型，第 3 次起奇数次必须是 B 侧模型、偶数次必须是 A 侧模型，不是放行任意模型；提交预检新增 `b-alternate-evidence`，交付模型的尝试序号与这套规则不符、或开关关闭时交付了 A 侧模型，直接阻断。
+- 2026-10-02 监控台关闭后的恢复（1.11.0）：`run` / `record` 这类长任务必须在常驻会话或 `setsid` 独立会话里执行，禁止只 `nohup ... &` 后立即返回。执行进程被会话回收后，监控台的“长时间无进展”守卫会把任务标成 failed，并在启动新任务前关闭旧任务、把它写进 `~/.codex/sologsb-0917/stop-tasks.json`；默认 `projectReuse` 打开时同一个项目会被重新排队，导致一道题跑两遍（2026-10-02 `sologsb101-1020` 实测）。被关闭但 A/B 候选都已 staged 时用 `resume --task-root ROOT` 一步恢复：解除本任务的停止名单（写带时间戳的备份）、把状态纠正为 `semantic_review_required`、把旧状态记进 `state.reopenedFrom` 与 `monitor/resume.json`，并在 `monitor/monitor-queue-notice.json` 里列出监控台仍待办的同项目条目。恢复后按 github-init → semantic → publish → audit → gsb → record → status → submit 继续走完，不必重跑候选。停止名单只挡写入类命令：`status`、`cleanup`、`release-claim`、`resume` 一律放行；其它命令返回退出码 78 并提示先 resume。任务已有提交记录、或 A/B 未都完成结构校验时 `resume` 直接拒绝。提交成功后 `projectClaim.status` 为 `no_claim`（已无占用锁可释放）属正常终态，不需要再跑 `release-claim`。
+- 2026-10-02 取消 20:00 提交时效门禁（1.10.1）：平台已取消“当天 20:00 前产生的数据必须当天提交、20:00 后产生的数据允许次日 14:00 前提交”的时效限制，这条限制连同围绕它做的门禁一起作废。`scripts/deadline.py`、`publish` / `record` / `gsb` 各阶段的尾活预算检查、`submit --execute` 的越线拦截与退出码 4、`monitor/deadline-guard.json` 和 `g15-deadline-blocked.json` 记录、`SOLOSB_G15_*` 预算开关全部移除，提交不再因为时间越线被拒。排期时按正常流程走完发布、两次录屏、状态复核和提交即可，不需要再为 20:00 预留尾活时间。
+- 2026-10-02 交付完整性扣分依据必须落在产物侧（1.11.0）：当天一条数据（submission `22467`，`sologsb101-1020 · 碑帖拓片编目与版本比对台`）被平台按 `qc_hit_rule=G13` 退回待返修，原话是“第一次跑（A）：缺少核心要素：缺少问题出在产物的哪一处；第二次跑（B）：判定依据不在评价范围内：这一侧唯一的扣分依据是关停开发服务器的清理命令退出码为 144、中断后重跑才结束——这是验证阶段工具/进程被中断的执行侧现象，不是模型能力造成的产物缺陷，不应作为交付完整性的扣分依据”。复盘结论：非满分时的扣分依据只能是产物侧缺陷——产物复核失败（`ok=false` / `observedFailure=true`），或过程失败证据的原文明确点到本侧产物文件（说明问题出在这侧自己的代码上）。命令未找到、编辑未替换成功、清理命令被中断、退出码 127/144 一类环境或工具现象一律不能作为扣分依据；某侧确实没有产物缺陷时，按真实情况给 5 分并满足 5 分的证据要求（构建或启动通过 + 功能级通过，两条本侧通过证据）。非满分描述仍要写清问题出在哪个文件、模型做了什么、造成什么客观后果。门禁见 `scripts/gsb_tools.py` 的 `delivery_deduction_citation_ok`。
 - 所有候选必须使用同一个 UTF-8 提示词文件，发送字节逐字一致。
 - 只允许 `困难`、`地狱`；任务类型不得选择 `代码理解`。
 - 提示词不得设计成低改动量任务。困难、地狱题建议每个 A/B 至少产生 30 行非测试业务代码改动并跨至少 3 个业务文件。发布阶段仍生成 A/B 产物快照并记录行数门禁失败，平台提交前再执行最终阻断。
@@ -62,9 +67,14 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
   A/B 使用同一提示词、镜像、Base URL、上下文窗口、重试次数、超时和工具权限，唯一差异是
   模型名：candidate-1 用 A 侧模型（设备配置 `claude.modelA`，默认 `auto_model/urm`），candidate-2 用 B 侧模型
   （`claude.modelB`，默认 `ark/urm-03`），任务首次开跑即锁定。
+  B 侧交替开关打开时，candidate-2 前两次跑 `claude.modelA`，
+  从第 3 次起奇数次跑 `claude.modelB`、偶数次跑 `claude.modelA`；
+  换的只是模型名，
+  提示词、镜像、Base URL、上下文窗口、重试次数、超时和工具权限一律不变。
 - 每个候选只发送一次提示词。只要出现追问、权限询问、重复真人输入、最终 API/网络失败、
   无最终 `end_turn` 或异常退出，就必须销毁该候选工作区和容器，从本地初始快照重新 clone，
   再用新容器、新 Claude home、新 SessionID 从提示词重新开始；每个候选最多六次实际尝试（含首次）。
+  交替出来的每次尝试照样算实际尝试次数，不额外占用次数，也不因为换了模型就重置计数。
   Claude Code 自动重连不算一次新尝试，也不能替代上述重启；默认允许自动重连十次。
   已通过结构校验的候选结果保持 staged，不因另一侧失败或终止而作废。
 - A/B 不再是完成顺序竞速：candidate-1 固定映射为 A，candidate-2 固定映射为 B；
@@ -210,6 +220,9 @@ Git commit 和真实复核命令；不得用模型最终回复代替证据。
 
 A/B 模型名分别默认读取设备配置 `claude.modelA` 和 `claude.modelB`，默认值为
 `auto_model/urm` 与 `ark/urm-03`；旧字段 `claude.model` 只保留兼容用途，不参与本次 A/B 对比。
+B 侧交替开关读取同一份设备配置里的 `claude.bAlternateEnabled`（`1`/`true`/`on` 表示开启，默认 `0` 关闭）。
+打开后 B 侧先跑两次 `claude.modelA`，从第 3 次起两个模型交替（奇数次跑 `claude.modelB`、
+偶数次跑 `claude.modelA`），不需要另外配置模型名或次数；开关由调度台「A / B 模型」面板随模型名一起写入。
 
 新设备接入、更换任一凭据、或 `verify` 失败时，执行向导（会联网验证四项）：
 
@@ -224,6 +237,25 @@ SOLO2 会话失效时，运行器会用配置里的账号密码自动重新登�
 提交前会先校验会话，因此不需要人工更换 Cookie。
 
 ### 定期状态推送（可选）
+
+### 本地源码缓存（优先本地取源）
+
+设备上保存一份 Solo Manager 源码包缓存，`init --from-platform` 先查本地，命中就直接解包使用；
+只有本地没有该「项目 × 变体 × 任务类型」的包时才回退到 Manager 下载，下载成功后自动补进缓存。
+缓存按任务类型区分（同一个变体在不同 root task type 下的包内容不同），默认缓存
+`0-1代码生成` 与 `feature迭代` 两种。
+
+```bash
+python3 scripts/source_cache.py sync                      # 批量下载“我的项目”全部源码包
+python3 scripts/source_cache.py sync --project-code CODE  # 只同步一个项目
+python3 scripts/source_cache.py sync --task-types "feature迭代,0-1代码生成"
+python3 scripts/source_cache.py path --project-code CODE --task-type feature迭代
+python3 scripts/source_cache.py list                      # 查看缓存清单与缺失项
+```
+
+缓存目录 `$CODEX_HOME/sologsb-0917/source-cache/`（`packages/<projectCode>/<variantId>--<taskType>.zip`
+与索引 `manifest.json`）。清单记录 projectId、variantId、sourceAsset sha256、包 sha256 与下载时间，
+`sourceStage=local-cache` 会写进 `monitor/platform-selection.json`，便于审计这次是从本地还是从平台取的源码。
 
 `scripts/status_push.py` 把本机状态推送到 Bark：SOLO2 账号（`solo2.username`）今日 / 总提交与状态分布、
 运行中任务（本机持有的项目占用锁）、容器用量 / 上限与候选排队（与容器限流同一账本）。
@@ -263,6 +295,11 @@ python3 scripts/status_push.py uninstall
    `ark/urm-03` 并映射 B；除 `ANTHROPIC_MODEL` 外，两侧所有执行参数保持一致。
    每个候选中断、异常或没有最终 `end_turn` 时，只销毁该候选现场并重新 clone，
    最多六次实际尝试，失败尝试之间指数退避（30 秒起、上限 300 秒）；自动重连不算新尝试。
+   B 侧交替开关打开时，candidate-2 前两次尝试跑 `claude.modelA`，从第 3 次起奇数次跑
+   `claude.modelB`、偶数次跑 `claude.modelA`，每次尝试照样算实际次数；
+   每次尝试的轨迹按“这一次该跑哪个模型”核对，
+   某次通过就按那次真实模型 staged，`sides.B.model`、候选映射、表单 `B-模型名称`
+   与交付表都写这个真实模型名，并记下 `plannedModel` 与 `modelAlternated`。
    只有两侧都 staged 才能进入语义审核；单侧失败时保留已 staged 的结果并阻断整题。
    此步骤不创建 GitHub 仓库、不上传源码。
 4. 运行 `github-init`。只有 `candidateMapping` 已包含 A/B 时才允许创建公开仓库，并以原始源码
@@ -304,8 +341,11 @@ python3 scripts/status_push.py uninstall
     - 如果预检状态为 `line_gate_approval_required`，确认低于 10 行是唯一阻断项后停止提交，等待设备配置里的审批人 在真实 TTY 中运行 `approve-line-gate --task-root ROOT`；审批后重新运行 `submit --task-root ROOT --execute`。
     - 如果预检状态为 `g18_full_score_deferred`（G18 是唯一阻断项），`submit` 不会上传，返回码 3、状态 `deferred_g18_full_score`，任务登记进 `待提交`；按 `submit-deferred` 的次日夜间窗口重跑即可，不要为了绕开它压分。
     - 如果存在其他任何阻断项，直接修复后重跑，不得使用例外审批。
-13. 确认提交输出里的 `projectClaim.status` 为 `released`（或 `kept`，仅限 `PENDING_FIX`）。若为
+13. 确认提交输出里的 `projectClaim.status` 为 `released`、`kept`（仅限 `PENDING_FIX`）或 `no_claim`
+    （本任务已无占用锁可释放，属正常终态）。若为
     `release_failed`，运行 `release-claim --task-root ROOT --if-finished`；不要依赖 24 小时 TTL。
+    提交成功后若监控台队列里仍有同项目的 pending 条目，按 `monitor/monitor-queue-notice.json`
+    在监控台页面删除，避免同一道题被再跑一遍。
     提交接口已创建记录后若质检轮询中断，结果文件会先记为 `submitted_polling`，重跑 `submit` 会拒绝重复提交。
     质检默认最多等待 10 分钟、每 1 分钟查询一次；超时仍为待质检时先结束，结果记为 `submitted_qc_pending`，
     最终回复必须交代：已提交、submission id、质检尚未出结果（不是通过）、稍后去平台查看，不得重复提交。
@@ -318,6 +358,8 @@ python3 scripts/sologsb.py init --workdir DIR --task-name NAME \
 python3 scripts/sologsb.py prompt --task-root ROOT --task-type TYPE \
   --difficulty 困难 --candidate FILE --review FILE --difficulty-review DIFFICULTY_REVIEW_FILE
 python3 scripts/sologsb.py run --task-root ROOT --side both --candidates 2 --attempts 6 --base-url https://<配置的 claude.baseUrl>
+# B 侧两个模型交替由调度台开关决定（设备配置 claude.bAlternateEnabled），run 不需要额外参数：
+# 打开后 candidate-2 前两次尝试跑 auto_model/urm，之后与 ark/urm-03 交替。
 python3 scripts/sologsb.py github-init --task-root ROOT  # 候选映射完成后才可执行
 python3 scripts/sologsb.py run --task-root ROOT --side A --force  # 重跑已映射候选
 python3 scripts/sologsb.py run --task-root ROOT --side B --force  # 重跑已映射候选
@@ -330,6 +372,7 @@ python3 scripts/sologsb.py audit --task-root ROOT
 python3 scripts/sologsb.py gsb --task-root ROOT --draft FILE --review FILE
 python3 scripts/sologsb.py record --task-root ROOT --side A --plan FILE [--lock-timeout SECONDS]
 python3 scripts/sologsb.py status --task-root ROOT
+python3 scripts/sologsb.py resume --task-root ROOT [--reason TEXT]   # 监控台关闭/停止名单阻断后恢复发布
 python3 scripts/sologsb.py submit --task-root ROOT                         # 可选诊断：审核 + dry-run
 python3 scripts/sologsb.py submit --task-root ROOT --execute              # 完整审核通过后直接提交，自动记录设备配置里的审批人
 python3 scripts/sologsb.py approve-line-gate --task-root ROOT            # 仅改动量单项失败时，由设备配置里的审批人在 TTY 中批准

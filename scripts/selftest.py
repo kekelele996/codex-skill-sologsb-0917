@@ -27,10 +27,20 @@ def _isolate_device_config() -> tempfile.TemporaryDirectory:
     data.setdefault("configVersion", 1)
     claude = data.setdefault("claude", {})
     claude.update({"modelA": "auto_model/urm", "modelB": "ark/urm-03"})
+    # B 侧交替开关也是本机专属设置：测试基线统一按“关闭”跑，避免跟着本机开关漂移。
+    for key in ("bAlternateEnabled", "bFallbackEnabled", "bFallbackModel", "bFallbackAfter"):
+        claude.pop(key, None)
     path.write_text(json.dumps(data), encoding="utf-8")
     os.chmod(path, 0o600)
     os.environ["SOLOSB_CONFIG"] = str(path)
-    for name in ("SOLOSB_A_MODEL", "SOLOSB_B_MODEL"):
+    for name in (
+        "SOLOSB_A_MODEL",
+        "SOLOSB_B_MODEL",
+        "SOLOSB_B_ALTERNATE_ENABLED",
+        "SOLOSB_B_FALLBACK_ENABLED",
+        "SOLOSB_B_FALLBACK_MODEL",
+        "SOLOSB_B_FALLBACK_AFTER",
+    ):
         os.environ.pop(name, None)
     return holder
 

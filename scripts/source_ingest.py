@@ -23,6 +23,7 @@ from project_claims import (
     start_project_claim,
     sweep_finished_claims,
 )
+from source_cache import lookup as cache_lookup, store_package as cache_store
 
 
 def _load_platform_bridge():
@@ -176,8 +177,14 @@ def ingest_source(
     base_url = (platform_base_url or os.environ.get("SOLO_MANAGER_BASE_URL", "")
                 or "http://192.0.2.10:8080").rstrip("/")
     meta = {"baseUrl": base_url, "apiBaseUrl": base_url + "/api/v1"}
-    token = pb.load_manager_token()
     root = (task_root or origin.parents[1]).expanduser().resolve()
+    # 本地源码缓存优先：命中就不再访问 Manager 下载源码包。
+    cached = cache_lookup(
+        project_code=project_code,
+        project_id=project_id,
+        task_type=task_type,
+    )
+    token = "" if cached else pb.load_manager_token()
     # Must run before taking the selection lock: releasing re-enters it.
     sweep_finished_claims(base_url)
     with platform_selection_lock(base_url):
@@ -187,16 +194,41 @@ def ingest_source(
         if claim_codes:
             running_source = f"{running_source} + 项目占用锁"
         active_source = running_source or "项目锁与容器探针"
-        project, variant, origin_info = _select_platform_project(
-            pb,
-            meta,
-            token,
-            project_code=project_code,
-            project_id=project_id,
-            active_codes=active_codes,
-            active_source=active_source,
-        )
-        code = _project_code(project)
+        if cached:
+            code = str(cached.get("projectCode") or "").strip()
+            if code and code.casefold() in active_codes:
+                raise SologsbError(
+                    f"项目 {code} 已被其他会话占用或正在执行（{active_source} 判定），拒绝选取"
+                )
+            project = {
+                "id": cached.get("projectId", ""),
+                "code": code,
+                "name": cached.get("projectName", ""),
+                "businessDomain": cached.get("businessDomain", ""),
+                "category": cached.get("category", ""),
+                "readinessStatus": cached.get("readinessStatus", ""),
+            }
+            variant = {
+                "id": cached.get("variantId", ""),
+                "directoryName": cached.get("variantName", ""),
+                "languages": cached.get("languages", ""),
+            }
+            origin_info = {
+                "stage": "本地源码缓存",
+                "excludedRunning": [],
+                "runningContainerSource": active_source,
+            }
+        else:
+            project, variant, origin_info = _select_platform_project(
+                pb,
+                meta,
+                token,
+                project_code=project_code,
+                project_id=project_id,
+                active_codes=active_codes,
+                active_source=active_source,
+            )
+            code = _project_code(project)
         claim = start_project_claim(
             root,
             base_url,
@@ -205,21 +237,43 @@ def ingest_source(
         )
 
     try:
-        with tempfile.TemporaryDirectory(prefix="sologsb-platform-") as temp:
-            package_path = Path(temp) / "source-package.zip"
-            request = (
-                "/projects/"
-                + pb.urllib.parse.quote(str(project["id"]), safe="")
-                + "/variants/"
-                + pb.urllib.parse.quote(str(variant["id"]), safe="")
-                + "/source-package?"
-                + pb.urllib.parse.urlencode({"rootTaskType": task_type})
-            )
-            pb.api_download(meta, request, package_path, token)
-            extracted = Path(temp) / "extracted"
-            extract_zip_safe(package_path, extracted)
-            source_root = find_zip_source_root(extracted)
-            count = copy_tree(source_root, origin, overwrite=True)
+        if cached:
+            cached_path = Path(str(cached.get("packagePath") or ""))
+            if not cached_path.is_file():
+                raise SologsbError(f"本地缓存源码包不存在: {cached_path}")
+            with tempfile.TemporaryDirectory(prefix="sologsb-cache-") as temp:
+                extracted = Path(temp) / "extracted"
+                extract_zip_safe(cached_path, extracted)
+                source_root = find_zip_source_root(extracted)
+                count = copy_tree(source_root, origin, overwrite=True)
+        else:
+            with tempfile.TemporaryDirectory(prefix="sologsb-platform-") as temp:
+                package_path = Path(temp) / "source-package.zip"
+                request = (
+                    "/projects/"
+                    + pb.urllib.parse.quote(str(project["id"]), safe="")
+                    + "/variants/"
+                    + pb.urllib.parse.quote(str(variant["id"]), safe="")
+                    + "/source-package?"
+                    + pb.urllib.parse.urlencode({"rootTaskType": task_type})
+                )
+                pb.api_download(meta, request, package_path, token)
+                payload = package_path.read_bytes()
+                extracted = Path(temp) / "extracted"
+                extract_zip_safe(package_path, extracted)
+                source_root = find_zip_source_root(extracted)
+                count = copy_tree(source_root, origin, overwrite=True)
+            # 首次从 Manager 下载后写入本地缓存，下次直接命中。
+            try:
+                cache_store(
+                    project=project,
+                    variant=variant,
+                    task_type=task_type,
+                    payload=payload,
+                    base_url=base_url,
+                )
+            except Exception:
+                pass
     except Exception:
         release_project_claim(root)
         raise
@@ -234,6 +288,7 @@ def ingest_source(
         "variantId": variant.get("id", ""),
         "variantName": variant.get("directoryName", ""),
         "taskType": task_type,
+        "sourceStage": "local-cache" if cached else "manager",
         "candidateStage": origin_info.get("stage", ""),
         "excludedRunningProjects": origin_info.get("excludedRunning") or [],
         "runningContainerSource": origin_info.get("runningContainerSource", ""),
@@ -242,6 +297,7 @@ def ingest_source(
     }
     return {
         "mode": "platform",
+        "sourceStage": selection["sourceStage"],
         **selection,
         "platformClaim": claim,
         "platformSelection": selection,

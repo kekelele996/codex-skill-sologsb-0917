@@ -43,7 +43,13 @@ def gsb_server() -> str:
     return value
 AUDIT_HUMAN = SOLO_SCRIPTS / "audit-human-writing.py"
 EXPECTED_FINGERPRINT = "9a410bc6e129339b"
-FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+\.(?:go|js|cjs|mjs|ts|tsx|jsx|py|java|kt|rs|svelte|vue|json|ya?ml|toml|md|sql|sh|css|html|xml)")
+# 扩展名按“长在前”排序：`ts` 排在 `tsx` 前面时，把 `src/pages/CollectPage.tsx`
+# 截成 `...CollectPage.ts`，扣分引用就会因为文件名对不上本侧改动而被误判成不可引用。
+FILE_TOKEN = re.compile(
+    r"[A-Za-z0-9_./-]+\."
+    r"(?:tsx|jsx|mts|cts|cjs|mjs|svelte|json|yaml|yml|toml|html|java|vue|sql|css|xml"
+    r"|ts|js|go|py|kt|rs|md|sh)"
+)
 ERROR_TOKEN = re.compile(r"(?:Error|ERROR|panic|PANIC|npm ERR!|failed|FAILED|报错|失败)[:：]?\s*[^\n，。；;]{1,120}")
 TEST_COUNT_PATTERN = re.compile(
     r"(?:(?:后端|前端|API|接口|测试|断言|用例)[^。；，]{0,12}?\d+\s*(?:个|项|条|步|轮)|"
@@ -1225,6 +1231,45 @@ def _evidence_failed(item: dict[str, Any]) -> bool:
     return item.get("polarity") == "negative"
 
 
+def _side_changed_files(side: str, evidence_doc: dict[str, Any]) -> set[str]:
+    for item in evidence_doc.get("evidence") or []:
+        if not isinstance(item, dict) or item.get("side") != side:
+            continue
+        artifact = item.get("artifact") if isinstance(item.get("artifact"), dict) else {}
+        files = artifact.get("changedFiles")
+        if isinstance(files, list) and files:
+            return {str(name) for name in files}
+    return set()
+
+
+def delivery_deduction_citation_ok(side: str, item: dict[str, Any], evidence_doc: dict[str, Any]) -> bool:
+    """非满分时的扣分依据必须落在产物侧。
+
+    2026-10-02 实测：某侧唯一的失败证据是“关停开发服务器的清理命令返回退出码 144”，
+    本地门禁把它当成了扣分依据，平台按 G13 打回，理由是执行侧工具/进程现象不是模型
+    能力造成的产物缺陷。这里把可用的扣分依据限定为：
+
+    - 产物侧复核失败（artifact 的 ok=false / observedFailure=true），或
+    - 过程失败证据的原文里点到本侧产物文件（说明问题出在这侧自己的代码上）。
+
+    其它情况（命令未找到、编辑未匹配、清理命令被中断一类环境/工具噪声）不能作为
+    交付完整性的扣分依据；本侧确实没有产物缺陷时应按真实情况给 5 分并满足其证据要求。
+    """
+    if item.get("type") == "artifact":
+        return True
+    quote = str(((item.get("trace") or {}) or {}).get("quote") or "")
+    if not quote:
+        return False
+    changed = _side_changed_files(side, evidence_doc)
+    if not changed:
+        return False
+    changed_names = {Path(name).name for name in changed}
+    for token in FILE_TOKEN.findall(quote):
+        if token in changed or Path(token).name in changed_names:
+            return True
+    return False
+
+
 def delivery_trace_consistency_errors(
     side: str,
     score: int,
@@ -1288,13 +1333,22 @@ def delivery_trace_consistency_errors(
     has_pages = any(_is_recording(item) and _recording_mode(item) == "web" for item in evidence)
     if has_pages and any(((item.get("artifact") or {}).get("probe")) for item in cited):
         errors.append(f"{label}所在项目有页面，不做接口探活；按页面操作结果引用本侧录屏证据")
-    if score and score < 5 and not any(_evidence_failed(item) for item in cited):
-        if failed:
-            errors.append(f"{label}不给 5 分，但引用的本侧证据全是正面结果；至少引用一条能证明问题的失败证据")
-        else:
+    if score and score < 5:
+        cited_failures = [item for item in cited if _evidence_failed(item)]
+        if not cited_failures:
+            if failed:
+                errors.append(f"{label}不给 5 分，但引用的本侧证据全是正面结果；至少引用一条能证明问题的失败证据")
+            else:
+                errors.append(
+                    f"{label}不给 5 分，但本侧没有任何可引用的失败证据；纯后端 API 项目在验证计划里"
+                    "给这一侧补一条启动加 probe 接口探活后重新 verify"
+                )
+        elif not any(delivery_deduction_citation_ok(side, item, evidence_doc) for item in cited_failures):
+            noise = str(cited_failures[0].get("id") or "")
             errors.append(
-                f"{label}不给 5 分，但本侧没有任何可引用的失败证据；纯后端 API 项目在验证计划里"
-                "给这一侧补一条启动加 probe 接口探活后重新 verify，有页面的项目引用本侧录屏证据"
+                f"{label}不给 5 分，但引用的失败证据（{noise}）没有点到本侧产物文件，"
+                "属于执行侧工具或环境现象，不能作为交付完整性扣分依据（平台 G13 会打回）；"
+                "请改成产物侧缺陷，或按真实情况给 5 分并满足 5 分的证据要求"
             )
     if score == 5 and any(_evidence_failed(item) for item in cited):
         errors.append(f"{label}给 5 分却引用了本侧失败证据，分数与证据对立")
@@ -1739,6 +1793,7 @@ def build_values(task_root: Path, draft: dict[str, Any], schema: dict[str, Any])
     }
     allowed = {str(field.get("field_key")): field for field in schema.get("fields") or []}
     # 2026-09-29 官方 schema 新增两侧模型名称必填项；从原生运行状态读取实际模型。
+    # B 侧换模型回退后 sides.B.model 就是回退模型，这里如实写回退后的模型名。
     if "x_a_model_name" in allowed:
         values["x_a_model_name"] = str(side_a.get("model") or "")
     if "x_b_model_name" in allowed:
@@ -1793,8 +1848,29 @@ def write_excel(task_root: Path, schema: dict[str, Any], values: dict[str, Any])
     return output
 
 
+def model_name_note(state: dict[str, Any], side: str) -> str:
+    """B 侧某次尝试交替换跑 A 侧模型时，字段说明里交代清楚模型名是从哪来的。"""
+    record = (state.get("sides") or {}).get(side) or {}
+    if not isinstance(record, dict) or not record.get("modelAlternated"):
+        return ""
+    planned = str(record.get("plannedModel") or "").strip()
+    actual = str(record.get("model") or "").strip()
+    if not planned or not actual or planned == actual:
+        return ""
+    try:
+        attempt = int(record.get("attempt") or 0)
+    except (TypeError, ValueError):
+        attempt = 0
+    when = f"第 {attempt} 次尝试" if attempt else "其中一次尝试"
+    return (
+        f"{side} 侧实际模型：B 侧先用 A 侧模型跑两次、之后两个模型交替，交付的{when}"
+        f"跑的是 A 侧模型 {actual}（B 侧模型是 {planned}），表单按实际使用的模型填写。"
+    )
+
+
 def write_field_guide(task_root: Path, schema: dict[str, Any], values: dict[str, Any]) -> Path:
     fields = sorted(schema.get("fields") or [], key=lambda item: int(item.get("sort_order") or 0))
+    state = read_json(task_root / "monitor" / "state.json", {})
     lines = [
         "# GSB 提交字段填写说明",
         "",
@@ -1823,6 +1899,10 @@ def write_field_guide(task_root: Path, schema: dict[str, Any], values: dict[str,
             value = f"{value}<br>提交：`submit_api.py` 会上传文件，再把平台返回的对象地址写入 API payload；Excel 仍保留本地绝对路径。"
         if key in {"a_screencast", "b_screencast"}:
             value = f"{value}<br>视频规格：1280x720（720p），单段不超过 90 秒；Web 仅 Terminal.app+Chrome，终端/失败仅 Terminal.app。"
+        if key in {"x_a_model_name", "x_b_model_name"}:
+            note = model_name_note(state, "A" if key == "x_a_model_name" else "B")
+            if note:
+                value = f"{value}<br>{note}"
         lines.append(
             f"| {index} | {field.get('group', '')} | `{key}` / {field.get('label', '')} | "
             f"{field.get('field_type', '')} | {required} | {value} |"

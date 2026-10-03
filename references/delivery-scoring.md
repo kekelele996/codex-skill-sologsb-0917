@@ -97,6 +97,42 @@ G12 查重会把描述和本期已有数据比对，也会把 A、B 两段互相
 
 ## 描述怎么写
 
+### 2026-10-03 非满分的两类可引用依据（避免被 G18 逼到次日）
+
+默认档是 4 分。当天已经有别的两侧满分数据时，再交一条双满分会被 G18 作废，
+所以只要本侧确有产物侧短板，就据实给 4 分当天提交，不必等到次日；依据只有下面两类能进
+`delivery.<side>.evidenceIds`，编造依据或拿执行侧噪声顶替都会被平台按 G13 打回。
+
+1. **中途编译/测试失败**：`npx tsc --noEmit | head`、`npm test 2>&1 | tail` 这类管道命令的退出码
+   来自 `head`/`tail`，恒为 0，但输出里带着真实错误。`scripts/evidence.py` 的
+   `_tool_result_masked_failures` 已经把 `*.tsx(91,42): error TS1005`、`*.py:12:5: Error`、
+   `error TS####`、`npm ERR!`、`Traceback (most recent call last)`、`panic:`、`N failed`
+   收成 `<side>-process-error-*` 负向过程证据，原文里带产物文件路径，可直接引用；
+   引用时确认路径确实是本侧改动文件（`FILE_TOKEN` 扩展名长在前，`.tsx` 不会被截成 `.ts`）。
+2. **人工复核的代码整洁度短板**：写在 `monitor/custom-evidence.json`，挂在本侧产物快照上，
+   形如
+
+   ```json
+   {"evidence": [{
+     "id": "A-cleanliness-01",
+     "side": "A",
+     "type": "artifact",
+     "polarity": "negative",
+     "text": "代码整洁度：frontend/src/api.ts 把接口前缀重复拼接两遍，没有复用统一配置",
+     "artifact": {
+       "commit": "<本侧产物快照>", "path": "frontend/src/api.ts", "line": 12,
+       "changedFiles": ["frontend/src/api.ts"], "command": "git diff 复核",
+       "ok": false, "observedFailure": true, "output": "const url = prefix + prefix + path"
+     }
+   }]}
+   ```
+
+   这类证据必须真的看过本侧 diff 才能写，`text` 里要点名本侧改动文件；
+   `text` 不要出现 build、构建、启动、安装、编译、探活这类运行性措辞，
+   否则会被当成运行失败处理，交付完整性最高只能给 2 分。
+
+两侧都确实挑不出缺口时才给 5；命中 G18 时按 `references/g18-daily-full-score.md` 顺延到次日。
+
 1. 只写交付完整性：需求点有没有做完、代码能不能跑、有没有虚假成功。
    规划、推理、工具调用这些过程维度写进 GSB 理由，不写在这里。
 2. A、B 各写各的，按这一侧的实际情况独立组织语言，不能套同一个句式。

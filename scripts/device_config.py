@@ -29,6 +29,10 @@ FIELDS: dict[str, tuple[str | None, str]] = {
     # between A and B; both sides may also use the same model.
     "claude.modelA": ("SOLOSB_A_MODEL", "auto_model/urm"),
     "claude.modelB": ("SOLOSB_B_MODEL", "ark/urm-03"),
+    # B 侧交替开关（2026-10-03 新增）：打开后 B 侧不再只跑 claude.modelB，而是
+    # 两个模型交替尝试——奇数次用 claude.modelB，偶数次用 claude.modelA。
+    # 开关由调度台「A / B 模型」面板写进这里；关闭时保持原来的固定模型行为。
+    "claude.bAlternateEnabled": ("SOLOSB_B_ALTERNATE_ENABLED", "0"),
     "claude.image": ("SOLOSB_DOCKER_IMAGE", "adminfather/benzhi-claude-code2:20260919"),
     "claude.contextWindow": ("SOLOSB_CONTEXT_WINDOW", "1000000"),
     # 容器上限由 side_runner 动态优先读取本字段；环境变量仅作为字段缺失时的回退。

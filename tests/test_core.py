@@ -66,6 +66,7 @@ from project_claims import (
     release_project_claim,
     start_project_claim,
 )  # noqa: E402
+from task_resume import monitor_queue_notice, remove_stop_marker, resume_task  # noqa: E402
 import source_ingest  # noqa: E402
 from source_ingest import ingest_source  # noqa: E402
 from github_repo import (
@@ -967,6 +968,98 @@ class DeliveryFieldTests(unittest.TestCase):
         self.assertTrue(any("逐条核对了" in item for item in no_basis), no_basis)
         no_edge = self._errors(self._draft(B={"description": "逐条核对了选择行程、存草稿、发起人发布和冻结标题四项需求，构建和启动都通过，发布状态一致。"}))
         self.assertTrue(any("隐性需求或边界处理" in item for item in no_edge), no_edge)
+
+    def _snapshot(self, side: str, files: list[str]) -> dict:
+        return {
+            "id": f"{side}-artifact-snapshot",
+            "side": side,
+            "type": "artifact",
+            "polarity": "neutral",
+            "text": f"{side} 产物快照",
+            "artifact": {"commit": "c" * 40, "changedFiles": files},
+        }
+
+    def _process_error(self, id_: str, side: str, quote: str) -> dict:
+        return {
+            "id": id_,
+            "side": side,
+            "type": "process",
+            "polarity": "negative",
+            "text": "工具调用返回错误",
+            "trace": {"tracePath": str(self.trace_a), "quote": quote},
+        }
+
+    def test_deduction_cannot_rest_on_execution_side_noise(self) -> None:
+        """2026-10-02 实测：拿“清理命令退出码 144”当扣分依据会被平台按 G13 打回。"""
+        evidence = self._evidence(
+            extra=[
+                self._snapshot("A", ["frontend/src/api.ts"]),
+                self._process_error("A-process-error-0144", "A", "Exit code 144"),
+            ]
+        )
+        draft = self._draft("Same", A={"score": 4, "evidenceIds": ["A-process-error-0144"]})
+        errors = validate_delivery(draft, evidence, self.REASON)["errors"]
+        self.assertTrue(any("不能作为交付完整性扣分依据" in item for item in errors), errors)
+
+    def test_deduction_from_process_error_pointing_at_own_file_is_allowed(self) -> None:
+        evidence = self._evidence(
+            extra=[
+                self._snapshot("A", ["frontend/src/api.ts"]),
+                self._process_error("A-process-error-0354", "A", "src/api.ts(12,3): error TS2550: bad call"),
+            ]
+        )
+        draft = self._draft("Same", A={"score": 4, "evidenceIds": ["A-process-error-0354"]})
+        errors = validate_delivery(draft, evidence, self.REASON)["errors"]
+        self.assertFalse(any("不能作为交付完整性扣分依据" in item for item in errors), errors)
+
+    @staticmethod
+    def _cleanliness_finding(id_: str, side: str, path: str, text: str, output: str) -> dict:
+        """人工复核过的代码整洁度发现：挂在产物快照上，可当作产物侧扣分依据引用。"""
+        return {
+            "id": id_,
+            "side": side,
+            "type": "artifact",
+            "polarity": "negative",
+            "text": text,
+            "artifact": {
+                "commit": "c" * 40,
+                "path": path,
+                "line": 12,
+                "changedFiles": [path],
+                "command": "git diff 复核",
+                "ok": False,
+                "observedFailure": True,
+                "output": output,
+            },
+        }
+
+    def test_code_cleanliness_finding_can_be_cited_for_deduction(self) -> None:
+        """默认档是 4 分：本侧确有整洁度短板时据实下调，当天即可提交。"""
+        finding = self._cleanliness_finding(
+            "A-cleanliness-01",
+            "A",
+            "frontend/src/api.ts",
+            "代码整洁度：frontend/src/api.ts 把接口前缀重复拼接两遍，没有复用统一配置",
+            "const url = prefix + prefix + path",
+        )
+        evidence = self._evidence(extra=[self._snapshot("A", ["frontend/src/api.ts"]), finding])
+        draft = self._draft(A={"score": 4, "evidenceIds": ["A-cleanliness-01"]})
+        errors = validate_delivery(draft, evidence, self.REASON)["errors"]
+        self.assertFalse(any("不能作为交付完整性扣分依据" in item for item in errors), errors)
+        self.assertFalse(any("没有任何可引用的失败证据" in item for item in errors), errors)
+
+    def test_code_cleanliness_finding_blocks_full_score(self) -> None:
+        finding = self._cleanliness_finding(
+            "A-cleanliness-02",
+            "A",
+            "frontend/src/api.ts",
+            "代码整洁度：frontend/src/api.ts 里同一段前缀拼接重复了两遍",
+            "const url = prefix + prefix + path",
+        )
+        evidence = self._evidence(extra=[self._snapshot("A", ["frontend/src/api.ts"]), finding])
+        draft = self._draft(A={"score": 5, "evidenceIds": ["A-artifact-check-02", "A-cleanliness-02"]})
+        errors = validate_delivery(draft, evidence, self.REASON)["errors"]
+        self.assertTrue(any("复核存在失败项" in item for item in errors), errors)
 
     def test_quality_is_required_and_anchored(self) -> None:
         draft = self._draft()
@@ -2080,7 +2173,10 @@ class ProjectClaimTests(unittest.TestCase):
                 self.assertEqual(released["status"], "released")
                 self.assertEqual(released["reason"], "submitted:QC_PASSED")
                 self.assertEqual(claimed_project_codes("http://platform.test"), set())
-                self.assertEqual(release_claim_if_finished(root)["status"], "not_found")
+                # 锁已释放后再查是正常终态，不能再报成 not_found，否则交付输出看起来像有残留
+                no_claim = release_claim_if_finished(root)
+                self.assertEqual(no_claim["status"], "no_claim")
+                self.assertTrue(no_claim["ok"])
 
     def test_claim_holder_exits_on_its_own_after_submission(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -4810,3 +4906,112 @@ class SameModelPairTests(unittest.TestCase):
                                                "lockedAt": "2026-09-30T00:00:00Z"}}
         result = preflight.model_evidence_check(root, state)
         self.assertTrue(result["ok"], result)
+
+
+class TaskResumeTests(unittest.TestCase):
+    """监控台关闭任务后按 resume 恢复，不再靠手工改 state.json 和停止名单。"""
+
+    @staticmethod
+    def _write_state(root: Path, *, status: str, both_staged: bool = True) -> None:
+        sides = {
+            "A": {"status": "staged" if both_staged else "running", "candidateId": "candidate-1"},
+            "B": {"status": "staged", "candidateId": "candidate-2"},
+        }
+        write_json(
+            root / "monitor" / "state.json",
+            {
+                "schemaVersion": 1,
+                "status": status,
+                "taskName": "sologsb-test-resume",
+                "taskRoot": str(root),
+                "closedBy": "sologsb-monitor-guard",
+                "closedReason": "60 分钟没有任何写入",
+                "closedAt": "2026-10-02T00:00:00Z",
+                "candidateMapping": {
+                    "A": {"candidateId": "candidate-1"},
+                    "B": {"candidateId": "candidate-2"},
+                },
+                "sides": sides,
+                "source": {"projectCode": "gb-14-1"},
+            },
+        )
+
+    def test_resume_reopens_closed_task_and_clears_stop_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "task"
+            self._write_state(root, status="failed")
+            stop = base / "stop-tasks.json"
+            write_json(
+                stop,
+                {"tasks": ["sologsb-test-resume", "other-task"], "guard": {"sologsb-test-resume": {"policy": "no-progress"}}},
+            )
+            result = resume_task(root, stop_path=stop, reason="监控台关闭后恢复")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["status"], "semantic_review_required")
+            self.assertEqual(result["previousStatus"], "failed")
+            self.assertTrue(result["reopened"])
+            self.assertTrue(result["stopList"]["removed"])
+            self.assertTrue(Path(result["stopList"]["backup"]).is_file())
+            remaining = json.loads(stop.read_text(encoding="utf-8"))
+            self.assertEqual(remaining["tasks"], ["other-task"])
+            self.assertNotIn("sologsb-test-resume", remaining.get("guard") or {})
+            state = read_json(root / "monitor" / "state.json", {})
+            self.assertEqual(state["status"], "semantic_review_required")
+            self.assertNotIn("closedBy", state)
+            self.assertEqual(state["reopenedFrom"]["status"], "failed")
+            self.assertTrue((root / "monitor" / "resume.json").is_file())
+            self.assertTrue((root / "monitor" / "monitor-queue-notice.json").is_file())
+
+    def test_resume_refuses_when_a_side_not_finished(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "task"
+            self._write_state(root, status="failed", both_staged=False)
+            stop = base / "stop-tasks.json"
+            write_json(stop, {"tasks": []})
+            with self.assertRaises(SologsbError):
+                resume_task(root, stop_path=stop)
+
+    def test_resume_refuses_when_submission_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "task"
+            self._write_state(root, status="failed")
+            write_json(
+                root / "monitor" / "submission" / "api-result.json",
+                {"submissionId": "7356", "statusValue": "QC_PASSED"},
+            )
+            stop = base / "stop-tasks.json"
+            write_json(stop, {"tasks": []})
+            with self.assertRaises(SologsbError):
+                resume_task(root, stop_path=stop)
+
+    def test_monitor_queue_notice_reports_pending_same_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "task"
+            (root / "monitor").mkdir(parents=True)
+            queue = base / "queue.json"
+            write_json(
+                queue,
+                {
+                    "items": [
+                        {"id": "q-1", "projectCode": "gb-14-1", "status": "pending", "taskName": "again", "addedAt": "t"},
+                        {"id": "q-2", "projectCode": "gb-14-1", "status": "failed"},
+                        {"id": "q-3", "projectCode": "other", "status": "pending"},
+                    ]
+                },
+            )
+            notice = monitor_queue_notice(root, "gb-14-1", queue)
+            self.assertTrue(notice["found"])
+            self.assertEqual([item["id"] for item in notice["pendingItems"]], ["q-1"])
+            self.assertTrue((root / "monitor" / "monitor-queue-notice.json").is_file())
+
+    def test_remove_stop_marker_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            stop = Path(temp) / "stop-tasks.json"
+            write_json(stop, {"tasks": ["other-task"]})
+            first = remove_stop_marker(stop, "sologsb-test-resume")
+            self.assertFalse(first["removed"])
+            self.assertEqual(json.loads(stop.read_text(encoding="utf-8"))["tasks"], ["other-task"])

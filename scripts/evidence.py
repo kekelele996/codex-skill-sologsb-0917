@@ -63,6 +63,55 @@ def _tool_result_errors(event: dict[str, Any]) -> list[str]:
     return errors
 
 
+# 2026-10-03 加固：不少候选用 `npx tsc --noEmit | head -40`、`npm test 2>&1 | tail` 这类
+# 管道命令收口输出，管道的退出码来自 head/tail，恒为 0，真实的编译或测试失败就被掩盖了。
+# 这些失败出在本侧产物文件上，是合法的交付完整性扣分依据，必须留成可引用的失败证据，
+# 否则本地门禁会因为“本侧没有任何可引用的失败证据”把据实的非满分打分挡回去，只剩次日补交。
+MASKED_FAILURE_RES = (
+    re.compile(
+        r"[^\s:()]+\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|vue|svelte|py|go|rs|java|kt|c|cc|cpp|h|cs)"
+        r"\(\d+,\d+\):\s*error\s+[A-Za-z]+\d+"
+    ),
+    re.compile(
+        r"[^\s:()]+\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|vue|svelte|py|go|rs|java|kt|c|cc|cpp|h|cs)"
+        r":\d+:\d+:\s*[Ee]rror\b"
+    ),
+    re.compile(r"\berror TS\d{4}\b"),
+    re.compile(r"\bnpm ERR!\b"),
+    re.compile(r"\bCommand failed with exit code\b"),
+    re.compile(r"Traceback \(most recent call last\)"),
+    re.compile(r"^\s*panic: ", re.M),
+    re.compile(r"\b[1-9]\d* failed\b"),
+)
+
+
+def _tool_result_masked_failures(event: dict[str, Any]) -> list[str]:
+    """回收被管道退出码掩盖的编译或测试失败，返回带文件路径的原文片段。"""
+    if event.get("type") != "user":
+        return []
+    message = event.get("message") or {}
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    excerpts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        if block.get("is_error"):
+            # 已经由 _tool_result_errors 单独记录，避免重复。
+            continue
+        raw = block.get("content")
+        text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        lines = str(text).splitlines()
+        for index, line in enumerate(lines):
+            if not any(pattern.search(line) for pattern in MASKED_FAILURE_RES):
+                continue
+            start = max(0, index - 2)
+            excerpts.append("\n".join(lines[start : index + 3])[:800])
+            break
+    return excerpts
+
+
 def process_evidence(side: str, trace_path: Path, expected_prompt: str, session_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     validation = validate_single_round(trace_path, expected_prompt=expected_prompt, expected_session_id=session_id)
     if not validation["ok"]:
@@ -105,27 +154,35 @@ def process_evidence(side: str, trace_path: Path, expected_prompt: str, session_
                     "artifact": None,
                 }
             )
-        for error in _tool_result_errors(event):
-            tool_errors.append({"eventIndex": index, "error": error})
-            evidence.append(
-                {
-                    "id": f"{side}-process-error-{index + 1:04d}",
-                    "side": side,
-                    "type": "process",
-                    "polarity": "negative",
-                    "text": "工具调用返回错误",
-                    "evaluationExcluded": _evaluation_excluded_noise(error),
-                    "trace": {
-                        "sessionId": session_id,
-                        "eventIndex": index,
-                        "eventUuid": str(event.get("uuid") or ""),
-                        "tracePath": str(trace_path.resolve()),
-                        "quote": error,
-                        "toolName": "",
-                    },
-                    "artifact": None,
-                }
-            )
+        error_groups = [
+            ("工具调用返回错误", _tool_result_errors(event)),
+            ("编译或测试失败（退出码被管道掩盖）", _tool_result_masked_failures(event)),
+        ]
+        error_seq = 0
+        for label, errors in error_groups:
+            for error in errors:
+                error_seq += 1
+                suffix = "" if error_seq == 1 else f"-m{error_seq}"
+                tool_errors.append({"eventIndex": index, "error": error, "maskedExitCode": label != "工具调用返回错误"})
+                evidence.append(
+                    {
+                        "id": f"{side}-process-error-{index + 1:04d}{suffix}",
+                        "side": side,
+                        "type": "process",
+                        "polarity": "negative",
+                        "text": label,
+                        "evaluationExcluded": _evaluation_excluded_noise(error),
+                        "trace": {
+                            "sessionId": session_id,
+                            "eventIndex": index,
+                            "eventUuid": str(event.get("uuid") or ""),
+                            "tracePath": str(trace_path.resolve()),
+                            "quote": error,
+                            "toolName": "",
+                        },
+                        "artifact": None,
+                    }
+                )
         if event.get("type") == "assistant" and _message_text(event.get("message") or {}):
             final_text = _message_text(event.get("message") or {})
     if final_text:

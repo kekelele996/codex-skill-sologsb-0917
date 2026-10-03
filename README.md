@@ -1,6 +1,6 @@
 # sologsb-0917
 
-全局版本号 `1.7.9`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
+全局版本号 `1.12.0`（唯一来源：根目录 `VERSION`，可用 `python3 scripts/sologsb.py --version` 读取）。
 
 0917 期 Pair-wise GSB 的可复用 Codex Skill。详见 `SKILL.md`。
 
@@ -10,6 +10,8 @@
 2. 先建立本地初始快照，再拉取 2 份隔离源码，目录固定为
    `source/candidates/candidate-1` 和 `source/candidates/candidate-2`；候选目录永不改名。
 3. `run --side both --candidates 2` 让两个固定模型候选在独立容器中并行无头执行；candidate-1 使用 `auto_model/urm` 映射 A，candidate-2 使用 `ark/urm-03` 映射 B；Base URL 取设备配置的 `claude.baseUrl`。
+   调度台「A / B 模型」里的 B 侧交替开关打开时，candidate-2 先用 A 侧模型 `auto_model/urm` 跑两次，之后与 `ark/urm-03` 交替（第 3 次 ark、第 4 次 auto_model，如此往复），
+   某次成功就以那次真正跑的模型交付，表单、Excel 和交付表里的 B 侧模型名按实际使用的模型如实填写；开关关闭时 B 侧所有尝试都只跑 `ark/urm-03`。
    每次启动容器都在主机级独占锁内预占名额，运行中容器与预占位合计不得超过设备配置
    `claude.maxContainers`（默认 4，绝对上限 8）；该值每个任务动态读取，排队时每 5 秒重读、按领号顺序放行，
    超限时排队等待释放。
